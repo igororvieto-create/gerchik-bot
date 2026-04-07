@@ -3,4 +3,3 @@ aiogram==2.25.2
 apscheduler==3.10.4
 aiohttp==3.9.1
 numpy==1.26.4
-magic-filter==1.0.12

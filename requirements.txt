@@ -1,5 +1,6 @@
-
-aiogram==2.25.2
+aiogram==3.7.0
 apscheduler==3.10.4
+aiohttp==3.9.5
 numpy==1.26.4
+pydantic-core==2.18.4
 

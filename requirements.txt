@@ -1,4 +1,0 @@
-aiogram==3.7.0
-apscheduler==3.10.4
-aiohttp==3.9.5
-numpy==1.26.4

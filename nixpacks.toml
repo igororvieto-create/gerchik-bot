@@ -1,0 +1,9 @@
+[phases.install]
+cmds = [
+  "pip install --upgrade pip",
+  "pip install pydantic-core==2.18.4 --no-build-isolation",
+  "pip install -r requirements.txt"
+]
+
+[start]
+cmd = "python main.py"

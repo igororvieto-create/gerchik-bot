@@ -4,7 +4,7 @@ from aiogram import Bot
 from core.config import cfg
 from core.state import Position, state
 from exchange.bingx import BingXClient
-from strategy.gerchik import Signal, analyze, parse_klines
+from strategy.gerchik import Signal, analyze parse_klines
 
 log = logging.getLogger("scanner")
 

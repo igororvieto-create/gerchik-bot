@@ -29,15 +29,25 @@ async def on_startup():
     dp["scanner"] = scanner
     dp["exchange"] = exchange
 
-    balance = await exchange.get_balance()
-    await bot.send_message(cfg.TELEGRAM_CHAT_ID,
-        f"✅ Герчик Бот запущен\n\nРежим: {cfg.MODE}\nБаланс: {balance}")
-    await scanner.update_pairs()
-    await scanner.scan_all()
+    try:
+        balance = await exchange.get_balance()
+        await bot.send_message(cfg.TELEGRAM_CHAT_ID,
+            f"✅ Герчик Бот запущен\n\nРежим: {cfg.MODE}\nБаланс: {balance}")
+    except Exception as e:
+        log.error(f"Startup notify error: {e}")
+
+    try:
+        await scanner.update_pairs()
+        await scanner.scan_all()
+    except Exception as e:
+        log.error(f"Startup scan error: {e}")
 
 async def main():
     register_handlers(dp)
-    await on_startup()
+    try:
+        await on_startup()
+    except Exception as e:
+        log.error(f"on_startup failed: {e}", exc_info=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

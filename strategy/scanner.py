@@ -4,7 +4,7 @@ from aiogram import Bot
 from core.config import cfg
 from core.state import Position, state
 from exchange.bingx import BingXClient
-from strategy.gerchik import Signal, analyze, parse_klines
+from strategy.strategy.gerchik import Signal, analyze, parse_klines
 
 
 log = logging.getLogger("scanner")
@@ -137,6 +137,11 @@ class Scanner:
             if qty <= 0: return
             await self.ex.close_position(pos.symbol, qty, pos.side)
             pos.qty -= qty; pos.tp2_hit = True
+            if pos.sl_order_id:
+                await self.ex.cancel_order(pos.symbol, pos.sl_order_id)
+                side = "BUY" if pos.side == "LONG" else "SELL"
+                r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, pos.sl)
+                pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
             await self._notify(f"✅ <b>{label}</b> | {pos.symbol} | Закрыто {int(pct*100)}%")
         except Exception as e:
             log.error(f"partial_close {pos.symbol}: {e}")
@@ -145,6 +150,13 @@ class Scanner:
         sl_hit  = (pos.side=="LONG" and price<=pos.sl)  or (pos.side=="SHORT" and price>=pos.sl)
         tp3_hit = (pos.side=="LONG" and price>=pos.tp3) or (pos.side=="SHORT" and price<=pos.tp3)
         if not sl_hit and not tp3_hit: return
+        try:
+            if sl_hit and pos.tp_order_id:
+                await self.ex.cancel_order(pos.symbol, pos.tp_order_id)
+            elif tp3_hit and pos.sl_order_id:
+                await self.ex.cancel_order(pos.symbol, pos.sl_order_id)
+        except Exception as e:
+            log.warning(f"cancel opposite order {pos.symbol}: {e}")
         pnl = (price-pos.entry)*pos.qty if pos.side=="LONG" else (pos.entry-price)*pos.qty
         state.total_pnl += pnl; state.day.pnl_usdt += pnl
         if pnl > 0:

@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime
 from aiogram import Dispatcher
+from aiogram.filters import Command
 from aiogram.types import Message
 from core.config import cfg
 from core.state import state
@@ -124,15 +125,15 @@ async def handle_misc(msg: Message):
         state.pending.pop(sym,None); await msg.answer(f"⏭ Пропущен: {sym}")
 
 def register_handlers(dp: Dispatcher):
-    dp.register_message_handler(cmd_status,   commands=["status"])
-    dp.register_message_handler(cmd_balance,  commands=["balance"])
-    dp.register_message_handler(cmd_pairs,    commands=["pairs"])
-    dp.register_message_handler(cmd_pause,    commands=["pause"])
-    dp.register_message_handler(cmd_resume,   commands=["resume"])
-    dp.register_message_handler(cmd_setmode,  commands=["setmode"])
-    dp.register_message_handler(cmd_setrisk,  commands=["setrisk"])
-    dp.register_message_handler(cmd_setlev,   commands=["setlev"])
-    dp.register_message_handler(cmd_scan,     commands=["scan"])
-    dp.register_message_handler(cmd_closeall, commands=["closeall"])
-    dp.register_message_handler(cmd_help,     commands=["help", "start"])
-    dp.register_message_handler(handle_misc)
+    dp.message.register(cmd_status,   Command("status"))
+    dp.message.register(cmd_balance,  Command("balance"))
+    dp.message.register(cmd_pairs,    Command("pairs"))
+    dp.message.register(cmd_pause,    Command("pause"))
+    dp.message.register(cmd_resume,   Command("resume"))
+    dp.message.register(cmd_setmode,  Command("setmode"))
+    dp.message.register(cmd_setrisk,  Command("setrisk"))
+    dp.message.register(cmd_setlev,   Command("setlev"))
+    dp.message.register(cmd_scan,     Command("scan"))
+    dp.message.register(cmd_closeall, Command("closeall"))
+    dp.message.register(cmd_help,     Command("help", "start"))
+    dp.message.register(handle_misc)

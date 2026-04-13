@@ -23,25 +23,20 @@ async def main():
     log.info(f"SECRET set: {bool(cfg.BINGX_SECRET)}")
     log.info(f"MODE: {cfg.MODE}")
 
-    log.info("Создаём Bot и Dispatcher...")
     bot = Bot(token=cfg.TELEGRAM_TOKEN)
     dp  = Dispatcher()
 
     try:
-        log.info("Удаляем вебхук...")
         await bot.delete_webhook(drop_pending_updates=True)
         log.info("Вебхук удалён")
     except Exception as e:
         log.warning(f"delete_webhook (non-fatal): {e}")
 
-    log.info("Регистрируем хендлеры...")
     register_handlers(dp)
 
-    log.info("Создаём Scanner и Exchange...")
     exchange = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
     scanner  = Scanner(exchange, bot)
 
-    log.info("Запускаем планировщик...")
     scheduler.add_job(scanner.scan_all,          "cron",     minute="*/15")
     scheduler.add_job(scanner.update_pairs,      "cron",     minute="0")
     scheduler.add_job(scanner.monitor_positions, "interval", seconds=30)
@@ -49,24 +44,27 @@ async def main():
     scheduler.start()
     log.info("Планировщик запущен")
 
-    try:
-        balance = await exchange.get_balance()
-        await bot.send_message(
-            cfg.TELEGRAM_CHAT_ID,
-            f"✅ Герчик Бот запущен\n\nРежим: {cfg.MODE}\nБаланс: {balance:.2f} USDT"
-        )
-        log.info(f"Стартовое сообщение отправлено. Баланс: {balance:.2f} USDT")
-    except Exception as e:
-        log.error(f"Startup notify error: {e}")
+    # Startup tasks run in background so polling starts immediately
+    async def startup_tasks():
+        try:
+            balance = await exchange.get_balance()
+            await bot.send_message(
+                cfg.TELEGRAM_CHAT_ID,
+                f"✅ Герчик Бот запущен\n\nРежим: {cfg.MODE}\nБаланс: {balance:.2f} USDT"
+            )
+            log.info(f"Стартовое сообщение отправлено. Баланс: {balance:.2f} USDT")
+        except Exception as e:
+            log.error(f"Startup notify error: {e}")
+        try:
+            await scanner.update_pairs()
+            await scanner.scan_all()
+        except Exception as e:
+            log.error(f"Startup scan error: {e}")
 
-    try:
-        await scanner.update_pairs()
-        await scanner.scan_all()
-    except Exception as e:
-        log.error(f"Startup scan error: {e}")
+    asyncio.create_task(startup_tasks())
 
     log.info("Запускаем polling...")
-    await dp.start_polling(bot, allowed_updates=["message"])
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     log.info("python main.py запущен")

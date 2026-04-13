@@ -4,10 +4,10 @@ from typing import List
 
 @dataclass
 class Config:
-    TELEGRAM_TOKEN:   str   = os.getenv("TELEGRAM_TOKEN", "")
-    TELEGRAM_CHAT_ID: str   = os.getenv("TELEGRAM_CHAT_ID", "")
-    BINGX_API_KEY:    str   = os.getenv("BINGX_API_KEY", "")
-    BINGX_SECRET:     str   = os.getenv("BINGX_SECRET", "")
+    TELEGRAM_TOKEN:   str   = os.getenv("TELEGRAM_TOKEN", "").strip()
+    TELEGRAM_CHAT_ID: str   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    BINGX_API_KEY:    str   = os.getenv("BINGX_API_KEY", "").strip()
+    BINGX_SECRET:     str   = os.getenv("BINGX_SECRET", "").strip()
     MODE:             str   = os.getenv("BOT_MODE", "auto")
     RISK_PER_TRADE:   float = float(os.getenv("RISK_PER_TRADE", "1.0"))
     MAX_DAILY_LOSS:   float = float(os.getenv("MAX_DAILY_LOSS", "2.0"))

@@ -79,12 +79,30 @@ class BingXClient:
     async def get_balance(self):
         data = await self._get("/openApi/swap/v2/user/balance", {}, signed=True)
         try:
-            for a in data["data"]["balance"]:
-                if a["asset"] == "USDT":
-                    return float(a["availableMargin"])
-        except:
-            pass
+            bal = data["data"]["balance"]
+            # BingX may return balance as a list or a single dict
+            if isinstance(bal, list):
+                for a in bal:
+                    if a.get("asset") == "USDT":
+                        return float(a["availableMargin"])
+            elif isinstance(bal, dict):
+                return float(bal.get("availableMargin", 0))
+        except Exception as e:
+            log.error(f"get_balance parse error: {e} | response: {data}")
         return 0.0
+
+    async def get_open_positions(self):
+        """Fetch all open positions directly from BingX."""
+        data = await self._get("/openApi/swap/v2/user/positions", {}, signed=True)
+        try:
+            positions = data.get("data", [])
+            if not isinstance(positions, list):
+                return []
+            # Filter positions with non-zero size
+            return [p for p in positions if float(p.get("positionAmt", 0)) != 0]
+        except Exception as e:
+            log.error(f"get_open_positions error: {e}")
+            return []
 
     async def place_order(self, symbol, side, qty, price=0, order_type="MARKET", position_side="LONG", stop_price=0, reduce_only=False):
         params = {"symbol": symbol, "side": side, "positionSide": position_side, "type": order_type, "quantity": qty}

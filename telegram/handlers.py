@@ -65,6 +65,31 @@ async def cmd_balance(msg: Message):
         f"💰 <b>{bal:.2f} USDT</b>\nСделок: {d.trades} | WR: {wr}%\nPnL: {'+' if d.pnl_usdt>0 else ''}{d.pnl_usdt:.2f} USDT\nИтого: {'+' if state.total_pnl>0 else ''}{state.total_pnl:.2f} USDT",
         parse_mode="HTML")
 
+async def cmd_settings(msg: Message):
+    if not _auth(msg): return
+    paused_str = ""
+    if state.day.paused_until:
+        from datetime import datetime
+        remaining = (state.day.paused_until - datetime.utcnow()).seconds // 60
+        paused_str = f"\n⏸ Пауза ещё <b>{remaining} мин</b>"
+    await msg.answer(
+        f"⚙️ <b>Настройки бота</b>\n\n"
+        f"🔧 Режим: <code>{cfg.MODE}</code>\n"
+        f"📊 Пар в списке: <code>{len(state.pairs)}</code>\n\n"
+        f"💰 Риск на сделку: <code>{cfg.RISK_PER_TRADE}%</code>\n"
+        f"⚡ Плечо: <code>x{cfg.LEVERAGE}</code>\n"
+        f"🎯 Мин. R/R: <code>1:{cfg.MIN_RR}</code>\n"
+        f"⭐ Мин. Score: <code>{cfg.MIN_SCORE}/100</code>\n\n"
+        f"🛡 Макс. потеря/день: <code>{cfg.MAX_DAILY_LOSS}%</code>\n"
+        f"📋 Макс. позиций: <code>{cfg.MAX_POSITIONS}</code>\n"
+        f"🔄 Макс. сделок/день: <code>{cfg.MAX_DAILY_TRADES}</code>\n\n"
+        f"📈 EMA D1: <code>{cfg.TREND_EMA_D1}</code> | H4: <code>{cfg.TREND_EMA_H4}</code>\n"
+        f"📦 Мин. объём: <code>{cfg.VOLUME_MULT}×</code> MA{cfg.VOLUME_MA_PERIOD}\n"
+        f"🔴 SL буфер: <code>{cfg.SL_BUFFER_PCT}%</code>"
+        f"{paused_str}",
+        parse_mode="HTML"
+    )
+
 async def cmd_pairs(msg: Message):
     if not _auth(msg): return
     n = len(state.pairs)
@@ -160,7 +185,17 @@ async def cmd_closeall(msg: Message):
 async def cmd_help(msg: Message):
     if not _auth(msg): return
     await msg.answer(
-        "<b>Команды:</b>\n/status /balance /pairs /scan\n/pause /resume\n/setmode auto|manual\n/setrisk 1.0\n/setlev 5\n/closeall",
+        "<b>Команды:</b>\n"
+        "/status — открытые позиции\n"
+        "/balance — баланс и статистика\n"
+        "/settings — текущие настройки\n"
+        "/pairs — список пар\n"
+        "/scan — ручной скан\n"
+        "/pause /resume — пауза/продолжить\n"
+        "/setmode auto|manual — режим\n"
+        "/setrisk 1.0 — риск %\n"
+        "/setlev 5 — плечо\n"
+        "/closeall — закрыть все позиции",
         parse_mode="HTML")
 
 async def handle_misc(msg: Message):
@@ -184,6 +219,7 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_ping,     Command("ping"))
     dp.message.register(cmd_status,   Command("status"))
     dp.message.register(cmd_balance,  Command("balance"))
+    dp.message.register(cmd_settings, Command("settings"))
     dp.message.register(cmd_pairs,    Command("pairs"))
     dp.message.register(cmd_pause,    Command("pause"))
     dp.message.register(cmd_resume,   Command("resume"))

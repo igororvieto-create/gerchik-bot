@@ -1,16 +1,29 @@
 import asyncio
 import logging
 from datetime import datetime
-from aiogram import Dispatcher
+
+from aiogram import Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+)
+
 from core.config import cfg
 from core.state import state
 
 log = logging.getLogger("handlers")
 
+
 def _auth(msg: Message) -> bool:
     return str(msg.chat.id) == str(cfg.TELEGRAM_CHAT_ID)
+
+
+def _auth_cb(cb: CallbackQuery) -> bool:
+    return str(cb.message.chat.id) == str(cfg.TELEGRAM_CHAT_ID)
+
 
 def main_keyboard():
     return ReplyKeyboardMarkup(
@@ -18,6 +31,7 @@ def main_keyboard():
             [KeyboardButton(text="📊 Статус"),     KeyboardButton(text="💰 Баланс")],
             [KeyboardButton(text="⚙️ Настройки"),  KeyboardButton(text="📋 Пары")],
             [KeyboardButton(text="🔍 Скан"),        KeyboardButton(text="📈 Отчёт")],
+            [KeyboardButton(text="📜 История"),     KeyboardButton(text="🏆 Топ пары")],
             [KeyboardButton(text="⏸ Пауза"),       KeyboardButton(text="▶️ Продолжить")],
             [KeyboardButton(text="🤖 Авто"),        KeyboardButton(text="✋ Ручной")],
             [KeyboardButton(text="❌ Закрыть всё")],
@@ -26,18 +40,29 @@ def main_keyboard():
         persistent=True,
     )
 
+
+# ------------------------------------------------------------------ /ping
+
 async def cmd_ping(msg: Message):
     await msg.answer("🟢 Бот работает", reply_markup=main_keyboard())
 
+
+# ------------------------------------------------------------------ /start /help
+
 async def cmd_help(msg: Message):
-    if not _auth(msg): return
+    if not _auth(msg):
+        return
     await msg.answer(
-        "<b>Команды:</b>\n"
+        "<b>Команды:</b>\n\n"
         "/status — открытые позиции\n"
         "/balance — баланс и статистика\n"
         "/pairs — торговые пары\n"
-        "/scan — запустить сканирование\n"
         "/settings — все настройки\n"
+        "/scan — запустить сканирование\n"
+        "/report — отчёт за сегодня\n"
+        "/history — история сделок\n"
+        "/top — топ пар по объёму\n"
+        "/setpairs BTC-USDT,ETH-USDT — задать пары\n"
         "/pause — пауза\n"
         "/resume — возобновить\n"
         "/setmode auto|manual — режим\n"
@@ -48,14 +73,18 @@ async def cmd_help(msg: Message):
         reply_markup=main_keyboard(),
     )
 
+
+# ------------------------------------------------------------------ /status
+
 async def cmd_status(msg: Message):
-    if not _auth(msg): return
+    if not _auth(msg):
+        return
     from exchange.bingx import BingXClient
     ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
     try:
         live = await ex.get_open_positions()
     except Exception as e:
-        log.error(f"cmd_status get_open_positions: {e}")
+        log.error(f"cmd_status: {e}")
         live = []
     finally:
         await ex.close()
@@ -67,39 +96,57 @@ async def cmd_status(msg: Message):
     text = "📊 <b>Открытые позиции:</b>\n\n"
     if live:
         for p in live:
-            sym  = p.get("symbol", "?")
-            side = p.get("positionSide", "?")
-            amt  = float(p.get("positionAmt", 0))
-            eprice = float(p.get("avgPrice", 0))
-            upnl = float(p.get("unrealizedProfit", 0))
-            sign = "+" if upnl >= 0 else ""
-            text += f"<b>{sym}</b> {side}\nКол-во: {abs(amt)}\nВход: <code>{eprice:.4f}</code>\nPnL: {sign}{upnl:.2f} USDT\n\n"
+            sym   = p.get("symbol", "?")
+            side  = p.get("positionSide", "?")
+            amt   = abs(float(p.get("positionAmt", 0)))
+            ep    = float(p.get("avgPrice", 0))
+            upnl  = float(p.get("unrealizedProfit", 0))
+            sign  = "+" if upnl >= 0 else ""
+            emoji = "🟢" if upnl >= 0 else "🔴"
+            text += (
+                f"<b>{sym}</b> {side}\n"
+                f"Кол-во: {amt}\n"
+                f"Вход: <code>{ep:.4f}</code>\n"
+                f"PnL: {emoji} <code>{sign}{upnl:.2f} USDT</code>\n\n"
+            )
     else:
         for sym, p in state.positions.items():
-            text += f"<b>{sym}</b> {p.side} {'✅BE' if p.be_moved else '⏳'}\nВход: <code>{p.entry:.4f}</code> SL: <code>{p.sl:.4f}</code>\nTP3: <code>{p.tp3:.4f}</code>\n\n"
+            text += (
+                f"<b>{sym}</b> {p.side} {'✅BE' if p.be_moved else '⏳'}\n"
+                f"Вход: <code>{p.entry:.4f}</code>  SL: <code>{p.sl:.4f}</code>\n"
+                f"TP3: <code>{p.tp3:.4f}</code>\n\n"
+            )
 
     await msg.answer(text, parse_mode="HTML", reply_markup=main_keyboard())
 
+
+# ------------------------------------------------------------------ /balance
+
 async def cmd_balance(msg: Message):
-    if not _auth(msg): return
+    if not _auth(msg):
+        return
     from exchange.bingx import BingXClient
-    ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+    ex  = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
     bal = await ex.get_balance()
     await ex.close()
     state.current_balance = bal
-    d = state.day
+    d  = state.day
     wr = round(d.wins / d.trades * 100) if d.trades else 0
     await msg.answer(
         f"💰 <b>{bal:.2f} USDT</b>\n"
-        f"Сделок: {d.trades} | WR: {wr}%\n"
+        f"Сделок сегодня: {d.trades}  |  WR: {wr}%\n"
         f"PnL сегодня: {'+' if d.pnl_usdt >= 0 else ''}{d.pnl_usdt:.2f} USDT\n"
         f"Итого: {'+' if state.total_pnl >= 0 else ''}{state.total_pnl:.2f} USDT",
         parse_mode="HTML",
         reply_markup=main_keyboard(),
     )
 
+
+# ------------------------------------------------------------------ /pairs
+
 async def cmd_pairs(msg: Message):
-    if not _auth(msg): return
+    if not _auth(msg):
+        return
     n = len(state.pairs)
     await msg.answer(
         f"📋 Пар: <b>{n}</b>\n{' | '.join(state.pairs[:15])}{'...' if n > 15 else ''}",
@@ -107,8 +154,12 @@ async def cmd_pairs(msg: Message):
         reply_markup=main_keyboard(),
     )
 
+
+# ------------------------------------------------------------------ /settings
+
 async def cmd_settings(msg: Message):
-    if not _auth(msg): return
+    if not _auth(msg):
+        return
     status = "⏸ ПАУЗА" if state.paused else "▶️ Работает"
     await msg.answer(
         f"⚙️ <b>Настройки бота:</b>\n\n"
@@ -123,6 +174,7 @@ async def cmd_settings(msg: Message):
         f"Макс. убыток/день: <code>{cfg.MAX_DAILY_LOSS}%</code>\n"
         f"Объём (мульт.): <code>{cfg.VOLUME_MULT}x</code>\n"
         f"SL буфер: <code>{cfg.SL_BUFFER_PCT}%</code>\n"
+        f"Трейлинг стоп: <code>{cfg.TRAIL_PCT}%</code>\n"
         f"Фандинг макс LONG: <code>{cfg.FUNDING_MAX_LONG}%</code>\n"
         f"Фандинг макс SHORT: <code>{cfg.FUNDING_MAX_SHORT}%</code>\n\n"
         f"<i>/setmode auto|manual\n/setrisk 1.0\n/setlev 5</i>",
@@ -130,73 +182,183 @@ async def cmd_settings(msg: Message):
         reply_markup=main_keyboard(),
     )
 
+
+# ------------------------------------------------------------------ /report
+
 async def cmd_report(msg: Message):
-    if not _auth(msg): return
-    d = state.day
+    if not _auth(msg):
+        return
+    d  = state.day
     wr = round(d.wins / d.trades * 100) if d.trades else 0
-    losses = d.trades - d.wins
     await msg.answer(
         f"📈 <b>Статистика за сегодня:</b>\n\n"
         f"Сделок: {d.trades}\n"
-        f"Прибыльных: {d.wins} | Убыточных: {losses}\n"
+        f"Прибыльных: {d.wins}  |  Убыточных: {d.losses}\n"
         f"Винрейт: {wr}%\n"
         f"PnL: {'+' if d.pnl_usdt >= 0 else ''}{d.pnl_usdt:.2f} USDT\n"
-        f"Серия потерь: {state.loss_streak if hasattr(state, 'loss_streak') else 0}",
+        f"Серия потерь: {d.loss_streak}",
         parse_mode="HTML",
         reply_markup=main_keyboard(),
     )
 
+
+# ------------------------------------------------------------------ /history
+
+async def cmd_history(msg: Message):
+    if not _auth(msg):
+        return
+    from core.db import get_history, get_stats
+    rows  = get_history(15)
+    stats = get_stats()
+    if not rows:
+        await msg.answer("📜 История сделок пуста", reply_markup=main_keyboard())
+        return
+    lines = ["📜 <b>Последние сделки:</b>\n"]
+    for sym, side, entry, exit_p, pnl, result, closed_at in rows:
+        icon = "✅" if result == "WIN" else "❌"
+        dt   = closed_at[:16].replace("T", " ") if closed_at else "?"
+        sign = "+" if pnl >= 0 else ""
+        lines.append(
+            f"{icon} <b>{sym}</b> {side}  {sign}{pnl:.2f}$\n"
+            f"   {entry:.4f} → {exit_p:.4f}  <i>{dt}</i>"
+        )
+    wr = stats["wr"]
+    lines.append(
+        f"\n<b>Всего:</b> {stats['total']} сделок  |  WR: {wr}%\n"
+        f"Общий PnL: {'+' if stats['pnl'] >= 0 else ''}{stats['pnl']:.2f} USDT"
+    )
+    await msg.answer("\n".join(lines), parse_mode="HTML", reply_markup=main_keyboard())
+
+
+# ------------------------------------------------------------------ /top
+
+async def cmd_top(msg: Message):
+    if not _auth(msg):
+        return
+    await msg.answer("⏳ Получаю топ пары...", reply_markup=main_keyboard())
+    from exchange.bingx import BingXClient
+    ex   = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+    syms = await ex.get_top_symbols(20)
+    await ex.close()
+    lines = ["🏆 <b>Топ 20 пар по объёму:</b>\n"]
+    for i, s in enumerate(syms[:20], 1):
+        in_bl = "🚫" if s in cfg.BLACKLIST else ""
+        lines.append(f"{i:2}. {s} {in_bl}")
+    await msg.answer("\n".join(lines), parse_mode="HTML", reply_markup=main_keyboard())
+
+
+# ------------------------------------------------------------------ /setpairs
+
+async def cmd_setpairs(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split(maxsplit=1)
+    if len(args) < 2 or not args[1].strip():
+        current = ", ".join(state.pairs[:10]) or "нет"
+        await msg.answer(
+            f"📋 Текущие пары (первые 10): {current}\n\n"
+            f"Чтобы задать свои пары:\n"
+            f"<code>/setpairs BTC-USDT,ETH-USDT,SOL-USDT</code>\n\n"
+            f"Чтобы сбросить к авто:\n"
+            f"<code>/setpairs auto</code>",
+            parse_mode="HTML",
+        )
+        return
+    raw = args[1].strip()
+    if raw.lower() == "auto":
+        cfg.WHITELIST = []
+        from exchange.bingx import BingXClient
+        from strategy.scanner import Scanner
+        ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+        await Scanner(ex, msg.bot).update_pairs()
+        await ex.close()
+        await msg.answer(f"✅ Режим авто, пар: {len(state.pairs)}", reply_markup=main_keyboard())
+    else:
+        pairs = [p.strip().upper() for p in raw.split(",") if p.strip()]
+        cfg.WHITELIST = pairs
+        state.pairs   = pairs
+        await msg.answer(
+            f"✅ Установлено {len(pairs)} пар:\n{', '.join(pairs)}",
+            reply_markup=main_keyboard(),
+        )
+
+
+# ------------------------------------------------------------------ controls
+
 async def cmd_pause(msg: Message):
-    if not _auth(msg): return
+    if not _auth(msg):
+        return
     state.paused = True
-    await msg.answer("⏸ Торговля на паузе.\n/resume — возобновить", reply_markup=main_keyboard())
+    await msg.answer("⏸ Торговля на паузе. /resume — возобновить", reply_markup=main_keyboard())
+
 
 async def cmd_resume(msg: Message):
-    if not _auth(msg): return
-    state.paused = False
+    if not _auth(msg):
+        return
+    state.paused           = False
     state.day.paused_until = None
     await msg.answer("▶️ Торговля возобновлена", reply_markup=main_keyboard())
 
+
 async def cmd_setmode(msg: Message):
-    if not _auth(msg): return
+    if not _auth(msg):
+        return
     args = msg.text.split()
     if len(args) < 2 or args[1] not in ("auto", "manual"):
-        await msg.answer("/setmode auto | /setmode manual"); return
+        await msg.answer("/setmode auto | /setmode manual")
+        return
     cfg.MODE = args[1]
-    await msg.answer(f"✅ Режим: <code>{cfg.MODE}</code>", parse_mode="HTML", reply_markup=main_keyboard())
-
-async def cmd_setrisk(msg: Message):
-    if not _auth(msg): return
-    args = msg.text.split()
-    if len(args) < 2:
-        await msg.answer(f"Текущий риск: {cfg.RISK_PER_TRADE}%\nПример: /setrisk 0.5"); return
-    try:
-        v = float(args[1])
-        if not 0.1 <= v <= 3.0: raise ValueError
-        cfg.RISK_PER_TRADE = v
-        await msg.answer(f"✅ Риск: <code>{v}%</code>", parse_mode="HTML", reply_markup=main_keyboard())
-    except:
-        await msg.answer("Введи число от 0.1 до 3.0")
-
-async def cmd_setlev(msg: Message):
-    if not _auth(msg): return
-    args = msg.text.split()
-    if len(args) < 2:
-        await msg.answer(f"Текущее плечо: x{cfg.LEVERAGE}\nПример: /setlev 10"); return
-    try:
-        v = int(args[1])
-        if not 1 <= v <= 50: raise ValueError
-        cfg.LEVERAGE = v
-        await msg.answer(f"✅ Плечо: <code>x{v}</code>", parse_mode="HTML", reply_markup=main_keyboard())
-    except:
-        await msg.answer("Введи число от 1 до 50")
-
-async def cmd_scan(msg: Message):
-    if not _auth(msg): return
-    await msg.answer(f"🔍 Сканирую {len(state.pairs)} пар... (результат придёт отдельным сообщением)",
+    await msg.answer(f"✅ Режим: <code>{cfg.MODE}</code>", parse_mode="HTML",
                      reply_markup=main_keyboard())
 
-    async def _do_scan():
+
+async def cmd_setrisk(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        await msg.answer(f"Текущий риск: {cfg.RISK_PER_TRADE}%\nПример: /setrisk 0.5")
+        return
+    try:
+        v = float(args[1])
+        if not 0.1 <= v <= 3.0:
+            raise ValueError
+        cfg.RISK_PER_TRADE = v
+        await msg.answer(f"✅ Риск: <code>{v}%</code>", parse_mode="HTML",
+                         reply_markup=main_keyboard())
+    except Exception:
+        await msg.answer("Введи число от 0.1 до 3.0")
+
+
+async def cmd_setlev(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        await msg.answer(f"Текущее плечо: x{cfg.LEVERAGE}\nПример: /setlev 10")
+        return
+    try:
+        v = int(args[1])
+        if not 1 <= v <= 50:
+            raise ValueError
+        cfg.LEVERAGE = v
+        await msg.answer(f"✅ Плечо: <code>x{v}</code>", parse_mode="HTML",
+                         reply_markup=main_keyboard())
+    except Exception:
+        await msg.answer("Введи число от 1 до 50")
+
+
+# ------------------------------------------------------------------ /scan
+
+async def cmd_scan(msg: Message):
+    if not _auth(msg):
+        return
+    await msg.answer(
+        f"🔍 Сканирую {len(state.pairs)} пар...\n(результат придёт отдельным сообщением)",
+        reply_markup=main_keyboard(),
+    )
+
+    async def _do():
         try:
             from exchange.bingx import BingXClient
             from strategy.scanner import Scanner
@@ -204,33 +366,37 @@ async def cmd_scan(msg: Message):
             await Scanner(ex, msg.bot).scan_all()
             await ex.close()
         except Exception as e:
-            log.error(f"cmd_scan bg error: {e}")
+            log.error(f"cmd_scan bg: {e}")
 
-    asyncio.create_task(_do_scan())
+    asyncio.create_task(_do())
+
+
+# ------------------------------------------------------------------ /closeall
 
 async def cmd_closeall(msg: Message):
-    if not _auth(msg): return
+    if not _auth(msg):
+        return
     from exchange.bingx import BingXClient
-    ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+    ex   = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
     live = await ex.get_open_positions()
     if not live and not state.positions:
         await ex.close()
         await msg.answer("Нет открытых позиций", reply_markup=main_keyboard())
         return
     closed = []
-    if live:
-        for p in live:
-            sym  = p.get("symbol")
-            side = p.get("positionSide", "LONG")
-            amt  = abs(float(p.get("positionAmt", 0)))
-            if amt == 0: continue
-            try:
-                await ex.close_position(sym, amt, side)
-                state.positions.pop(sym, None)
-                closed.append(sym)
-            except Exception as e:
-                log.error(f"closeall {sym}: {e}")
-    else:
+    for p in live:
+        sym  = p.get("symbol")
+        side = p.get("positionSide", "LONG")
+        amt  = abs(float(p.get("positionAmt", 0)))
+        if amt == 0:
+            continue
+        try:
+            await ex.close_position(sym, amt, side)
+            state.positions.pop(sym, None)
+            closed.append(sym)
+        except Exception as e:
+            log.error(f"closeall {sym}: {e}")
+    if not live:
         for sym, p in list(state.positions.items()):
             try:
                 await ex.close_position(sym, p.qty, p.side)
@@ -239,13 +405,61 @@ async def cmd_closeall(msg: Message):
             except Exception as e:
                 log.error(f"closeall {sym}: {e}")
     await ex.close()
-    await msg.answer(f"✅ Закрыто: {', '.join(closed) or 'ничего'}", reply_markup=main_keyboard())
+    await msg.answer(
+        f"✅ Закрыто: {', '.join(closed) or 'ничего'}",
+        reply_markup=main_keyboard(),
+    )
+
+
+# ------------------------------------------------------------------ inline callbacks (manual mode)
+
+async def handle_signal_callback(cb: CallbackQuery):
+    if not _auth_cb(cb):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    action, symbol = cb.data.split(":", 1)
+    if action == "skip":
+        state.pending.pop(symbol, None)
+        await cb.message.edit_caption(
+            caption=(cb.message.caption or "") + "\n\n⏭ <b>Пропущено</b>",
+            parse_mode="HTML",
+        )
+        await cb.answer("Пропущено")
+        return
+
+    # confirm
+    if symbol not in state.pending:
+        await cb.answer("Сигнал уже не актуален", show_alert=True)
+        return
+    pend = state.pending[symbol]
+    if datetime.utcnow() > pend["expires"]:
+        state.pending.pop(symbol, None)
+        await cb.answer("⏰ Время истекло", show_alert=True)
+        return
+
+    await cb.message.edit_caption(
+        caption=(cb.message.caption or "") + "\n\n⏳ <b>Входим...</b>",
+        parse_mode="HTML",
+    )
+    await cb.answer("Входим...")
+
+    try:
+        from exchange.bingx import BingXClient
+        from strategy.scanner import Scanner
+        ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+        await Scanner(ex, cb.message.bot)._enter(pend["signal"], confirmed=True)
+        await ex.close()
+    except Exception as e:
+        log.error(f"confirm callback {symbol}: {e}")
+
+
+# ------------------------------------------------------------------ misc (keyboard buttons + /confirm /skip)
 
 async def handle_misc(msg: Message):
-    if not _auth(msg): return
+    if not _auth(msg):
+        return
     text = msg.text or ""
 
-    # Handle keyboard button presses
     btn_map = {
         "📊 Статус":      cmd_status,
         "💰 Баланс":      cmd_balance,
@@ -253,42 +467,51 @@ async def handle_misc(msg: Message):
         "📋 Пары":        cmd_pairs,
         "🔍 Скан":        cmd_scan,
         "📈 Отчёт":       cmd_report,
+        "📜 История":     cmd_history,
+        "🏆 Топ пары":    cmd_top,
         "⏸ Пауза":       cmd_pause,
         "▶️ Продолжить": cmd_resume,
-        "🤖 Авто":        None,
-        "✋ Ручной":      None,
         "❌ Закрыть всё": cmd_closeall,
     }
     if text in btn_map:
-        fn = btn_map[text]
-        if fn:
-            await fn(msg)
-        elif text == "🤖 Авто":
-            cfg.MODE = "auto"
-            await msg.answer("✅ Режим: <code>auto</code>", parse_mode="HTML", reply_markup=main_keyboard())
-        elif text == "✋ Ручной":
-            cfg.MODE = "manual"
-            await msg.answer("✅ Режим: <code>manual</code>", parse_mode="HTML", reply_markup=main_keyboard())
+        await btn_map[text](msg)
         return
 
-    # Handle confirm/skip commands
+    if text == "🤖 Авто":
+        cfg.MODE = "auto"
+        await msg.answer("✅ Режим: <code>auto</code>", parse_mode="HTML",
+                         reply_markup=main_keyboard())
+        return
+    if text == "✋ Ручной":
+        cfg.MODE = "manual"
+        await msg.answer("✅ Режим: <code>manual</code>", parse_mode="HTML",
+                         reply_markup=main_keyboard())
+        return
+
     if text.startswith("/confirm_"):
         sym = text.replace("/confirm_", "").replace("_", "-").upper()
         if sym not in state.pending:
-            await msg.answer(f"Сигнал {sym} не найден"); return
+            await msg.answer(f"Сигнал {sym} не найден")
+            return
         pend = state.pending[sym]
         if datetime.utcnow() > pend["expires"]:
             state.pending.pop(sym, None)
-            await msg.answer("⏰ Время подтверждения истекло"); return
+            await msg.answer("⏰ Время подтверждения истекло")
+            return
         from exchange.bingx import BingXClient
         from strategy.scanner import Scanner
         ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
         await Scanner(ex, msg.bot)._enter(pend["signal"], confirmed=True)
         await ex.close()
-    elif text.startswith("/skip_"):
+        return
+
+    if text.startswith("/skip_"):
         sym = text.replace("/skip_", "").replace("_", "-").upper()
         state.pending.pop(sym, None)
         await msg.answer(f"⏭ Пропущен: {sym}")
+
+
+# ------------------------------------------------------------------ register
 
 def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_ping,     Command("ping"))
@@ -298,6 +521,9 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_pairs,    Command("pairs"))
     dp.message.register(cmd_settings, Command("settings"))
     dp.message.register(cmd_report,   Command("report"))
+    dp.message.register(cmd_history,  Command("history"))
+    dp.message.register(cmd_top,      Command("top"))
+    dp.message.register(cmd_setpairs, Command("setpairs"))
     dp.message.register(cmd_pause,    Command("pause"))
     dp.message.register(cmd_resume,   Command("resume"))
     dp.message.register(cmd_setmode,  Command("setmode"))
@@ -306,3 +532,7 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_scan,     Command("scan"))
     dp.message.register(cmd_closeall, Command("closeall"))
     dp.message.register(handle_misc)
+    dp.callback_query.register(
+        handle_signal_callback,
+        F.data.startswith("confirm:") | F.data.startswith("skip:"),
+    )

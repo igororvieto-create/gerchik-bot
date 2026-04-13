@@ -39,5 +39,7 @@ class Config:
     SCAN_H1_INTERVAL_MIN: int   = int(os.getenv("SCAN_H1_INTERVAL_MIN", "5").strip())
     SCAN_BATCH_SIZE:      int   = int(os.getenv("SCAN_BATCH_SIZE", "10").strip())
     SCAN_BATCH_DELAY:     float = float(os.getenv("SCAN_BATCH_DELAY", "1.0").strip())
+    # Trailing stop: move SL this % behind the peak price (after breakeven)
+    TRAIL_PCT:            float = float(os.getenv("TRAIL_PCT", "1.0").strip())
 
 cfg = Config()

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from core.config import cfg
 from strategy.scanner import Scanner
@@ -16,8 +17,8 @@ async def main():
     from aiogram import Bot, Dispatcher
 
     log.info("=== Герчик Бот стартует ===")
-    log.info(f"TOKEN  set: {bool(cfg.TELEGRAM_TOKEN)}")
-    log.info(f"CHATID set: {bool(cfg.TELEGRAM_CHAT_ID)} ({cfg.TELEGRAM_CHAT_ID})")
+    log.info(f"TOKEN  set: {bool(cfg.TELEGRAM_TOKEN)} len={len(cfg.TELEGRAM_TOKEN)}")
+    log.info(f"CHATID set: {cfg.TELEGRAM_CHAT_ID!r}")
     log.info(f"APIKEY set: {bool(cfg.BINGX_API_KEY)}")
     log.info(f"SECRET set: {bool(cfg.BINGX_SECRET)}")
     log.info(f"MODE: {cfg.MODE}")
@@ -26,9 +27,12 @@ async def main():
     bot = Bot(token=cfg.TELEGRAM_TOKEN)
     dp  = Dispatcher()
 
-    log.info("Удаляем вебхук и очищаем очередь обновлений...")
-    await bot.delete_webhook(drop_pending_updates=True)
-    log.info("Вебхук удалён, очередь очищена")
+    try:
+        log.info("Удаляем вебхук...")
+        await bot.delete_webhook(drop_pending_updates=True)
+        log.info("Вебхук удалён")
+    except Exception as e:
+        log.warning(f"delete_webhook (non-fatal): {e}")
 
     log.info("Регистрируем хендлеры...")
     register_handlers(dp)
@@ -47,8 +51,10 @@ async def main():
 
     try:
         balance = await exchange.get_balance()
-        await bot.send_message(cfg.TELEGRAM_CHAT_ID,
-            f"✅ Герчик Бот запущен\n\nРежим: {cfg.MODE}\nБаланс: {balance:.2f} USDT")
+        await bot.send_message(
+            cfg.TELEGRAM_CHAT_ID,
+            f"✅ Герчик Бот запущен\n\nРежим: {cfg.MODE}\nБаланс: {balance:.2f} USDT"
+        )
         log.info(f"Стартовое сообщение отправлено. Баланс: {balance:.2f} USDT")
     except Exception as e:
         log.error(f"Startup notify error: {e}")
@@ -60,8 +66,14 @@ async def main():
         log.error(f"Startup scan error: {e}")
 
     log.info("Запускаем polling...")
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, allowed_updates=["message"])
 
 if __name__ == "__main__":
     log.info("python main.py запущен")
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        log.info("Остановлен вручную")
+    except Exception as e:
+        log.critical(f"FATAL: {e}", exc_info=True)
+        sys.exit(1)

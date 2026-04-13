@@ -23,18 +23,41 @@ async def cmd_ping(msg: Message):
 
 async def cmd_status(msg: Message):
     if not _auth(msg): return
-    if not state.positions:
-        await msg.answer("📭 Нет позиций"); return
-    text = "📊 <b>Позиции:</b>\n\n"
-    for sym, p in state.positions.items():
-        text += f"<b>{sym}</b> {p.side} {'✅BE' if p.be_moved else '⏳'}\nВход: <code>{p.entry:.4f}</code> SL: <code>{p.sl:.4f}</code>\nTP3: <code>{p.tp3:.4f}</code>\n\n"
+    from exchange.bingx import BingXClient
+    ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+    try:
+        positions = await ex.get_open_positions()
+    except Exception as e:
+        positions = []
+        log.error(f"get_open_positions: {e}")
+    finally:
+        await ex.close()
+
+    if not positions:
+        await msg.answer("📭 Нет открытых позиций на BingX")
+        return
+
+    text = "📊 <b>Позиции на BingX:</b>\n\n"
+    for p in positions:
+        sym   = p.get("symbol", "?")
+        side  = p.get("positionSide", "?")
+        amt   = float(p.get("positionAmt", 0))
+        entry = float(p.get("avgPrice", 0))
+        pnl   = float(p.get("unrealizedProfit", 0))
+        margin= float(p.get("initialMargin", 0))
+        lev   = p.get("leverage", cfg.LEVERAGE)
+        text += (f"<b>{sym}</b> {side}\n"
+                 f"Объём: <code>{amt}</code> | Вход: <code>{entry:.4f}</code>\n"
+                 f"Маржа: <code>{margin:.2f} USDT</code> x{lev}\n"
+                 f"PnL: <code>{'+'if pnl>=0 else ''}{pnl:.2f} USDT</code>\n\n")
     await msg.answer(text, parse_mode="HTML")
 
 async def cmd_balance(msg: Message):
     if not _auth(msg): return
     from exchange.bingx import BingXClient
     ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-    bal = await ex.get_balance(); await ex.close()
+    bal = await ex.get_balance()
+    await ex.close()
     state.current_balance = bal
     d = state.day
     wr = round(d.wins/d.trades*100) if d.trades else 0
@@ -99,8 +122,7 @@ async def cmd_scan(msg: Message):
             from exchange.bingx import BingXClient
             from strategy.scanner import Scanner
             ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-            scanner = Scanner(ex, msg.bot)
-            await scanner.scan_all()
+            await Scanner(ex, msg.bot).scan_all()
             await ex.close()
         except Exception as e:
             log.error(f"cmd_scan bg error: {e}")
@@ -109,15 +131,29 @@ async def cmd_scan(msg: Message):
 
 async def cmd_closeall(msg: Message):
     if not _auth(msg): return
-    if not state.positions: await msg.answer("Нет позиций"); return
     from exchange.bingx import BingXClient
     ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+    try:
+        positions = await ex.get_open_positions()
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка получения позиций: {e}")
+        await ex.close()
+        return
+    if not positions:
+        await msg.answer("Нет открытых позиций")
+        await ex.close()
+        return
     closed = []
-    for sym, p in list(state.positions.items()):
+    for p in positions:
+        sym  = p.get("symbol")
+        amt  = float(p.get("positionAmt", 0))
+        side = p.get("positionSide", "LONG")
         try:
-            await ex.close_position(sym, p.qty, p.side)
-            del state.positions[sym]; closed.append(sym)
-        except Exception as e: log.error(f"closeall {sym}: {e}")
+            await ex.close_position(sym, abs(amt), side)
+            closed.append(sym)
+            state.positions.pop(sym, None)
+        except Exception as e:
+            log.error(f"closeall {sym}: {e}")
     await ex.close()
     await msg.answer(f"✅ Закрыто: {', '.join(closed) or 'ничего'}")
 

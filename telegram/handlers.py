@@ -3,7 +3,7 @@ import logging
 from datetime import datetime
 from aiogram import Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from core.config import cfg
 from core.state import state
 
@@ -15,10 +15,32 @@ def _auth(msg: Message) -> bool:
         log.warning(f"Auth failed: msg.chat.id={msg.chat.id}, cfg={cfg.TELEGRAM_CHAT_ID!r}")
     return result
 
+def main_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📊 Статус"),    KeyboardButton(text="💰 Баланс")],
+            [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📋 Пары")],
+            [KeyboardButton(text="🔍 Скан"),       KeyboardButton(text="📈 Отчёт")],
+            [KeyboardButton(text="⏸ Пауза"),      KeyboardButton(text="▶️ Продолжить")],
+            [KeyboardButton(text="🤖 Авто"),       KeyboardButton(text="✋ Ручной")],
+            [KeyboardButton(text="❌ Закрыть всё")],
+        ],
+        resize_keyboard=True,
+        persistent=True
+    )
+
 async def cmd_ping(msg: Message):
     await msg.answer(
         f"🏓 Pong!\nВаш chat ID: <code>{msg.chat.id}</code>\nНастроенный: <code>{cfg.TELEGRAM_CHAT_ID}</code>",
         parse_mode="HTML"
+    )
+
+async def cmd_start(msg: Message):
+    if not _auth(msg): return
+    await msg.answer(
+        "👋 <b>Герчик Бот</b> — используй кнопки ниже",
+        parse_mode="HTML",
+        reply_markup=main_keyboard()
     )
 
 async def cmd_status(msg: Message):
@@ -69,8 +91,7 @@ async def cmd_settings(msg: Message):
     if not _auth(msg): return
     paused_str = ""
     if state.day.paused_until:
-        from datetime import datetime
-        remaining = (state.day.paused_until - datetime.utcnow()).seconds // 60
+        remaining = max(0, int((state.day.paused_until - datetime.utcnow()).total_seconds() // 60))
         paused_str = f"\n⏸ Пауза ещё <b>{remaining} мин</b>"
     await msg.answer(
         f"⚙️ <b>Настройки бота</b>\n\n"
@@ -98,7 +119,7 @@ async def cmd_pairs(msg: Message):
 async def cmd_pause(msg: Message):
     if not _auth(msg): return
     state.paused = True
-    await msg.answer("⏸ Пауза. /resume — возобновить")
+    await msg.answer("⏸ Пауза. Нажми ▶️ Продолжить для возобновления.")
 
 async def cmd_resume(msg: Message):
     if not _auth(msg): return
@@ -107,10 +128,18 @@ async def cmd_resume(msg: Message):
 
 async def cmd_setmode(msg: Message):
     if not _auth(msg): return
-    args = msg.text.split()
-    if len(args)<2 or args[1] not in ("auto","manual"):
+    args = msg.text.split() if msg.text.startswith("/") else []
+    if len(args) >= 2:
+        mode = args[1]
+    elif "авто" in (msg.text or "").lower() or "auto" in (msg.text or "").lower():
+        mode = "auto"
+    elif "ручной" in (msg.text or "").lower() or "manual" in (msg.text or "").lower():
+        mode = "manual"
+    else:
         await msg.answer("/setmode auto | /setmode manual"); return
-    cfg.MODE = args[1]
+    if mode not in ("auto", "manual"):
+        await msg.answer("/setmode auto | /setmode manual"); return
+    cfg.MODE = mode
     await msg.answer(f"✅ Режим: <code>{cfg.MODE}</code>", parse_mode="HTML")
 
 async def cmd_setrisk(msg: Message):
@@ -154,6 +183,20 @@ async def cmd_scan(msg: Message):
 
     asyncio.create_task(_do_scan())
 
+async def cmd_daily_report(msg: Message):
+    if not _auth(msg): return
+    d = state.day
+    wr = round(d.wins/d.trades*100) if d.trades else 0
+    await msg.answer(
+        f"📈 <b>Отчёт за день</b> {d.date}\n\n"
+        f"Сделок: {d.trades} | WR: {wr}%\n"
+        f"Победы: {d.wins} | Убытки: {d.losses}\n"
+        f"PnL: {'+' if d.pnl_usdt>=0 else ''}{d.pnl_usdt:.2f} USDT\n"
+        f"Всего PnL: {'+' if state.total_pnl>=0 else ''}{state.total_pnl:.2f} USDT\n"
+        f"Баланс: {state.current_balance:.2f} USDT",
+        parse_mode="HTML"
+    )
+
 async def cmd_closeall(msg: Message):
     if not _auth(msg): return
     from exchange.bingx import BingXClient
@@ -196,11 +239,41 @@ async def cmd_help(msg: Message):
         "/setrisk 1.0 — риск %\n"
         "/setlev 5 — плечо\n"
         "/closeall — закрыть все позиции",
-        parse_mode="HTML")
+        parse_mode="HTML",
+        reply_markup=main_keyboard()
+    )
 
 async def handle_misc(msg: Message):
     if not _auth(msg): return
     text = msg.text or ""
+
+    # Button handlers
+    if text == "📊 Статус":
+        return await cmd_status(msg)
+    if text == "💰 Баланс":
+        return await cmd_balance(msg)
+    if text == "⚙️ Настройки":
+        return await cmd_settings(msg)
+    if text == "📋 Пары":
+        return await cmd_pairs(msg)
+    if text == "🔍 Скан":
+        return await cmd_scan(msg)
+    if text == "📈 Отчёт":
+        return await cmd_daily_report(msg)
+    if text == "⏸ Пауза":
+        return await cmd_pause(msg)
+    if text == "▶️ Продолжить":
+        return await cmd_resume(msg)
+    if text == "🤖 Авто":
+        cfg.MODE = "auto"
+        await msg.answer("✅ Режим: <code>auto</code>", parse_mode="HTML"); return
+    if text == "✋ Ручной":
+        cfg.MODE = "manual"
+        await msg.answer("✅ Режим: <code>manual</code>", parse_mode="HTML"); return
+    if text == "❌ Закрыть всё":
+        return await cmd_closeall(msg)
+
+    # Confirm/skip signal handlers
     if text.startswith("/confirm_"):
         sym = text.replace("/confirm_","").replace("_","-").upper()
         if sym not in state.pending: await msg.answer(f"Сигнал {sym} не найден"); return
@@ -216,17 +289,19 @@ async def handle_misc(msg: Message):
         state.pending.pop(sym,None); await msg.answer(f"⏭ Пропущен: {sym}")
 
 def register_handlers(dp: Dispatcher):
-    dp.message.register(cmd_ping,     Command("ping"))
-    dp.message.register(cmd_status,   Command("status"))
-    dp.message.register(cmd_balance,  Command("balance"))
-    dp.message.register(cmd_settings, Command("settings"))
-    dp.message.register(cmd_pairs,    Command("pairs"))
-    dp.message.register(cmd_pause,    Command("pause"))
-    dp.message.register(cmd_resume,   Command("resume"))
-    dp.message.register(cmd_setmode,  Command("setmode"))
-    dp.message.register(cmd_setrisk,  Command("setrisk"))
-    dp.message.register(cmd_setlev,   Command("setlev"))
-    dp.message.register(cmd_scan,     Command("scan"))
-    dp.message.register(cmd_closeall, Command("closeall"))
-    dp.message.register(cmd_help,     Command("help", "start"))
+    dp.message.register(cmd_ping,         Command("ping"))
+    dp.message.register(cmd_start,        Command("start"))
+    dp.message.register(cmd_status,       Command("status"))
+    dp.message.register(cmd_balance,      Command("balance"))
+    dp.message.register(cmd_settings,     Command("settings"))
+    dp.message.register(cmd_pairs,        Command("pairs"))
+    dp.message.register(cmd_pause,        Command("pause"))
+    dp.message.register(cmd_resume,       Command("resume"))
+    dp.message.register(cmd_setmode,      Command("setmode"))
+    dp.message.register(cmd_setrisk,      Command("setrisk"))
+    dp.message.register(cmd_setlev,       Command("setlev"))
+    dp.message.register(cmd_scan,         Command("scan"))
+    dp.message.register(cmd_daily_report, Command("report"))
+    dp.message.register(cmd_closeall,     Command("closeall"))
+    dp.message.register(cmd_help,         Command("help"))
     dp.message.register(handle_misc)

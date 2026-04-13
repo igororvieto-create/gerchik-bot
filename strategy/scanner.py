@@ -222,11 +222,20 @@ class Scanner:
                     continue
                 price = float(ticker.get("lastPrice", pos.entry))
 
-                # TP1 → breakeven
+                # Breakeven trigger
                 if not pos.be_moved:
-                    tp1_hit = (pos.side == "LONG" and price >= pos.tp1) or \
-                              (pos.side == "SHORT" and price <= pos.tp1)
-                    if tp1_hit:
+                    be_triggered = False
+                    if cfg.BE_TRIGGER_PCT > 0:
+                        # Price moved BE_TRIGGER_PCT% from entry in profit direction
+                        if pos.side == "LONG":
+                            be_triggered = price >= pos.entry * (1 + cfg.BE_TRIGGER_PCT / 100)
+                        else:
+                            be_triggered = price <= pos.entry * (1 - cfg.BE_TRIGGER_PCT / 100)
+                    else:
+                        # Fallback: TP1 trigger
+                        be_triggered = (pos.side == "LONG" and price >= pos.tp1) or \
+                                       (pos.side == "SHORT" and price <= pos.tp1)
+                    if be_triggered:
                         await self._move_be(pos)
 
                 # TP2 → partial close
@@ -246,17 +255,32 @@ class Scanner:
 
     async def _move_be(self, pos: Position):
         try:
+            # Place SL at entry + small buffer to lock in tiny profit above fees
+            buffer = pos.entry * cfg.BE_BUFFER_PCT / 100
+            if pos.side == "LONG":
+                be_price = round(pos.entry + buffer, 8)
+            else:
+                be_price = round(pos.entry - buffer, 8)
+
             if pos.sl_order_id:
                 await self.ex.cancel_order(pos.symbol, pos.sl_order_id)
             side = "BUY" if pos.side == "LONG" else "SELL"
-            r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, pos.entry)
+            r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, be_price)
             pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
-            pos.sl          = pos.entry
-            pos.be_moved     = True
-            pos.trail_price  = pos.entry
+            pos.sl          = be_price
+            pos.be_moved    = True
+            pos.trail_price = be_price
+
+            trigger_info = (
+                f"+{cfg.BE_TRIGGER_PCT}% от входа"
+                if cfg.BE_TRIGGER_PCT > 0
+                else "TP1"
+            )
             await self._notify(
                 f"🔄 <b>БЕЗУБЫТОК</b> | {pos.symbol}\n"
-                f"SL перенесён → <code>{pos.entry:.4f}</code>"
+                f"Триггер: {trigger_info}\n"
+                f"SL перенесён → <code>{be_price:.4f}</code>"
+                + (f" (+{cfg.BE_BUFFER_PCT}% буфер)" if cfg.BE_BUFFER_PCT > 0 else "")
             )
         except Exception as e:
             log.error(f"move_be {pos.symbol}: {e}")

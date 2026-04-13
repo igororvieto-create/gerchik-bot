@@ -32,6 +32,7 @@ def main_keyboard():
             [KeyboardButton(text="⚙️ Настройки"),  KeyboardButton(text="📋 Пары")],
             [KeyboardButton(text="🔍 Скан"),        KeyboardButton(text="📈 Отчёт")],
             [KeyboardButton(text="📜 История"),     KeyboardButton(text="🏆 Топ пары")],
+            [KeyboardButton(text="🔄 Безубыток"),    KeyboardButton(text="📉 Трейлинг")],
             [KeyboardButton(text="⏸ Пауза"),       KeyboardButton(text="▶️ Продолжить")],
             [KeyboardButton(text="🤖 Авто"),        KeyboardButton(text="✋ Ручной")],
             [KeyboardButton(text="❌ Закрыть всё")],
@@ -174,10 +175,14 @@ async def cmd_settings(msg: Message):
         f"Макс. убыток/день: <code>{cfg.MAX_DAILY_LOSS}%</code>\n"
         f"Объём (мульт.): <code>{cfg.VOLUME_MULT}x</code>\n"
         f"SL буфер: <code>{cfg.SL_BUFFER_PCT}%</code>\n"
+        f"Безубыток триггер: <code>"
+        + (f"+{cfg.BE_TRIGGER_PCT}% от входа" if cfg.BE_TRIGGER_PCT > 0 else "TP1")
+        + f"</code>\n"
+        f"Безубыток буфер: <code>+{cfg.BE_BUFFER_PCT}%</code>\n"
         f"Трейлинг стоп: <code>{cfg.TRAIL_PCT}%</code>\n"
         f"Фандинг макс LONG: <code>{cfg.FUNDING_MAX_LONG}%</code>\n"
         f"Фандинг макс SHORT: <code>{cfg.FUNDING_MAX_SHORT}%</code>\n\n"
-        f"<i>/setmode auto|manual\n/setrisk 1.0\n/setlev 5</i>",
+        f"<i>/setmode auto|manual\n/setrisk 1.0\n/setlev 5\n/setbe 0.5</i>",
         parse_mode="HTML",
         reply_markup=main_keyboard(),
     )
@@ -248,6 +253,63 @@ async def cmd_top(msg: Message):
 
 
 # ------------------------------------------------------------------ /setpairs
+
+async def cmd_settrail(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        await msg.answer(
+            f"📉 <b>Трейлинг стоп:</b> <code>{cfg.TRAIL_PCT}%</code>\n\n"
+            f"SL двигается за ценой на {cfg.TRAIL_PCT}% после безубытка.\n"
+            f"Изменить: <code>/settrail 1.5</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        v = float(args[1])
+        if v < 0.1 or v > 10:
+            raise ValueError
+        cfg.TRAIL_PCT = v
+        await msg.answer(
+            f"✅ Трейлинг стоп: <code>{v}%</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
+    except Exception:
+        await msg.answer("Введи число от 0.1 до 10 (например: /settrail 1.5)")
+
+
+async def cmd_setbe(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        mode = f"+{cfg.BE_TRIGGER_PCT}% от входа" if cfg.BE_TRIGGER_PCT > 0 else "TP1 (выкл.)"
+        await msg.answer(
+            f"🔄 <b>Настройка безубытка:</b>\n\n"
+            f"Триггер: <code>{mode}</code>\n"
+            f"Буфер: <code>+{cfg.BE_BUFFER_PCT}%</code>\n\n"
+            f"Изменить триггер (% от входа):\n"
+            f"<code>/setbe 0.5</code> — при +0.5% прибыли\n"
+            f"<code>/setbe 1.0</code> — при +1.0% прибыли\n"
+            f"<code>/setbe 0</code>   — переносить только на TP1",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        v = float(args[1])
+        if v < 0 or v > 10:
+            raise ValueError
+        cfg.BE_TRIGGER_PCT = v
+        mode = f"+{v}% от входа" if v > 0 else "TP1"
+        await msg.answer(
+            f"✅ Безубыток теперь переставляется при {mode}",
+            reply_markup=main_keyboard(),
+        )
+    except Exception:
+        await msg.answer("Введи число от 0 до 10 (например: /setbe 0.5)")
+
 
 async def cmd_setpairs(msg: Message):
     if not _auth(msg):
@@ -469,6 +531,8 @@ async def handle_misc(msg: Message):
         "📈 Отчёт":       cmd_report,
         "📜 История":     cmd_history,
         "🏆 Топ пары":    cmd_top,
+        "🔄 Безубыток":   cmd_setbe,
+        "📉 Трейлинг":    None,   # handled inline below
         "⏸ Пауза":       cmd_pause,
         "▶️ Продолжить": cmd_resume,
         "❌ Закрыть всё": cmd_closeall,
@@ -477,6 +541,15 @@ async def handle_misc(msg: Message):
         await btn_map[text](msg)
         return
 
+    if text == "📉 Трейлинг":
+        await msg.answer(
+            f"📉 <b>Трейлинг стоп:</b> <code>{cfg.TRAIL_PCT}%</code>\n\n"
+            f"SL двигается за ценой на {cfg.TRAIL_PCT}% после безубытка.\n"
+            f"Изменить: <code>/settrail 1.5</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
+        return
     if text == "🤖 Авто":
         cfg.MODE = "auto"
         await msg.answer("✅ Режим: <code>auto</code>", parse_mode="HTML",
@@ -523,6 +596,8 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_report,   Command("report"))
     dp.message.register(cmd_history,  Command("history"))
     dp.message.register(cmd_top,      Command("top"))
+    dp.message.register(cmd_setbe,    Command("setbe"))
+    dp.message.register(cmd_settrail, Command("settrail"))
     dp.message.register(cmd_setpairs, Command("setpairs"))
     dp.message.register(cmd_pause,    Command("pause"))
     dp.message.register(cmd_resume,   Command("resume"))

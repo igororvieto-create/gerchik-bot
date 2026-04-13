@@ -15,11 +15,12 @@ log = logging.getLogger("main")
 
 bot = Bot(token=cfg.TELEGRAM_TOKEN)
 dp = Dispatcher()
+scheduler = AsyncIOScheduler(timezone="UTC")
 
 async def on_startup():
     exchange = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
     scanner = Scanner(exchange, bot)
-    scheduler = AsyncIOScheduler(timezone="UTC")
+
     scheduler.add_job(scanner.scan_all, "cron", minute="*/15")
     scheduler.add_job(scanner.update_pairs, "cron", minute="0")
     scheduler.add_job(scanner.monitor_positions, "interval", seconds=30)

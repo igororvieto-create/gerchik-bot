@@ -17,7 +17,7 @@ async def main():
 
     log.info("=== Герчик Бот стартует ===")
     log.info(f"TOKEN  set: {bool(cfg.TELEGRAM_TOKEN)}")
-    log.info(f"CHATID set: {bool(cfg.TELEGRAM_CHAT_ID)}")
+    log.info(f"CHATID set: {bool(cfg.TELEGRAM_CHAT_ID)} ({cfg.TELEGRAM_CHAT_ID})")
     log.info(f"APIKEY set: {bool(cfg.BINGX_API_KEY)}")
     log.info(f"SECRET set: {bool(cfg.BINGX_SECRET)}")
     log.info(f"MODE: {cfg.MODE}")
@@ -25,6 +25,10 @@ async def main():
     log.info("Создаём Bot и Dispatcher...")
     bot = Bot(token=cfg.TELEGRAM_TOKEN)
     dp  = Dispatcher()
+
+    log.info("Удаляем вебхук и очищаем очередь обновлений...")
+    await bot.delete_webhook(drop_pending_updates=True)
+    log.info("Вебхук удалён, очередь очищена")
 
     log.info("Регистрируем хендлеры...")
     register_handlers(dp)
@@ -34,10 +38,10 @@ async def main():
     scanner  = Scanner(exchange, bot)
 
     log.info("Запускаем планировщик...")
-    scheduler.add_job(scanner.scan_all,        "cron",     minute="*/15")
-    scheduler.add_job(scanner.update_pairs,    "cron",     minute="0")
+    scheduler.add_job(scanner.scan_all,          "cron",     minute="*/15")
+    scheduler.add_job(scanner.update_pairs,      "cron",     minute="0")
     scheduler.add_job(scanner.monitor_positions, "interval", seconds=30)
-    scheduler.add_job(scanner.daily_report,    "cron",     hour="9")
+    scheduler.add_job(scanner.daily_report,      "cron",     hour="9")
     scheduler.start()
     log.info("Планировщик запущен")
 
@@ -45,7 +49,7 @@ async def main():
         balance = await exchange.get_balance()
         await bot.send_message(cfg.TELEGRAM_CHAT_ID,
             f"✅ Герчик Бот запущен\n\nРежим: {cfg.MODE}\nБаланс: {balance:.2f} USDT")
-        log.info(f"Баланс: {balance:.2f} USDT")
+        log.info(f"Стартовое сообщение отправлено. Баланс: {balance:.2f} USDT")
     except Exception as e:
         log.error(f"Startup notify error: {e}")
 

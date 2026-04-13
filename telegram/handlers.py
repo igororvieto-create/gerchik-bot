@@ -9,7 +9,17 @@ from core.state import state
 log = logging.getLogger("handlers")
 
 def _auth(msg: Message) -> bool:
-    return str(msg.chat.id) == str(cfg.TELEGRAM_CHAT_ID)
+    result = str(msg.chat.id) == str(cfg.TELEGRAM_CHAT_ID)
+    if not result:
+        log.warning(f"Auth failed: msg.chat.id={msg.chat.id}, cfg={cfg.TELEGRAM_CHAT_ID!r}")
+    return result
+
+async def cmd_ping(msg: Message):
+    """No auth — diagnostic command to verify bot receives messages"""
+    await msg.answer(
+        f"🏓 Pong!\nTwój chat ID: <code>{msg.chat.id}</code>\nSkonfigurowany: <code>{cfg.TELEGRAM_CHAT_ID}</code>",
+        parse_mode="HTML"
+    )
 
 async def cmd_status(msg: Message):
     if not _auth(msg): return
@@ -104,10 +114,11 @@ async def cmd_closeall(msg: Message):
 async def cmd_help(msg: Message):
     if not _auth(msg): return
     await msg.answer(
-        "<b>Команды:</b>\n/status /balance /pairs /scan\n/pause /resume\n/setmode auto|manual\n/setrisk 1.0\n/setlev 5\n/closeall",
+        "<b>Команды:</b>\n/status /balance /pairs /scan\n/pause /resume\n/setmode auto|manual\n/setrisk 1.0\n/setlev 5\n/closeall\n/ping — диагностика",
         parse_mode="HTML")
 
 async def handle_misc(msg: Message):
+    log.info(f"handle_misc: chat_id={msg.chat.id} text={msg.text!r}")
     if not _auth(msg): return
     text = msg.text or ""
     if text.startswith("/confirm_"):
@@ -125,6 +136,7 @@ async def handle_misc(msg: Message):
         state.pending.pop(sym,None); await msg.answer(f"⏭ Пропущен: {sym}")
 
 def register_handlers(dp: Dispatcher):
+    dp.message.register(cmd_ping,     Command("ping"))
     dp.message.register(cmd_status,   Command("status"))
     dp.message.register(cmd_balance,  Command("balance"))
     dp.message.register(cmd_pairs,    Command("pairs"))

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime
 from aiogram import Dispatcher
@@ -15,9 +16,8 @@ def _auth(msg: Message) -> bool:
     return result
 
 async def cmd_ping(msg: Message):
-    """No auth — diagnostic command to verify bot receives messages"""
     await msg.answer(
-        f"🏓 Pong!\nTwój chat ID: <code>{msg.chat.id}</code>\nSkonfigurowany: <code>{cfg.TELEGRAM_CHAT_ID}</code>",
+        f"🏓 Pong!\nВаш chat ID: <code>{msg.chat.id}</code>\nНастроенный: <code>{cfg.TELEGRAM_CHAT_ID}</code>",
         parse_mode="HTML"
     )
 
@@ -91,11 +91,21 @@ async def cmd_setlev(msg: Message):
 
 async def cmd_scan(msg: Message):
     if not _auth(msg): return
-    await msg.answer(f"🔍 Сканирую {len(state.pairs)} пар...")
-    from exchange.bingx import BingXClient
-    from strategy.scanner import Scanner
-    ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-    await Scanner(ex, msg.bot).scan_all(); await ex.close()
+    n = len(state.pairs)
+    await msg.answer(f"🔍 Сканирую {n} пар... (результат придёт отдельным сообщением)")
+
+    async def _do_scan():
+        try:
+            from exchange.bingx import BingXClient
+            from strategy.scanner import Scanner
+            ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+            scanner = Scanner(ex, msg.bot)
+            await scanner.scan_all()
+            await ex.close()
+        except Exception as e:
+            log.error(f"cmd_scan bg error: {e}")
+
+    asyncio.create_task(_do_scan())
 
 async def cmd_closeall(msg: Message):
     if not _auth(msg): return
@@ -114,11 +124,10 @@ async def cmd_closeall(msg: Message):
 async def cmd_help(msg: Message):
     if not _auth(msg): return
     await msg.answer(
-        "<b>Команды:</b>\n/status /balance /pairs /scan\n/pause /resume\n/setmode auto|manual\n/setrisk 1.0\n/setlev 5\n/closeall\n/ping — диагностика",
+        "<b>Команды:</b>\n/status /balance /pairs /scan\n/pause /resume\n/setmode auto|manual\n/setrisk 1.0\n/setlev 5\n/closeall",
         parse_mode="HTML")
 
 async def handle_misc(msg: Message):
-    log.info(f"handle_misc: chat_id={msg.chat.id} text={msg.text!r}")
     if not _auth(msg): return
     text = msg.text or ""
     if text.startswith("/confirm_"):

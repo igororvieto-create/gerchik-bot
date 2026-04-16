@@ -581,14 +581,23 @@ async def handle_misc(msg: Message):
         "📈 Отчёт":       cmd_report,
         "📜 История":     cmd_history,
         "🏆 Топ пары":    cmd_top,
-        "🔄 Безубыток":   cmd_setbe,
-        "📉 Трейлинг":    None,   # handled inline below
         "⏸ Пауза":       cmd_pause,
         "▶️ Продолжить": cmd_resume,
         "❌ Закрыть всё": cmd_closeall,
     }
     if text in btn_map:
         await btn_map[text](msg)
+        return
+
+    if text == "🔄 Безубыток":
+        mode = f"+{cfg.BE_TRIGGER_PCT}% от входа" if cfg.BE_TRIGGER_PCT > 0 else "TP1"
+        await msg.answer(
+            f"🔄 <b>Безубыток:</b> <code>{mode}</code>\n"
+            f"Буфер: <code>+{cfg.BE_BUFFER_PCT}%</code>\n\n"
+            f"Изменить: <code>/setbe 0.5</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
         return
 
     if text == "📉 Трейлинг":
@@ -600,6 +609,7 @@ async def handle_misc(msg: Message):
             reply_markup=main_keyboard(),
         )
         return
+
     if text == "🤖 Авто":
         cfg.MODE = "auto"
         await msg.answer("✅ Режим: <code>auto</code>", parse_mode="HTML",

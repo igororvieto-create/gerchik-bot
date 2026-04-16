@@ -158,38 +158,36 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     d1_up   = d1["close"][-1] > ema200[-1]
     trend   = "LONG" if d1_up else "SHORT"
     d1_slope= trend_slope(d1["close"], 5)
-    # Require D1 trend to be moving in the right direction
-    if trend == "LONG"  and d1_slope < -0.5: return None
-    if trend == "SHORT" and d1_slope >  0.5: return None
 
     # ── H4 filter ──
     ema50   = ema(h4["close"], cfg.TREND_EMA_H4)
     h4_up   = h4["close"][-1] > ema50[-1]
     h4_dn   = h4["close"][-1] < ema50[-1]
     h4_aligned = (trend=="LONG" and h4_up) or (trend=="SHORT" and h4_dn)
-    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 1.2
+    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 2.0
     if not h4_aligned and not h4_near:
         return None
 
     price = h1["close"][-1]
 
-    # ── RSI filter (avoid overbought/oversold entries) ──
-    h1_rsi = rsi(h1["close"], 14)
+    # ── RSI filter ──
+    h1_rsi  = rsi(h1["close"], 14)
     cur_rsi = h1_rsi[-1]
-    if trend == "LONG"  and cur_rsi > 70: return None  # overbought
-    if trend == "SHORT" and cur_rsi < 30: return None  # oversold
+    if trend == "LONG"  and cur_rsi > 75: return None
+    if trend == "SHORT" and cur_rsi < 25: return None
 
-    # ── S/R levels ──
-    lv4 = find_levels(h4["high"], h4["low"], lookback=100)
-    lv1 = find_levels(h1["high"], h1["low"], lookback=60)
-    levels = (lv4["support"]+lv1["support"]) if trend=="LONG" \
-             else (lv4["resistance"]+lv1["resistance"])
-    near, level = near_level(price, levels, tol=0.8)
+    # ── S/R levels (wide tolerance + both sides) ──
+    lv4 = find_levels(h4["high"], h4["low"], lookback=120)
+    lv1 = find_levels(h1["high"], h1["low"], lookback=80)
+    # combine support AND resistance — price can be near either
+    all_levels = lv4["support"] + lv4["resistance"] + \
+                 lv1["support"] + lv1["resistance"]
+    near, level = near_level(price, all_levels, tol=1.5)
     if not near:
         return None
 
-    touches = level_touches(level, h4["high"][-100:], h4["low"][-100:])
-    if touches > 5:
+    touches = level_touches(level, h4["high"][-120:], h4["low"][-120:])
+    if touches > 6:
         return None
 
     # ── Candle pattern on H1 (required) ──
@@ -205,9 +203,9 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     h4p, h4s = detect_pattern(h4)
     h4ok = h4p != "" and (h4s == trend or h4s == "DOJI")
 
-    # ── Volume ──
-    vm   = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
-    vrat = h1["volume"][-1]/vm[-1] if vm[-1] > 0 else 0
+    # ── Volume (check last 3 candles, not just last one) ──
+    vm    = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
+    vrat  = max(h1["volume"][-1], h1["volume"][-2]) / vm[-1] if vm[-1] > 0 else 0
     if vrat < cfg.VOLUME_MULT:
         return None
 

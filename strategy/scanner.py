@@ -16,8 +16,10 @@ log = logging.getLogger("scanner")
 
 class Scanner:
     def __init__(self, exchange: BingXClient, bot: Bot):
-        self.ex  = exchange
-        self.bot = bot
+        self.ex        = exchange
+        self.bot       = bot
+        self._scanning = False   # lock to prevent concurrent scans
+        self._scan_count = 0    # count scans to limit "no signal" spam
 
     # ------------------------------------------------------------------ notify
 
@@ -58,6 +60,16 @@ class Scanner:
     # ------------------------------------------------------------------ scan
 
     async def scan_all(self):
+        if self._scanning:
+            log.info("Скан уже запущен — пропуск")
+            return
+        self._scanning = True
+        try:
+            await self._scan_all_inner()
+        finally:
+            self._scanning = False
+
+    async def _scan_all_inner(self):
         if not state.pairs:
             await self.update_pairs()
         can, reason = state.can_trade(cfg.MAX_DAILY_LOSS, cfg.MAX_POSITIONS, cfg.MAX_DAILY_TRADES)
@@ -79,14 +91,20 @@ class Scanner:
             if i + cfg.SCAN_BATCH_SIZE < len(state.pairs):
                 await asyncio.sleep(cfg.SCAN_BATCH_DELAY)
 
+        self._scan_count += 1
         if not signals:
             log.info("Сигналов нет")
-            await self._notify(f"🔍 Скан завершён: {len(state.pairs)} пар проверено — сигналов нет")
+            # Notify only every 4th scan (~1 hour) to avoid spam
+            if self._scan_count % 4 == 1:
+                await self._notify(
+                    f"🔍 Скан: {len(state.pairs)} пар — сигналов нет\n"
+                    f"Следующий через 15 мин"
+                )
             return
 
         signals.sort(key=lambda s: s.score, reverse=True)
-        top = ", ".join(f"{s.symbol} {s.side} ⭐{s.score}" for s in signals[:3])
-        await self._notify(f"🔍 Скан: найдено <b>{len(signals)}</b> сигналов\n{top}")
+        top = "\n".join(f"• {s.symbol} {s.side} ⭐{s.score}" for s in signals[:3])
+        await self._notify(f"🔍 Найдено <b>{len(signals)}</b> сигналов:\n{top}")
 
         for sig in signals:
             can, _ = state.can_trade(cfg.MAX_DAILY_LOSS, cfg.MAX_POSITIONS, cfg.MAX_DAILY_TRADES)

@@ -171,7 +171,13 @@ class Scanner:
             sl_pct = abs(sig.entry - sig.sl) / sig.entry
             if sl_pct == 0:
                 return
-            qty = round((risk_usdt / sl_pct) / sig.entry, 3)
+            qty = (risk_usdt / sl_pct) / sig.entry
+            # Enforce minimum position size
+            min_qty = cfg.MIN_POSITION_USDT / sig.entry
+            if qty < min_qty:
+                qty = min_qty
+                log.info(f"qty увеличен до минимума {cfg.MIN_POSITION_USDT} USDT для {sig.symbol}")
+            qty = round(qty, 3)
             if qty <= 0:
                 return
 

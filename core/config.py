@@ -46,5 +46,7 @@ class Config:
     BE_BUFFER_PCT:        float = float(os.getenv("BE_BUFFER_PCT", "0.05").strip())
     # Trailing stop: move SL this % behind the peak price (after breakeven)
     TRAIL_PCT:            float = float(os.getenv("TRAIL_PCT", "1.0").strip())
+    # Minimum position notional value in USDT (bot won't open smaller positions)
+    MIN_POSITION_USDT:    float = float(os.getenv("MIN_POSITION_USDT", "20.0").strip())
 
 cfg = Config()

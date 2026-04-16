@@ -197,6 +197,7 @@ async def cmd_settings(msg: Message):
         f"Макс. убыток/день: <code>{cfg.MAX_DAILY_LOSS}%</code>\n"
         f"Объём (мульт.): <code>{cfg.VOLUME_MULT}x</code>\n"
         f"SL буфер: <code>{cfg.SL_BUFFER_PCT}%</code>\n"
+        f"Мин. позиция: <code>{cfg.MIN_POSITION_USDT} USDT</code>\n"
         f"Безубыток триггер: <code>"
         + (f"+{cfg.BE_TRIGGER_PCT}% от входа" if cfg.BE_TRIGGER_PCT > 0 else "TP1")
         + f"</code>\n"
@@ -275,6 +276,31 @@ async def cmd_top(msg: Message):
 
 
 # ------------------------------------------------------------------ /setpairs
+
+async def cmd_setminpos(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        await msg.answer(
+            f"📐 <b>Мин. размер позиции:</b> <code>{cfg.MIN_POSITION_USDT} USDT</code>\n\n"
+            f"Изменить: <code>/setminpos 20</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        v = float(args[1])
+        if v < 1 or v > 10000:
+            raise ValueError
+        cfg.MIN_POSITION_USDT = v
+        await msg.answer(
+            f"✅ Мин. позиция: <code>{v} USDT</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
+    except Exception:
+        await msg.answer("Введи число от 1 до 10000 (например: /setminpos 20)")
+
 
 async def cmd_settrail(msg: Message):
     if not _auth(msg):
@@ -619,6 +645,7 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_report,   Command("report"))
     dp.message.register(cmd_history,  Command("history"))
     dp.message.register(cmd_top,      Command("top"))
+    dp.message.register(cmd_setminpos, Command("setminpos"))
     dp.message.register(cmd_setbe,    Command("setbe"))
     dp.message.register(cmd_settrail, Command("settrail"))
     dp.message.register(cmd_setpairs, Command("setpairs"))

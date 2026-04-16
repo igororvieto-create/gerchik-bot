@@ -108,7 +108,6 @@ class BingXClient:
 
     async def get_balance(self):
         data = await self._get("/openApi/swap/v2/user/balance", {}, signed=True)
-        log.info(f"get_balance raw: {data}")
         try:
             d = data.get("data", {})
             # Format 1: data.balance is a dict

@@ -69,8 +69,6 @@ class BotState:
             loss_pct = abs(min(self.day.pnl_usdt, 0)) / self.current_balance * 100
             if loss_pct >= max_daily_loss:
                 return False, f"дневной лимит {max_daily_loss}%"
-        if self.day.loss_streak >= 2:
-            return False, "2 стопа подряд"
         return True, "ok"
 
 state = BotState()

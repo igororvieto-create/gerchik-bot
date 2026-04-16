@@ -190,8 +190,13 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     if touches > 6:
         return None
 
-    # ── Candle pattern on H1 (required) ──
-    pname, pside = detect_pattern(h1)
+    # ── Candle pattern on H1 (check last 3 candles) ──
+    pname, pside = "", ""
+    for idx in [-1, -2, -3]:
+        pn, ps = detect_pattern(h1, idx)
+        if pn:
+            pname, pside = pn, ps
+            break
     if not pname:
         return None
     if pside == "DOJI":

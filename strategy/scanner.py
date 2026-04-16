@@ -13,12 +13,13 @@ from strategy.strategy.gerchik import Signal, analyze, parse_klines
 
 log = logging.getLogger("scanner")
 
+_SCANNING = False   # module-level lock — shared by ALL Scanner instances
+
 
 class Scanner:
     def __init__(self, exchange: BingXClient, bot: Bot):
-        self.ex        = exchange
-        self.bot       = bot
-        self._scanning = False   # lock to prevent concurrent scans
+        self.ex          = exchange
+        self.bot         = bot
         self._scan_count = 0    # count scans to limit "no signal" spam
 
     # ------------------------------------------------------------------ notify
@@ -60,14 +61,15 @@ class Scanner:
     # ------------------------------------------------------------------ scan
 
     async def scan_all(self):
-        if self._scanning:
+        global _SCANNING
+        if _SCANNING:
             log.info("Скан уже запущен — пропуск")
             return
-        self._scanning = True
+        _SCANNING = True
         try:
             await self._scan_all_inner()
         finally:
-            self._scanning = False
+            _SCANNING = False
 
     async def _scan_all_inner(self):
         if not state.pairs:
@@ -257,6 +259,46 @@ class Scanner:
     # ------------------------------------------------------------------ monitor
 
     async def monitor_positions(self):
+        # Sync with BingX: detect positions closed externally (SL/TP hit on exchange)
+        try:
+            live = await self.ex.get_open_positions()
+            live_syms = {p.get("symbol") for p in live}
+            for symbol, pos in list(state.positions.items()):
+                age = (datetime.utcnow() - pos.opened_at).total_seconds()
+                if age > 60 and symbol not in live_syms:
+                    # Position no longer on exchange — clean up state
+                    try:
+                        ticker = await self.ex.get_ticker(symbol)
+                        price = float(ticker.get("lastPrice", pos.entry)) if ticker else pos.entry
+                    except Exception:
+                        price = pos.entry
+                    pnl = (price - pos.entry) * pos.qty if pos.side == "LONG" \
+                          else (pos.entry - price) * pos.qty
+                    state.total_pnl    += pnl
+                    state.day.pnl_usdt += pnl
+                    result = "WIN" if pnl > 0 else "LOSS"
+                    if pnl > 0:
+                        state.day.wins += 1
+                        state.day.loss_streak = 0
+                    else:
+                        state.day.losses += 1
+                        state.day.loss_streak += 1
+                        state.day.paused_until = datetime.utcnow() + timedelta(minutes=cfg.PAUSE_AFTER_LOSS_MIN)
+                    try:
+                        from core import db
+                        db.save_trade(pos, price, pnl, result)
+                    except Exception:
+                        pass
+                    del state.positions[symbol]
+                    sign = "+" if pnl >= 0 else ""
+                    await self._notify(
+                        f"{'✅ WIN' if pnl > 0 else '❌ LOSS'} | {symbol} {pos.side}\n"
+                        f"Закрыто на бирже | Цена: <code>{price:.4f}</code>\n"
+                        f"PnL: <code>{sign}{pnl:.2f} USDT</code>"
+                    )
+        except Exception as e:
+            log.error(f"monitor sync: {e}")
+
         for symbol, pos in list(state.positions.items()):
             try:
                 ticker = await self.ex.get_ticker(symbol)

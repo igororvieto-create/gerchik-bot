@@ -184,7 +184,9 @@ async def cmd_settings(msg: Message):
     if not _auth(msg):
         return
     status = "⏸ ПАУЗА" if state.paused else "▶️ Работает"
-    await msg.answer(
+    be_mode = f"+{cfg.BE_TRIGGER_PCT}% от входа" if cfg.BE_TRIGGER_PCT > 0 else "TP1"
+    al = "✅ вкл" if cfg.AUTO_LEVERAGE else "❌ выкл"
+    text = (
         f"⚙️ <b>Настройки бота:</b>\n\n"
         f"Статус: {status}\n"
         f"Режим: <code>{cfg.MODE}</code>\n"
@@ -198,19 +200,15 @@ async def cmd_settings(msg: Message):
         f"Объём (мульт.): <code>{cfg.VOLUME_MULT}x</code>\n"
         f"SL буфер: <code>{cfg.SL_BUFFER_PCT}%</code>\n"
         f"Мин. позиция: <code>{cfg.MIN_POSITION_USDT} USDT</code>\n"
-        f"Авто-плечо: <code>{'✅ вкл' if cfg.AUTO_LEVERAGE else '❌ выкл'}</code>\n"
-        f"  < 100 USDT → x10  |  < 500 → x7  |  < 2000 → x5  |  2000+ → x3\n"
-        f"Безубыток триггер: <code>"
-        + (f"+{cfg.BE_TRIGGER_PCT}% от входа" if cfg.BE_TRIGGER_PCT > 0 else "TP1")
-        + f"</code>\n"
-        f"Безубыток буфер: <code>+{cfg.BE_BUFFER_PCT}%</code>\n"
+        f"Авто-плечо: <code>{al}</code>\n"
+        f"  до 100$ → x10 | до 500$ → x7 | до 2000$ → x5 | от 2000$ → x3\n"
+        f"Безубыток: <code>{be_mode}</code> (буфер +{cfg.BE_BUFFER_PCT}%)\n"
         f"Трейлинг стоп: <code>{cfg.TRAIL_PCT}%</code>\n"
-        f"Фандинг макс LONG: <code>{cfg.FUNDING_MAX_LONG}%</code>\n"
-        f"Фандинг макс SHORT: <code>{cfg.FUNDING_MAX_SHORT}%</code>\n\n"
-        f"<i>/setmode auto|manual\n/setrisk 1.0\n/setlev 5\n/setbe 0.5</i>",
-        parse_mode="HTML",
-        reply_markup=main_keyboard(),
+        f"Фандинг LONG макс: <code>{cfg.FUNDING_MAX_LONG}%</code>\n"
+        f"Фандинг SHORT макс: <code>{cfg.FUNDING_MAX_SHORT}%</code>\n\n"
+        f"<i>/setrisk 1.0 | /setlev 5 | /setbe 0.5 | /settrail 1.0</i>"
     )
+    await msg.answer(text, parse_mode="HTML", reply_markup=main_keyboard())
 
 
 # ------------------------------------------------------------------ /report

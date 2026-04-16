@@ -48,6 +48,28 @@ async def cmd_ping(msg: Message):
     await msg.answer("🟢 Бот работает", reply_markup=main_keyboard())
 
 
+async def cmd_debug(msg: Message):
+    if not _auth(msg):
+        return
+    from exchange.bingx import BingXClient
+    import json
+    ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+    try:
+        raw = await ex.get_balance_raw()
+        bal = await ex.get_balance()
+        text = (
+            f"🔧 <b>Диагностика баланса</b>\n\n"
+            f"Распознанный баланс: <code>{bal:.4f} USDT</code>\n\n"
+            f"Сырой ответ API:\n"
+            f"<pre>{json.dumps(raw, ensure_ascii=False, indent=2)[:1000]}</pre>"
+        )
+    except Exception as e:
+        text = f"❌ Ошибка API: <code>{e}</code>"
+    finally:
+        await ex.close()
+    await msg.answer(text, parse_mode="HTML")
+
+
 # ------------------------------------------------------------------ /start /help
 
 async def cmd_help(msg: Message):
@@ -588,6 +610,7 @@ async def handle_misc(msg: Message):
 
 def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_ping,     Command("ping"))
+    dp.message.register(cmd_debug,    Command("debug"))
     dp.message.register(cmd_help,     Command("help", "start"))
     dp.message.register(cmd_status,   Command("status"))
     dp.message.register(cmd_balance,  Command("balance"))

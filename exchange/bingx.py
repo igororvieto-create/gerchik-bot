@@ -108,17 +108,35 @@ class BingXClient:
 
     async def get_balance(self):
         data = await self._get("/openApi/swap/v2/user/balance", {}, signed=True)
+        log.info(f"get_balance raw: {data}")
         try:
-            bal = data["data"]["balance"]
-            if isinstance(bal, list):
-                for a in bal:
-                    if a.get("asset") == "USDT":
-                        return float(a["availableMargin"])
-            elif isinstance(bal, dict):
-                return float(bal.get("availableMargin", 0))
+            d = data.get("data", {})
+            # Format 1: data.balance is a dict
+            if isinstance(d, dict) and "balance" in d:
+                bal = d["balance"]
+                if isinstance(bal, dict):
+                    for field in ("availableMargin", "available", "equity", "balance"):
+                        if field in bal and float(bal[field]) > 0:
+                            return float(bal[field])
+                # Format 2: data.balance is a list of assets
+                if isinstance(bal, list):
+                    for a in bal:
+                        if a.get("asset") in ("USDT", "usdt"):
+                            for field in ("availableMargin", "available", "equity", "balance"):
+                                if field in a:
+                                    return float(a[field])
+            # Format 3: data itself is the balance dict
+            if isinstance(d, dict):
+                for field in ("availableMargin", "available"):
+                    if field in d:
+                        return float(d[field])
         except Exception as e:
             log.error(f"get_balance parse error: {e} | response: {data}")
         return 0.0
+
+    async def get_balance_raw(self):
+        """Returns the raw API response for debugging."""
+        return await self._get("/openApi/swap/v2/user/balance", {}, signed=True)
 
     async def get_open_positions(self):
         data = await self._get("/openApi/swap/v2/user/positions", {}, signed=True)

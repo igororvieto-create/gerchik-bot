@@ -1,19 +1,22 @@
 import io
 import logging
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-
 log = logging.getLogger("chart")
+
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    _OK = True
+except Exception as e:
+    log.warning(f"matplotlib недоступен, графики отключены: {e}")
+    _OK = False
 
 
 def generate_chart(klines: dict, symbol: str, signal) -> bytes | None:
-    """
-    Draw a dark-theme candlestick chart with SL/TP lines.
-    Returns PNG bytes, or None on failure.
-    """
+    if not _OK:
+        return None
     try:
         n = min(60, len(klines["close"]))
         opens  = klines["open"][-n:]
@@ -26,24 +29,19 @@ def generate_chart(klines: dict, symbol: str, signal) -> bytes | None:
         ax.set_facecolor("#16213e")
 
         for i in range(n):
-            bull = closes[i] >= opens[i]
+            bull  = closes[i] >= opens[i]
             color = "#26a69a" if bull else "#ef5350"
-            # Wick
             ax.plot([i, i], [lows[i], highs[i]], color=color, linewidth=0.8, zorder=1)
-            # Body
             body_lo = min(opens[i], closes[i])
             body_hi = max(opens[i], closes[i])
             height  = max(body_hi - body_lo, (highs[i] - lows[i]) * 0.005)
             rect = mpatches.FancyBboxPatch(
                 (i - 0.35, body_lo), 0.7, height,
-                boxstyle="square,pad=0",
-                linewidth=0,
-                facecolor=color,
-                zorder=2,
+                boxstyle="square,pad=0", linewidth=0,
+                facecolor=color, zorder=2,
             )
             ax.add_patch(rect)
 
-        # Key price lines
         ax.axhline(signal.entry, color="#ffffff", linewidth=1.2, linestyle="-",
                    alpha=0.9, label=f"Entry {signal.entry:.4f}", zorder=3)
         ax.axhline(signal.sl,   color="#ef5350", linewidth=1.0, linestyle="--",
@@ -62,11 +60,8 @@ def generate_chart(klines: dict, symbol: str, signal) -> bytes | None:
         ax.tick_params(colors="#888888", labelsize=7)
         for spine in ax.spines.values():
             spine.set_color("#333344")
-        ax.legend(
-            loc="upper left", fontsize=7,
-            facecolor="#1a1a2e", labelcolor="white",
-            framealpha=0.8, edgecolor="#444",
-        )
+        ax.legend(loc="upper left", fontsize=7, facecolor="#1a1a2e",
+                  labelcolor="white", framealpha=0.8, edgecolor="#444")
 
         plt.tight_layout(pad=1.5)
         buf = io.BytesIO()

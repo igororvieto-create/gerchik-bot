@@ -4,34 +4,35 @@ from typing import Dict, List, Optional
 
 @dataclass
 class Position:
-    symbol:    str
-    side:      str
-    entry:     float
-    sl:        float
-    tp1:       float
-    tp2:       float
-    tp3:       float
-    qty:       float
-    risk_usdt: float
-    order_id:  str      = ""
-    sl_order_id: str    = ""
-    tp_order_id: str    = ""
-    be_moved:  bool     = False
-    tp2_hit:   bool     = False
-    opened_at: datetime = field(default_factory=datetime.utcnow)
-    pattern:   str      = ""
-    tf:        str      = "H1+H4"
-    rr:        float    = 0.0
-    score:     int      = 0
+    symbol:      str
+    side:        str
+    entry:       float
+    sl:          float
+    tp1:         float
+    tp2:         float
+    tp3:         float
+    qty:         float
+    risk_usdt:   float
+    order_id:    str      = ""
+    sl_order_id: str      = ""
+    tp_order_id: str      = ""
+    be_moved:    bool     = False
+    tp2_hit:     bool     = False
+    trail_price: float    = 0.0   # peak price tracked for trailing stop
+    opened_at:   datetime = field(default_factory=datetime.utcnow)
+    pattern:     str      = ""
+    tf:          str      = "H1+H4"
+    rr:          float    = 0.0
+    score:       int      = 0
 
 @dataclass
 class DayStats:
-    date:        date     = field(default_factory=date.today)
-    trades:      int      = 0
-    wins:        int      = 0
-    losses:      int      = 0
-    pnl_usdt:    float    = 0.0
-    loss_streak: int      = 0
+    date:         date     = field(default_factory=date.today)
+    trades:       int      = 0
+    wins:         int      = 0
+    losses:       int      = 0
+    pnl_usdt:     float    = 0.0
+    loss_streak:  int      = 0
     paused_until: Optional[datetime] = None
 
 @dataclass

@@ -167,6 +167,20 @@ class Scanner:
                 await self._notify("⚠️ Нет баланса для входа")
                 return
             state.current_balance = balance
+
+            # Auto-leverage based on balance tiers
+            leverage = cfg.LEVERAGE
+            if cfg.AUTO_LEVERAGE:
+                if balance < 100:
+                    leverage = 10
+                elif balance < 500:
+                    leverage = 7
+                elif balance < 2000:
+                    leverage = 5
+                else:
+                    leverage = 3
+                log.info(f"Авто-плечо: баланс {balance:.2f} → x{leverage}")
+
             risk_usdt = balance * cfg.RISK_PER_TRADE / 100
             sl_pct = abs(sig.entry - sig.sl) / sig.entry
             if sl_pct == 0:
@@ -181,7 +195,7 @@ class Scanner:
             if qty <= 0:
                 return
 
-            await self.ex.set_leverage(sig.symbol, cfg.LEVERAGE)
+            await self.ex.set_leverage(sig.symbol, leverage)
             side  = "BUY" if sig.side == "LONG" else "SELL"
             order = await self.ex.place_order(sig.symbol, side, qty, position_side=sig.side)
             order_id = str(order.get("data", {}).get("orderId", ""))
@@ -212,7 +226,7 @@ class Scanner:
                 f"🔴 SL: <code>{sig.sl:.4f}</code>\n"
                 f"🟢 TP2: <code>{sig.tp2:.4f}</code>  "
                 f"TP3: <code>{sig.tp3:.4f}</code>\n"
-                f"💰 Риск: <code>{risk_usdt:.2f} USDT</code>  x{cfg.LEVERAGE}"
+                f"💰 Риск: <code>{risk_usdt:.2f} USDT</code>  x{leverage}"
             )
         except Exception as e:
             log.error(f"enter {sig.symbol}: {e}")

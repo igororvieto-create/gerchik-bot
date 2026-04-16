@@ -198,6 +198,8 @@ async def cmd_settings(msg: Message):
         f"Объём (мульт.): <code>{cfg.VOLUME_MULT}x</code>\n"
         f"SL буфер: <code>{cfg.SL_BUFFER_PCT}%</code>\n"
         f"Мин. позиция: <code>{cfg.MIN_POSITION_USDT} USDT</code>\n"
+        f"Авто-плечо: <code>{'✅ вкл' if cfg.AUTO_LEVERAGE else '❌ выкл'}</code>\n"
+        f"  < 100 USDT → x10  |  < 500 → x7  |  < 2000 → x5  |  2000+ → x3\n"
         f"Безубыток триггер: <code>"
         + (f"+{cfg.BE_TRIGGER_PCT}% от входа" if cfg.BE_TRIGGER_PCT > 0 else "TP1")
         + f"</code>\n"

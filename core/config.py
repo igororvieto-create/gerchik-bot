@@ -48,5 +48,7 @@ class Config:
     TRAIL_PCT:            float = float(os.getenv("TRAIL_PCT", "1.0").strip())
     # Minimum position notional value in USDT (bot won't open smaller positions)
     MIN_POSITION_USDT:    float = float(os.getenv("MIN_POSITION_USDT", "20.0").strip())
+    # Auto-leverage: adjust leverage based on balance tiers (True/False)
+    AUTO_LEVERAGE:        bool  = os.getenv("AUTO_LEVERAGE", "true").strip().lower() == "true"
 
 cfg = Config()

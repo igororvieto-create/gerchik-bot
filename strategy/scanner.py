@@ -81,9 +81,13 @@ class Scanner:
 
         if not signals:
             log.info("Сигналов нет")
+            await self._notify(f"🔍 Скан завершён: {len(state.pairs)} пар проверено — сигналов нет")
             return
 
         signals.sort(key=lambda s: s.score, reverse=True)
+        top = ", ".join(f"{s.symbol} {s.side} ⭐{s.score}" for s in signals[:3])
+        await self._notify(f"🔍 Скан: найдено <b>{len(signals)}</b> сигналов\n{top}")
+
         for sig in signals:
             can, _ = state.can_trade(cfg.MAX_DAILY_LOSS, cfg.MAX_POSITIONS, cfg.MAX_DAILY_TRADES)
             if not can:

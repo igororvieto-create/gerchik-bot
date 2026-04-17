@@ -351,8 +351,8 @@ class Scanner:
                     continue
                 price = float(ticker.get("lastPrice", pos.entry))
 
-                # Breakeven trigger
-                if not pos.be_moved:
+                # Breakeven trigger — skip for exchange-synced positions (tp1/sl unknown)
+                if not pos.be_moved and pos.sl > 0:
                     be_triggered = False
                     if cfg.BE_TRIGGER_PCT > 0:
                         # Price moved BE_TRIGGER_PCT% from entry in profit direction
@@ -360,15 +360,15 @@ class Scanner:
                             be_triggered = price >= pos.entry * (1 + cfg.BE_TRIGGER_PCT / 100)
                         else:
                             be_triggered = price <= pos.entry * (1 - cfg.BE_TRIGGER_PCT / 100)
-                    else:
-                        # Fallback: TP1 trigger
+                    elif pos.tp1 > 0:
+                        # Fallback: TP1 trigger (only if TP1 is known)
                         be_triggered = (pos.side == "LONG" and price >= pos.tp1) or \
                                        (pos.side == "SHORT" and price <= pos.tp1)
                     if be_triggered:
                         await self._move_be(pos)
 
-                # TP2 → partial close
-                if pos.be_moved and not pos.tp2_hit:
+                # TP2 → partial close — skip if tp2 unknown (synced position)
+                if pos.be_moved and not pos.tp2_hit and pos.tp2 > 0:
                     tp2_hit = (pos.side == "LONG" and price >= pos.tp2) or \
                               (pos.side == "SHORT" and price <= pos.tp2)
                     if tp2_hit:
@@ -467,6 +467,9 @@ class Scanner:
             log.error(f"partial_close {pos.symbol}: {e}")
 
     async def _check_closed(self, pos: Position, price: float):
+        # Skip check for exchange-synced positions without SL/TP info
+        if pos.sl == 0 or pos.tp3 == 0:
+            return
         sl_hit  = (pos.side == "LONG"  and price <= pos.sl) or \
                   (pos.side == "SHORT" and price >= pos.sl)
         tp3_hit = (pos.side == "LONG"  and price >= pos.tp3) or \

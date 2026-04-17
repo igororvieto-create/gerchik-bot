@@ -202,6 +202,21 @@ class Scanner:
 
     async def _enter(self, sig: Signal, confirmed: bool = False):
         try:
+            # Staleness check: skip if price drifted >0.5% from signal level
+            try:
+                ticker = await self.ex.get_ticker(sig.symbol)
+                current_price = float(ticker.get("lastPrice", sig.entry)) if ticker else sig.entry
+                drift_pct = abs(current_price - sig.entry) / sig.entry * 100
+                if drift_pct > 0.5:
+                    log.info(f"Пропуск {sig.symbol}: цена сдвинулась на {drift_pct:.2f}% от сигнала")
+                    await self._notify(
+                        f"⏭ Пропуск <b>{sig.symbol}</b>: цена ушла на {drift_pct:.1f}% от точки входа"
+                    )
+                    state.pending.pop(sig.symbol, None)
+                    return
+            except Exception as e:
+                log.warning(f"drift check {sig.symbol}: {e}")
+
             balance = await self.ex.get_balance()
             if balance <= 0:
                 await self._notify("⚠️ Нет баланса для входа")
@@ -222,10 +237,21 @@ class Scanner:
                 log.info(f"Авто-плечо: баланс {balance:.2f} → x{leverage}")
 
             risk_usdt = balance * cfg.RISK_PER_TRADE / 100
+            # Hard cap: never risk more than MAX_RISK_USDT per trade
+            if risk_usdt > cfg.MAX_RISK_USDT:
+                log.info(f"risk_usdt {risk_usdt:.2f} > MAX_RISK_USDT {cfg.MAX_RISK_USDT} — обрезаем")
+                risk_usdt = cfg.MAX_RISK_USDT
             sl_pct = abs(sig.entry - sig.sl) / sig.entry
             if sl_pct == 0:
                 return
             qty = (risk_usdt / sl_pct) / sig.entry
+            # Sanity check: notional should not exceed 30% of balance
+            notional = qty * sig.entry
+            max_notional = balance * 0.3
+            if notional > max_notional:
+                log.warning(f"Позиция {sig.symbol} слишком большая: {notional:.2f} USDT (>{max_notional:.2f}) — обрезаем")
+                qty = max_notional / sig.entry
+                risk_usdt = qty * sig.entry * sl_pct
             # Enforce minimum position size
             min_qty = cfg.MIN_POSITION_USDT / sig.entry
             if qty < min_qty:
@@ -242,6 +268,14 @@ class Scanner:
 
             sl_order = await self.ex.place_stop_loss(sig.symbol, side, qty, sig.sl)
             sl_id    = str(sl_order.get("data", {}).get("orderId", ""))
+            if sl_order.get("code") != 0 or not sl_id:
+                log.error(f"SL-ордер не выставился для {sig.symbol} — закрываем позицию!")
+                await self._notify(f"⚠️ SL не выставился для <b>{sig.symbol}</b> — позиция закрыта в безопасность")
+                try:
+                    await self.ex.close_position(sig.symbol, qty, sig.side)
+                except Exception as ce:
+                    log.error(f"emergency close {sig.symbol}: {ce}")
+                return
 
             tp_order = await self.ex.place_take_profit(sig.symbol, side, qty, sig.tp3)
             tp_id    = str(tp_order.get("data", {}).get("orderId", ""))
@@ -322,8 +356,8 @@ class Scanner:
                     continue
                 price = float(ticker.get("lastPrice", pos.entry))
 
-                # Breakeven trigger
-                if not pos.be_moved:
+                # Breakeven trigger — skip for exchange-synced positions (tp1/sl unknown)
+                if not pos.be_moved and pos.sl > 0:
                     be_triggered = False
                     if cfg.BE_TRIGGER_PCT > 0:
                         # Price moved BE_TRIGGER_PCT% from entry in profit direction
@@ -331,15 +365,15 @@ class Scanner:
                             be_triggered = price >= pos.entry * (1 + cfg.BE_TRIGGER_PCT / 100)
                         else:
                             be_triggered = price <= pos.entry * (1 - cfg.BE_TRIGGER_PCT / 100)
-                    else:
-                        # Fallback: TP1 trigger
+                    elif pos.tp1 > 0:
+                        # Fallback: TP1 trigger (only if TP1 is known)
                         be_triggered = (pos.side == "LONG" and price >= pos.tp1) or \
                                        (pos.side == "SHORT" and price <= pos.tp1)
                     if be_triggered:
                         await self._move_be(pos)
 
-                # TP2 → partial close
-                if pos.be_moved and not pos.tp2_hit:
+                # TP2 → partial close — skip if tp2 unknown (synced position)
+                if pos.be_moved and not pos.tp2_hit and pos.tp2 > 0:
                     tp2_hit = (pos.side == "LONG" and price >= pos.tp2) or \
                               (pos.side == "SHORT" and price <= pos.tp2)
                     if tp2_hit:
@@ -438,6 +472,9 @@ class Scanner:
             log.error(f"partial_close {pos.symbol}: {e}")
 
     async def _check_closed(self, pos: Position, price: float):
+        # Skip check for exchange-synced positions without SL/TP info
+        if pos.sl == 0 or pos.tp3 == 0:
+            return
         sl_hit  = (pos.side == "LONG"  and price <= pos.sl) or \
                   (pos.side == "SHORT" and price >= pos.sl)
         tp3_hit = (pos.side == "LONG"  and price >= pos.tp3) or \

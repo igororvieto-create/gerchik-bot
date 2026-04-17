@@ -317,6 +317,11 @@ class Scanner:
                 age = (datetime.utcnow() - pos.opened_at).total_seconds()
                 if age > 60 and symbol not in live_syms:
                     # Position no longer on exchange — clean up state
+                    if pos.sl == 0:
+                        # Manual/synced position — just remove from state, don't track PnL
+                        del state.positions[symbol]
+                        log.info(f"Ручная позиция {symbol} закрыта на бирже — убрана из памяти")
+                        continue
                     try:
                         ticker = await self.ex.get_ticker(symbol)
                         price = float(ticker.get("lastPrice", pos.entry)) if ticker else pos.entry

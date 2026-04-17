@@ -188,9 +188,10 @@ class BingXClient:
     async def close_position(self, symbol, qty, side):
         cs = "SELL" if side == "LONG" else "BUY"
         ps = side if side in ("LONG", "SHORT") else "LONG"
+        # В hedge mode (positionSide=LONG/SHORT) reduceOnly не нужен
         result = await self._post("/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": cs, "positionSide": ps,
-            "type": "MARKET", "quantity": qty, "reduceOnly": "true",
+            "type": "MARKET", "quantity": qty,
         })
         if result.get("code") != 0:
             raise RuntimeError(f"close_position failed: {result}")

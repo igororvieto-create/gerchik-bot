@@ -200,6 +200,7 @@ async def cmd_settings(msg: Message):
         f"Объём (мульт.): <code>{cfg.VOLUME_MULT}x</code>\n"
         f"SL буфер: <code>{cfg.SL_BUFFER_PCT}%</code>\n"
         f"Мин. позиция: <code>{cfg.MIN_POSITION_USDT} USDT</code>\n"
+        f"Макс. риск USDT: <code>{cfg.MAX_RISK_USDT} USDT</code>\n"
         f"Авто-плечо: <code>{al}</code>\n"
         f"  до 100$ → x10 | до 500$ → x7 | до 2000$ → x5 | от 2000$ → x3\n"
         f"Безубыток: <code>{be_mode}</code> (буфер +{cfg.BE_BUFFER_PCT}%)\n"
@@ -359,6 +360,32 @@ async def cmd_setbe(msg: Message):
         await msg.answer("Введи число от 0 до 10 (например: /setbe 0.5)")
 
 
+async def cmd_setmaxrisk(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        await msg.answer(
+            f"🛡 <b>Макс. риск на сделку:</b> <code>{cfg.MAX_RISK_USDT} USDT</code>\n\n"
+            f"Жёсткий лимит убытка за 1 сделку.\n"
+            f"Изменить: <code>/setmaxrisk 20</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        v = float(args[1])
+        if v < 1 or v > 10000:
+            raise ValueError
+        cfg.MAX_RISK_USDT = v
+        await msg.answer(
+            f"✅ Макс. риск: <code>{v} USDT</code> на сделку",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
+    except Exception:
+        await msg.answer("Введи число от 1 до 10000 (например: /setmaxrisk 20)")
+
+
 async def cmd_setpairs(msg: Message):
     if not _auth(msg):
         return
@@ -399,6 +426,8 @@ async def cmd_pause(msg: Message):
     if not _auth(msg):
         return
     state.paused = True
+    from core import db
+    db.save_kv("paused", "1")
     await msg.answer("⏸ Торговля на паузе. /resume — возобновить", reply_markup=main_keyboard())
 
 
@@ -407,6 +436,8 @@ async def cmd_resume(msg: Message):
         return
     state.paused           = False
     state.day.paused_until = None
+    from core import db
+    db.save_kv("paused", "0")
     await msg.answer("▶️ Торговля возобновлена", reply_markup=main_keyboard())
 
 
@@ -655,7 +686,8 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_report,   Command("report"))
     dp.message.register(cmd_history,  Command("history"))
     dp.message.register(cmd_top,      Command("top"))
-    dp.message.register(cmd_setminpos, Command("setminpos"))
+    dp.message.register(cmd_setminpos,  Command("setminpos"))
+    dp.message.register(cmd_setmaxrisk, Command("setmaxrisk"))
     dp.message.register(cmd_setbe,    Command("setbe"))
     dp.message.register(cmd_settrail, Command("settrail"))
     dp.message.register(cmd_setpairs, Command("setpairs"))

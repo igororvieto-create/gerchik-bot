@@ -60,11 +60,31 @@ async def main():
         try:
             balance = await exchange.get_balance()
             state.current_balance = balance
+
+            # Sync open positions from exchange to prevent re-opening after restart
+            live = await exchange.get_open_positions()
+            synced = 0
+            for p in live:
+                sym  = p.get("symbol", "")
+                side = p.get("positionSide", "LONG")
+                amt  = abs(float(p.get("positionAmt", 0)))
+                entry = float(p.get("entryPrice", 0))
+                if sym and amt > 0 and sym not in state.positions:
+                    from core.state import Position
+                    state.positions[sym] = Position(
+                        symbol=sym, side=side, entry=entry, sl=0.0,
+                        tp1=0.0, tp2=0.0, tp3=0.0, qty=amt, risk_usdt=0.0,
+                    )
+                    synced += 1
+            if synced:
+                log.info(f"Синхронизировано {synced} открытых позиций с биржи")
+
             await bot.send_message(
                 cfg.TELEGRAM_CHAT_ID,
                 f"✅ <b>Герчик Бот запущен</b>\n\n"
                 f"Режим: <code>{cfg.MODE}</code>\n"
                 f"Баланс: <code>{balance:.2f} USDT</code>\n"
+                f"Открытых позиций: <code>{len(state.positions)}</code>\n"
                 f"PnL всего: <code>{'+' if state.total_pnl >= 0 else ''}{state.total_pnl:.2f} USDT</code>",
                 parse_mode="HTML",
             )

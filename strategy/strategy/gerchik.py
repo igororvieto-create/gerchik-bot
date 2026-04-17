@@ -200,13 +200,8 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         log.debug(f"{symbol}: уровень {level:.4f} пробит ({touches} касаний)")
         return None
 
-    # ── Candle pattern on H1 (check last 3 candles) ──
-    pname, pside = "", ""
-    for idx in [-1, -2, -3]:
-        pn, ps = detect_pattern(h1, idx)
-        if pn:
-            pname, pside = pn, ps
-            break
+    # ── Candle pattern on H1 (last candle only — stale patterns skipped) ──
+    pname, pside = detect_pattern(h1, -1)
     if not pname:
         log.debug(f"{symbol}: нет паттерна на H1")
         return None

@@ -27,7 +27,7 @@ class Config:
     WHITELIST: List[str] = field(default_factory=lambda: [s.strip() for s in os.getenv("WHITELIST","").split(",") if s.strip()])
     BLACKLIST: List[str] = field(default_factory=lambda: [s.strip() for s in os.getenv("BLACKLIST","LUNA-USDT,FTT-USDT").split(",") if s.strip()])
     TOP_N_PAIRS:      int   = int(os.getenv("TOP_N_PAIRS", "0").strip())
-    TREND_TF:  str = "1D"
+    TREND_TF:  str = "1d"
     H4_TF:     str = "4h"
     SIGNAL_TF: str = "1h"
     TP1_RR: float = 1.0

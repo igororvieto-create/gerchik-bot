@@ -147,10 +147,13 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     if not d1 or not h4 or not h1:
         return None
     if len(d1["close"]) < cfg.TREND_EMA_D1:
+        log.debug(f"{symbol}: недостаточно D1 свечей ({len(d1['close'])} < {cfg.TREND_EMA_D1})")
         return None
     if len(h4["close"]) < cfg.TREND_EMA_H4 + 5:
+        log.debug(f"{symbol}: недостаточно H4 свечей")
         return None
     if len(h1["close"]) < 30:
+        log.debug(f"{symbol}: недостаточно H1 свечей")
         return None
 
     # ── D1 trend ──
@@ -166,6 +169,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     h4_aligned = (trend=="LONG" and h4_up) or (trend=="SHORT" and h4_dn)
     h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 2.0
     if not h4_aligned and not h4_near:
+        log.debug(f"{symbol}: H4 не выровнен с трендом {trend} и не рядом с EMA50")
         return None
 
     price = h1["close"][-1]
@@ -173,8 +177,12 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     # ── RSI filter ──
     h1_rsi  = rsi(h1["close"], 14)
     cur_rsi = h1_rsi[-1]
-    if trend == "LONG"  and cur_rsi > 75: return None
-    if trend == "SHORT" and cur_rsi < 25: return None
+    if trend == "LONG"  and cur_rsi > 75:
+        log.debug(f"{symbol}: RSI перекуплен {cur_rsi:.1f} > 75")
+        return None
+    if trend == "SHORT" and cur_rsi < 25:
+        log.debug(f"{symbol}: RSI перепродан {cur_rsi:.1f} < 25")
+        return None
 
     # ── S/R levels (wide tolerance + both sides) ──
     lv4 = find_levels(h4["high"], h4["low"], lookback=120)
@@ -182,12 +190,14 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     # combine support AND resistance — price can be near either
     all_levels = lv4["support"] + lv4["resistance"] + \
                  lv1["support"] + lv1["resistance"]
-    near, level = near_level(price, all_levels, tol=1.5)
+    near, level = near_level(price, all_levels, tol=2.0)
     if not near:
+        log.debug(f"{symbol}: цена {price:.4f} не у уровня (найдено {len(all_levels)} уровней)")
         return None
 
     touches = level_touches(level, h4["high"][-120:], h4["low"][-120:])
     if touches > 6:
+        log.debug(f"{symbol}: уровень {level:.4f} пробит ({touches} касаний)")
         return None
 
     # ── Candle pattern on H1 (check last 3 candles) ──
@@ -198,10 +208,12 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
             pname, pside = pn, ps
             break
     if not pname:
+        log.debug(f"{symbol}: нет паттерна на H1")
         return None
     if pside == "DOJI":
         pside = trend
     if pside != trend:
+        log.debug(f"{symbol}: паттерн {pname} не совпадает с трендом {trend}")
         return None
 
     # ── H4 pattern (bonus) ──
@@ -212,11 +224,16 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     vm    = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
     vrat  = max(h1["volume"][-1], h1["volume"][-2]) / vm[-1] if vm[-1] > 0 else 0
     if vrat < cfg.VOLUME_MULT:
+        log.debug(f"{symbol}: объём {vrat:.2f}× ниже порога {cfg.VOLUME_MULT}×")
         return None
 
     # ── Funding rate ──
-    if trend=="LONG"  and funding > cfg.FUNDING_MAX_LONG:  return None
-    if trend=="SHORT" and funding < cfg.FUNDING_MAX_SHORT: return None
+    if trend=="LONG"  and funding > cfg.FUNDING_MAX_LONG:
+        log.debug(f"{symbol}: фандинг {funding:.4f}% слишком высокий для LONG")
+        return None
+    if trend=="SHORT" and funding < cfg.FUNDING_MAX_SHORT:
+        log.debug(f"{symbol}: фандинг {funding:.4f}% слишком низкий для SHORT")
+        return None
 
     # ── ATR-based SL ──
     h1_atr  = atr(h1["high"], h1["low"], h1["close"], 14)
@@ -258,6 +275,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     # H4 confirmation
     if h4ok:          score += 10
     if h4_aligned:    score += 5
+    elif h4_near:     score += 3
     # RSI positioning (ideal: 40-60 for LONG, 40-60 for SHORT)
     rsi_ok = (trend=="LONG" and 35 <= cur_rsi <= 60) or \
              (trend=="SHORT" and 40 <= cur_rsi <= 65)

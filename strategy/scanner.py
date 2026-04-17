@@ -105,15 +105,26 @@ class Scanner:
             return
 
         signals.sort(key=lambda s: s.score, reverse=True)
-        top = "\n".join(f"• {s.symbol} {s.side} ⭐{s.score}" for s in signals[:3])
-        await self._notify(f"🔍 Найдено <b>{len(signals)}</b> сигналов:\n{top}")
+        qualified = [s for s in signals if s.score >= cfg.MIN_SCORE]
+        skipped   = len(signals) - len(qualified)
+        if skipped:
+            log.info(f"Отфильтровано по MIN_SCORE ({cfg.MIN_SCORE}): {skipped} сигналов")
+        if not qualified:
+            log.info("Нет сигналов с достаточным score")
+            if self._scan_count % 4 == 1:
+                await self._notify(
+                    f"🔍 Скан: {len(state.pairs)} пар — {len(signals)} сигналов ниже MIN_SCORE {cfg.MIN_SCORE}\n"
+                    f"Следующий через 15 мин"
+                )
+            return
 
-        for sig in signals:
+        top = "\n".join(f"• {s.symbol} {s.side} ⭐{s.score}" for s in qualified[:3])
+        await self._notify(f"🔍 Найдено <b>{len(qualified)}</b> сигналов:\n{top}")
+
+        for sig in qualified:
             can, _ = state.can_trade(cfg.MAX_DAILY_LOSS, cfg.MAX_POSITIONS, cfg.MAX_DAILY_TRADES)
             if not can:
                 break
-            if sig.score < cfg.MIN_SCORE:
-                continue
             await self._handle(sig)
 
     async def _analyze(self, symbol: str):

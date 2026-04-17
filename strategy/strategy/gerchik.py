@@ -24,7 +24,25 @@ class Signal:
 def parse_klines(raw):
     if not raw:
         return {}
-    arr = np.array([[float(c) for c in k[:6]] for k in raw])
+    rows = []
+    for k in raw:
+        try:
+            if isinstance(k, dict):
+                rows.append([
+                    float(k.get("time", k.get("t", 0))),
+                    float(k.get("open", k.get("o", 0))),
+                    float(k.get("high", k.get("h", 0))),
+                    float(k.get("low",  k.get("l", 0))),
+                    float(k.get("close", k.get("c", 0))),
+                    float(k.get("volume", k.get("v", 0))),
+                ])
+            else:
+                rows.append([float(c) for c in k[:6]])
+        except Exception:
+            continue
+    if not rows:
+        return {}
+    arr = np.array(rows)
     return {
         "ts": arr[:,0], "open": arr[:,1], "high": arr[:,2],
         "low": arr[:,3], "close": arr[:,4], "volume": arr[:,5],

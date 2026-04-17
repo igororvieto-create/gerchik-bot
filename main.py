@@ -33,6 +33,9 @@ async def main():
     db.init_db()
     state.total_pnl = db.load_total_pnl()
     log.info(f"Восстановлен total_pnl из БД: {state.total_pnl:.2f} USDT")
+    state.paused = db.get_kv("paused", "0") == "1"
+    if state.paused:
+        log.info("Бот восстановлен на паузе (из БД)")
 
     bot = Bot(token=cfg.TELEGRAM_TOKEN)
     dp  = Dispatcher()

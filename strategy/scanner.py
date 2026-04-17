@@ -125,6 +125,11 @@ class Scanner:
             can, _ = state.can_trade(cfg.MAX_DAILY_LOSS, cfg.MAX_POSITIONS, cfg.MAX_DAILY_TRADES)
             if not can:
                 break
+            # Correlation filter: max 2 positions in same direction
+            same_dir = sum(1 for p in state.positions.values() if p.side == sig.side)
+            if same_dir >= 2:
+                log.info(f"Корреляция: пропуск {sig.symbol} {sig.side} (уже {same_dir} в том же направлении)")
+                continue
             await self._handle(sig)
 
     async def _analyze(self, symbol: str):

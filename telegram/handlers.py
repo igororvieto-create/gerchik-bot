@@ -302,6 +302,31 @@ async def cmd_setminpos(msg: Message):
         await msg.answer("Введи число от 1 до 10000 (например: /setminpos 20)")
 
 
+async def cmd_setmaxpos(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        await msg.answer(
+            f"📊 <b>Макс. позиций:</b> <code>{cfg.MAX_POSITIONS}</code>\n\n"
+            f"Изменить: <code>/setmaxpos 3</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        v = int(args[1])
+        if v < 1 or v > 20:
+            raise ValueError
+        cfg.MAX_POSITIONS = v
+        await msg.answer(
+            f"✅ Макс. позиций: <code>{v}</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
+    except Exception:
+        await msg.answer("Введи число от 1 до 20 (например: /setmaxpos 3)")
+
+
 async def cmd_settrail(msg: Message):
     if not _auth(msg):
         return
@@ -398,15 +423,19 @@ async def cmd_setpairs(msg: Message):
 async def cmd_pause(msg: Message):
     if not _auth(msg):
         return
+    from core import db
     state.paused = True
+    db.save_kv("paused", "1")
     await msg.answer("⏸ Торговля на паузе. /resume — возобновить", reply_markup=main_keyboard())
 
 
 async def cmd_resume(msg: Message):
     if not _auth(msg):
         return
+    from core import db
     state.paused           = False
     state.day.paused_until = None
+    db.save_kv("paused", "0")
     await msg.answer("▶️ Торговля возобновлена", reply_markup=main_keyboard())
 
 
@@ -657,8 +686,9 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_report,   Command("report"))
     dp.message.register(cmd_history,  Command("history"))
     dp.message.register(cmd_top,      Command("top"))
-    dp.message.register(cmd_setminpos, Command("setminpos"))
-    dp.message.register(cmd_setbe,    Command("setbe"))
+    dp.message.register(cmd_setminpos,  Command("setminpos"))
+    dp.message.register(cmd_setmaxpos,  Command("setmaxpos"))
+    dp.message.register(cmd_setbe,      Command("setbe"))
     dp.message.register(cmd_settrail, Command("settrail"))
     dp.message.register(cmd_setpairs, Command("setpairs"))
     dp.message.register(cmd_pause,    Command("pause"))

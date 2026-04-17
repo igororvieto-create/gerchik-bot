@@ -493,7 +493,7 @@ async def cmd_closeall(msg: Message):
         await ex.close()
         await msg.answer("Нет открытых позиций", reply_markup=main_keyboard())
         return
-    closed = []
+    closed, errors = [], []
     for p in live:
         sym  = p.get("symbol")
         side = p.get("positionSide", "LONG")
@@ -506,6 +506,7 @@ async def cmd_closeall(msg: Message):
             closed.append(sym)
         except Exception as e:
             log.error(f"closeall {sym}: {e}")
+            errors.append(sym)
     if not live:
         for sym, p in list(state.positions.items()):
             try:
@@ -514,11 +515,12 @@ async def cmd_closeall(msg: Message):
                 closed.append(sym)
             except Exception as e:
                 log.error(f"closeall {sym}: {e}")
+                errors.append(sym)
     await ex.close()
-    await msg.answer(
-        f"✅ Закрыто: {', '.join(closed) or 'ничего'}",
-        reply_markup=main_keyboard(),
-    )
+    text = f"✅ Закрыто: {', '.join(closed) or 'ничего'}"
+    if errors:
+        text += f"\n❌ Ошибка закрытия: {', '.join(errors)}"
+    await msg.answer(text, reply_markup=main_keyboard())
 
 
 # ------------------------------------------------------------------ inline callbacks (manual mode)

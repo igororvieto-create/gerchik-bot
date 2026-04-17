@@ -187,10 +187,14 @@ class BingXClient:
 
     async def close_position(self, symbol, qty, side):
         cs = "SELL" if side == "LONG" else "BUY"
-        return await self.place_order(symbol, cs, qty,
-                                      position_side=side,
-                                      order_type="MARKET",
-                                      reduce_only=True)
+        ps = side if side in ("LONG", "SHORT") else "LONG"
+        result = await self._post("/openApi/swap/v2/trade/order", {
+            "symbol": symbol, "side": cs, "positionSide": ps,
+            "type": "MARKET", "quantity": qty, "reduceOnly": "true",
+        })
+        if result.get("code") != 0:
+            raise RuntimeError(f"close_position failed: {result}")
+        return result
 
     async def set_leverage(self, symbol, leverage):
         await self._post("/openApi/swap/v2/trade/leverage",

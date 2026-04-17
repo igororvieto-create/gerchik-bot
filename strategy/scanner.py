@@ -202,21 +202,6 @@ class Scanner:
 
     async def _enter(self, sig: Signal, confirmed: bool = False):
         try:
-            # Staleness check: skip if price drifted >0.5% from signal level
-            try:
-                ticker = await self.ex.get_ticker(sig.symbol)
-                current_price = float(ticker.get("lastPrice", sig.entry)) if ticker else sig.entry
-                drift_pct = abs(current_price - sig.entry) / sig.entry * 100
-                if drift_pct > 0.5:
-                    log.info(f"Пропуск {sig.symbol}: цена сдвинулась на {drift_pct:.2f}% от сигнала")
-                    await self._notify(
-                        f"⏭ Пропуск <b>{sig.symbol}</b>: цена ушла на {drift_pct:.1f}% от точки входа"
-                    )
-                    state.pending.pop(sig.symbol, None)
-                    return
-            except Exception as e:
-                log.warning(f"drift check {sig.symbol}: {e}")
-
             balance = await self.ex.get_balance()
             if balance <= 0:
                 await self._notify("⚠️ Нет баланса для входа")

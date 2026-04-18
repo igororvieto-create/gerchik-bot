@@ -222,40 +222,43 @@ class Scanner:
                 log.info(f"Авто-плечо: баланс {balance:.2f} → x{leverage}")
 
             risk_usdt = balance * cfg.RISK_PER_TRADE / 100
-            # Hard cap: never risk more than MAX_RISK_USDT per trade
             if risk_usdt > cfg.MAX_RISK_USDT:
                 log.info(f"risk_usdt {risk_usdt:.2f} > MAX_RISK_USDT {cfg.MAX_RISK_USDT} — обрезаем")
                 risk_usdt = cfg.MAX_RISK_USDT
             sl_pct = abs(sig.entry - sig.sl) / sig.entry
             if sl_pct == 0:
+                log.warning(f"{sig.symbol}: sl_pct=0, пропуск")
                 return
             qty = (risk_usdt / sl_pct) / sig.entry
-            # Sanity check: notional should not exceed 30% of balance
             notional = qty * sig.entry
             max_notional = balance * 0.3
             if notional > max_notional:
-                log.warning(f"Позиция {sig.symbol} слишком большая: {notional:.2f} USDT (>{max_notional:.2f}) — обрезаем")
+                log.warning(f"Позиция {sig.symbol} слишком большая: {notional:.2f} > {max_notional:.2f} — обрезаем")
                 qty = max_notional / sig.entry
                 risk_usdt = qty * sig.entry * sl_pct
-            # Enforce minimum position size
             min_qty = cfg.MIN_POSITION_USDT / sig.entry
             if qty < min_qty:
                 qty = min_qty
                 log.info(f"qty увеличен до минимума {cfg.MIN_POSITION_USDT} USDT для {sig.symbol}")
             qty = round(qty, 3)
             if qty <= 0:
+                log.warning(f"{sig.symbol}: qty=0, пропуск")
                 return
 
             await self.ex.set_leverage(sig.symbol, leverage)
             side  = "BUY" if sig.side == "LONG" else "SELL"
             order = await self.ex.place_order(sig.symbol, side, qty, position_side=sig.side)
+            if order.get("code") != 0:
+                log.error(f"Ордер входа отклонён {sig.symbol}: {order}")
+                await self._notify(f"❌ Вход отклонён <b>{sig.symbol}</b>: {order.get('msg', '')}")
+                return
             order_id = str(order.get("data", {}).get("orderId", ""))
 
             sl_order = await self.ex.place_stop_loss(sig.symbol, side, qty, sig.sl)
             sl_id    = str(sl_order.get("data", {}).get("orderId", ""))
             if sl_order.get("code") != 0 or not sl_id:
-                log.error(f"SL-ордер не выставился для {sig.symbol} — закрываем позицию!")
-                await self._notify(f"⚠️ SL не выставился для <b>{sig.symbol}</b> — позиция закрыта в безопасность")
+                log.error(f"SL не выставился {sig.symbol}: {sl_order} — аварийное закрытие")
+                await self._notify(f"⚠️ SL не выставился <b>{sig.symbol}</b> — закрываем")
                 try:
                     await self.ex.close_position(sig.symbol, qty, sig.side)
                 except Exception as ce:
@@ -264,6 +267,8 @@ class Scanner:
 
             tp_order = await self.ex.place_take_profit(sig.symbol, side, qty, sig.tp3)
             tp_id    = str(tp_order.get("data", {}).get("orderId", ""))
+            if tp_order.get("code") != 0:
+                log.warning(f"TP не выставился {sig.symbol}: {tp_order} — позиция без TP")
 
             pos = Position(
                 symbol=sig.symbol, side=sig.side,

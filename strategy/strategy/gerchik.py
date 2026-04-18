@@ -200,6 +200,30 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         log.debug(f"{symbol}: уровень {level:.4f} пробит ({touches} касаний)")
         return None
 
+    # ── ATR-based SL ──
+    h1_atr  = atr(h1["high"], h1["low"], h1["close"], 14)
+    cur_atr = h1_atr[-1]
+
+    # ── Filter 1: ATR volatility — skip flat or explosive markets ──
+    atr_pct = cur_atr / price * 100
+    if atr_pct < 0.3:
+        log.debug(f"{symbol}: ATR слишком мал {atr_pct:.2f}% < 0.3% — рынок флэт")
+        return None
+    if atr_pct > 3.0:
+        log.debug(f"{symbol}: ATR слишком велик {atr_pct:.2f}% > 3.0% — рынок взрывной")
+        return None
+
+    # ── Filter 2: H1 EMA21 — третий подтверждающий фильтр тренда ──
+    ema21   = ema(h1["close"], cfg.TREND_EMA_H1)
+    h1_up   = price > ema21[-1]
+    h1_dn   = price < ema21[-1]
+    if trend == "LONG" and not h1_up:
+        log.debug(f"{symbol}: H1 цена ниже EMA21 — нет подтверждения LONG")
+        return None
+    if trend == "SHORT" and not h1_dn:
+        log.debug(f"{symbol}: H1 цена выше EMA21 — нет подтверждения SHORT")
+        return None
+
     # ── Candle pattern on H1 (last candle only — stale patterns skipped) ──
     pname, pside = detect_pattern(h1, -1)
     if not pname:
@@ -211,7 +235,12 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         log.debug(f"{symbol}: паттерн {pname} не совпадает с трендом {trend}")
         return None
 
-    # ── H4 pattern (bonus) ──
+    # ── Filter 3: Pattern body size ≥ 0.5× ATR (no tiny/weak candles) ──
+    pat_i    = len(h1["open"]) - 1
+    pat_body = abs(h1["close"][pat_i] - h1["open"][pat_i])
+    if pat_body < cur_atr * 0.5:
+        log.debug(f"{symbol}: тело паттерна {pat_body:.6f} < 0.5×ATR {cur_atr*0.5:.6f} — слабая свеча")
+        return None
     h4p, h4s = detect_pattern(h4)
     h4ok = h4p != "" and (h4s == trend or h4s == "DOJI")
 
@@ -230,9 +259,6 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         log.debug(f"{symbol}: фандинг {funding:.4f}% слишком низкий для SHORT")
         return None
 
-    # ── ATR-based SL ──
-    h1_atr  = atr(h1["high"], h1["low"], h1["close"], 14)
-    cur_atr = h1_atr[-1]
     buf     = price * cfg.SL_BUFFER_PCT / 100
     atr_sl  = cur_atr * 1.5
 

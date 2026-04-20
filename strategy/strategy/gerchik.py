@@ -67,7 +67,8 @@ def rsi(closes, period=14):
     for i in range(period+1, len(closes)):
         avg_g[i] = (avg_g[i-1]*(period-1) + gains[i-1]) / period
         avg_l[i] = (avg_l[i-1]*(period-1) + losses[i-1]) / period
-    rs = np.where(avg_l == 0, 100.0, avg_g / avg_l)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rs = np.where(avg_l == 0, 100.0, avg_g / avg_l)
     return np.where(avg_l == 0, 100.0, 100 - 100/(1+rs))
 
 def atr(highs, lows, closes, period=14):

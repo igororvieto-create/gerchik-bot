@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 from datetime import datetime, timedelta
 
 from aiogram import Bot
@@ -252,6 +253,9 @@ class Scanner:
                 qty = min_qty
                 log.info(f"qty увеличен до минимума {cfg.MIN_POSITION_USDT} USDT для {sig.symbol}")
             qty = round(qty, 3)
+            # After rounding, notional may dip below minimum — correct with ceiling
+            if qty * sig.entry < cfg.MIN_POSITION_USDT:
+                qty = math.ceil(cfg.MIN_POSITION_USDT / sig.entry * 1000) / 1000
             if qty <= 0:
                 log.warning(f"{sig.symbol}: qty=0, пропуск")
                 return

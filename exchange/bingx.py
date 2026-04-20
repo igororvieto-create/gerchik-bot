@@ -138,6 +138,31 @@ class BingXClient:
         """Returns the raw API response for debugging."""
         return await self._get("/openApi/swap/v2/user/balance", {}, signed=True)
 
+    async def get_available_margin(self):
+        """Returns available (free) margin for new positions."""
+        data = await self._get("/openApi/swap/v2/user/balance", {}, signed=True)
+        try:
+            d = data.get("data", {})
+            if isinstance(d, dict) and "balance" in d:
+                bal = d["balance"]
+                if isinstance(bal, dict):
+                    for field in ("availableMargin", "available"):
+                        if field in bal:
+                            return float(bal[field])
+                if isinstance(bal, list):
+                    for a in bal:
+                        if a.get("asset") in ("USDT", "usdt"):
+                            for field in ("availableMargin", "available"):
+                                if field in a:
+                                    return float(a[field])
+            if isinstance(d, dict):
+                for field in ("availableMargin", "available"):
+                    if field in d:
+                        return float(d[field])
+        except Exception as e:
+            log.error(f"get_available_margin error: {e}")
+        return 0.0
+
     async def get_open_positions(self):
         data = await self._get("/openApi/swap/v2/user/positions", {}, signed=True)
         try:

@@ -289,6 +289,24 @@ class Scanner:
                 log.warning(f"{sig.symbol}: qty=0, пропуск")
                 return
 
+            # Pre-check available margin to avoid "Insufficient margin" rejection
+            required_margin = min_notional / leverage
+            try:
+                avail_margin = await self.ex.get_available_margin()
+                if avail_margin > 0 and avail_margin < required_margin * 1.05:
+                    log.warning(
+                        f"{sig.symbol}: недостаточно свободной маржи "
+                        f"{avail_margin:.2f} < {required_margin:.2f} USDT — пропуск"
+                    )
+                    await self._notify(
+                        f"⚠️ <b>{sig.symbol}</b> пропущен\n"
+                        f"Недостаточно маржи: {avail_margin:.2f} USDT\n"
+                        f"Требуется: {required_margin:.2f} USDT (мин. позиция)"
+                    )
+                    return
+            except Exception as e:
+                log.warning(f"{sig.symbol}: не удалось проверить маржу — продолжаем: {e}")
+
             # Staleness check: skip only if price moved AGAINST the signal
             try:
                 ticker = await self.ex.get_ticker(sig.symbol)

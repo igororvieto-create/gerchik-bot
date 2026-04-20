@@ -18,7 +18,7 @@ class Config:
     SL_BUFFER_PCT:    float = float(os.getenv("SL_BUFFER_PCT", "0.15").strip())
     VOLUME_MULT:      float = float(os.getenv("VOLUME_MULT", "1.3").strip())
     VOLUME_MA_PERIOD: int   = int(os.getenv("VOLUME_MA_PERIOD", "20").strip())
-    MIN_SCORE:        int   = int(os.getenv("MIN_SCORE", "55").strip())
+    MIN_SCORE:        int   = int(os.getenv("MIN_SCORE", "65").strip())
     TREND_EMA_D1:     int   = int(os.getenv("TREND_EMA_D1", "200").strip())
     TREND_EMA_H4:     int   = int(os.getenv("TREND_EMA_H4", "50").strip())
     TREND_EMA_H1:     int   = int(os.getenv("TREND_EMA_H1", "21").strip())

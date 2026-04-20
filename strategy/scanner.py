@@ -254,6 +254,17 @@ class Scanner:
                 log.warning(f"{sig.symbol}: qty=0, пропуск")
                 return
 
+            # Staleness check: skip if price drifted >0.8% from signal
+            try:
+                ticker = await self.ex.get_ticker(sig.symbol)
+                cur_price = float(ticker.get("lastPrice", sig.entry))
+                drift = abs(cur_price - sig.entry) / sig.entry * 100
+                if drift > 0.8:
+                    log.info(f"{sig.symbol}: цена ушла на {drift:.2f}% от сигнала — пропуск")
+                    return
+            except Exception:
+                pass
+
             await self.ex.set_leverage(sig.symbol, leverage)
             side  = "BUY" if sig.side == "LONG" else "SELL"
             order = await self.ex.place_order(sig.symbol, side, qty, position_side=sig.side)

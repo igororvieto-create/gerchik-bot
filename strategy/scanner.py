@@ -95,7 +95,9 @@ class Scanner:
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
-                if isinstance(r, Signal):
+                if isinstance(r, Exception):
+                    log.error(f"Ошибка анализа пары: {r}")
+                elif isinstance(r, Signal):
                     signals.append(r)
             if i + cfg.SCAN_BATCH_SIZE < len(state.pairs):
                 await asyncio.sleep(cfg.SCAN_BATCH_DELAY)
@@ -271,8 +273,8 @@ class Scanner:
                     return
                 # Use current price as actual entry
                 sig.entry = cur_price
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning(f"{sig.symbol}: не удалось получить текущую цену перед входом — используется цена сигнала: {e}")
 
             await self.ex.set_leverage(sig.symbol, leverage)
             side  = "BUY" if sig.side == "LONG" else "SELL"
@@ -363,7 +365,8 @@ class Scanner:
                     try:
                         ticker = await self.ex.get_ticker(symbol)
                         price = float(ticker.get("lastPrice", pos.entry)) if ticker else pos.entry
-                    except Exception:
+                    except Exception as e:
+                        log.warning(f"{symbol}: ошибка получения цены при закрытии — P&L посчитан по цене входа: {e}")
                         price = pos.entry
                     pnl = (price - pos.entry) * pos.qty if pos.side == "LONG" \
                           else (pos.entry - price) * pos.qty
@@ -380,8 +383,8 @@ class Scanner:
                     try:
                         from core import db
                         db.save_trade(pos, price, pnl, result)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.error(f"{symbol}: ошибка сохранения сделки в БД: {e}")
                     del state.positions[symbol]
                     # Set cooldown if closed at a loss (likely SL hit)
                     if pnl <= 0:

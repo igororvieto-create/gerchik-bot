@@ -11,7 +11,7 @@ from exchange.bingx import BingXClient
 from telegram.handlers import register_handlers
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger("main")

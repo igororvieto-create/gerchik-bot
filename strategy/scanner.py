@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 from datetime import datetime, timedelta
 
 from aiogram import Bot
@@ -95,7 +96,9 @@ class Scanner:
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
-                if isinstance(r, Signal):
+                if isinstance(r, Exception):
+                    log.error(f"Ошибка анализа пары: {r}")
+                elif isinstance(r, Signal):
                     signals.append(r)
             if i + cfg.SCAN_BATCH_SIZE < len(state.pairs):
                 await asyncio.sleep(cfg.SCAN_BATCH_DELAY)
@@ -240,16 +243,21 @@ class Scanner:
                 return
             qty = (risk_usdt / sl_pct) / sig.entry
             notional = qty * sig.entry
-            max_notional = max(balance * 0.3, cfg.MIN_POSITION_USDT)
+            # MIN_POSITION_USDT is margin — notional minimum = margin * leverage
+            min_notional = cfg.MIN_POSITION_USDT * leverage
+            max_notional = max(balance * 0.3 * leverage, min_notional)
             if notional > max_notional:
                 log.warning(f"Позиция {sig.symbol}: {notional:.2f} > {max_notional:.2f} — обрезаем")
                 qty = max_notional / sig.entry
                 risk_usdt = qty * sig.entry * sl_pct
-            min_qty = cfg.MIN_POSITION_USDT / sig.entry
+            min_qty = min_notional / sig.entry
             if qty < min_qty:
                 qty = min_qty
-                log.info(f"qty увеличен до минимума {cfg.MIN_POSITION_USDT} USDT для {sig.symbol}")
+                log.info(f"qty увеличен до минимума {min_notional:.2f} USDT (маржа {cfg.MIN_POSITION_USDT}×{leverage}) для {sig.symbol}")
             qty = round(qty, 3)
+            # After rounding, notional may dip below minimum — correct with ceiling
+            if qty * sig.entry < min_notional:
+                qty = math.ceil(min_notional / sig.entry * 1000) / 1000
             if qty <= 0:
                 log.warning(f"{sig.symbol}: qty=0, пропуск")
                 return
@@ -271,8 +279,8 @@ class Scanner:
                     return
                 # Use current price as actual entry
                 sig.entry = cur_price
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning(f"{sig.symbol}: не удалось получить текущую цену перед входом — используется цена сигнала: {e}")
 
             await self.ex.set_leverage(sig.symbol, leverage)
             side  = "BUY" if sig.side == "LONG" else "SELL"
@@ -292,6 +300,13 @@ class Scanner:
                         actual = abs(float(p.get("positionAmt", 0)))
                         if actual > 0:
                             qty = round(actual, 3)
+                            actual_notional = qty * sig.entry
+                            min_notional_check = cfg.MIN_POSITION_USDT * leverage
+                            if actual_notional < min_notional_check:
+                                log.warning(
+                                    f"{sig.symbol}: реальный объём {actual_notional:.2f} USDT "
+                                    f"< минимума {min_notional_check:.2f} USDT (биржа округлила qty)"
+                                )
                             break
             except Exception as pe:
                 log.warning(f"Не удалось получить реальный qty {sig.symbol}: {pe}")
@@ -363,7 +378,8 @@ class Scanner:
                     try:
                         ticker = await self.ex.get_ticker(symbol)
                         price = float(ticker.get("lastPrice", pos.entry)) if ticker else pos.entry
-                    except Exception:
+                    except Exception as e:
+                        log.warning(f"{symbol}: ошибка получения цены при закрытии — P&L посчитан по цене входа: {e}")
                         price = pos.entry
                     pnl = (price - pos.entry) * pos.qty if pos.side == "LONG" \
                           else (pos.entry - price) * pos.qty
@@ -380,8 +396,8 @@ class Scanner:
                     try:
                         from core import db
                         db.save_trade(pos, price, pnl, result)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.error(f"{symbol}: ошибка сохранения сделки в БД: {e}")
                     del state.positions[symbol]
                     # Set cooldown if closed at a loss (likely SL hit)
                     if pnl <= 0:

@@ -67,7 +67,8 @@ def rsi(closes, period=14):
     for i in range(period+1, len(closes)):
         avg_g[i] = (avg_g[i-1]*(period-1) + gains[i-1]) / period
         avg_l[i] = (avg_l[i-1]*(period-1) + losses[i-1]) / period
-    rs = np.where(avg_l == 0, 100.0, avg_g / avg_l)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rs = np.where(avg_l == 0, 100.0, avg_g / avg_l)
     return np.where(avg_l == 0, 100.0, 100 - 100/(1+rs))
 
 def atr(highs, lows, closes, period=14):
@@ -202,15 +203,20 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         log.debug(f"{symbol}: RSI перепродан {cur_rsi:.1f} < 25")
         return None
 
-    # ── S/R levels (wide tolerance + both sides) ──
+    # ── S/R levels — LONG at support, SHORT at resistance ──
     lv4 = find_levels(h4["high"], h4["low"], lookback=120)
     lv1 = find_levels(h1["high"], h1["low"], lookback=80)
-    # combine support AND resistance — price can be near either
-    all_levels = lv4["support"] + lv4["resistance"] + \
-                 lv1["support"] + lv1["resistance"]
-    near, level = near_level(price, all_levels, tol=2.0)
+    if trend == "LONG":
+        primary   = lv4["support"]    + lv1["support"]
+        secondary = lv4["resistance"] + lv1["resistance"]
+    else:
+        primary   = lv4["resistance"] + lv1["resistance"]
+        secondary = lv4["support"]    + lv1["support"]
+    near, level = near_level(price, primary, tol=1.5)
     if not near:
-        log.debug(f"{symbol}: цена {price:.4f} не у уровня (найдено {len(all_levels)} уровней)")
+        near, level = near_level(price, secondary, tol=1.0)
+    if not near:
+        log.debug(f"{symbol}: цена {price:.4f} не у уровня (primary={len(primary)}, secondary={len(secondary)})")
         return None
 
     touches = level_touches(level, h4["high"][-120:], h4["low"][-120:])
@@ -254,7 +260,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
 
     # ── Volume ──
     vm    = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
-    vrat  = max(h1["volume"][-1], h1["volume"][-2]) / vm[-1] if vm[-1] > 0 else 0
+    vrat  = max(h1["volume"][-1], h1["volume"][-2]) / vm[-2] if vm[-2] > 0 else 0
     if vrat < cfg.VOLUME_MULT:
         log.debug(f"{symbol}: объём {vrat:.2f}× ниже порога {cfg.VOLUME_MULT}×")
         return None
@@ -312,6 +318,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     # Funding
     if abs(funding) < 0.01:   score += 8
     elif abs(funding) < 0.03: score += 4
+    # D1 slope — aligned with trend direction
+    if (trend == "LONG"  and d1_slope > 0.1) or \
+       (trend == "SHORT" and d1_slope < -0.1):
+        score += 5
     score = min(score, 100)
 
     rsi_str = f"{cur_rsi:.0f}"

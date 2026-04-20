@@ -438,6 +438,10 @@ class Scanner:
         except Exception as e:
             log.error(f"monitor sync: {e}")
 
+        # Clean up stale sl_cooldown entries (older than 2x cooldown window)
+        cutoff = datetime.utcnow() - timedelta(minutes=SL_COOLDOWN_MIN * 2)
+        self._sl_cooldown = {s: t for s, t in self._sl_cooldown.items() if t > cutoff}
+
         for symbol, pos in list(state.positions.items()):
             try:
                 ticker = await self.ex.get_ticker(symbol)
@@ -555,7 +559,7 @@ class Scanner:
                 pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
             await self._notify(
                 f"💚 <b>{label}</b> | {pos.symbol}\n"
-                f"Закрыто {int(pct * 100)}% позиции по <code>{pos.tp2:.4f}</code>"
+                f"Закрыто {int(pct * 100)}% позиции | цена рынка ~<code>{pos.tp2:.4f}</code>"
             )
         except Exception as e:
             log.error(f"partial_close {pos.symbol}: {e}")
@@ -590,7 +594,6 @@ class Scanner:
         else:
             state.day.losses     += 1
             state.day.loss_streak += 1
-            from datetime import timedelta
             state.day.paused_until = datetime.utcnow() + timedelta(minutes=cfg.PAUSE_AFTER_LOSS_MIN)
 
         # Save to DB

@@ -16,11 +16,15 @@ log = logging.getLogger("scanner")
 _SCANNING = False   # module-level lock — shared by ALL Scanner instances
 
 
+SL_COOLDOWN_MIN = 60  # minutes to skip a symbol after SL hit
+
+
 class Scanner:
     def __init__(self, exchange: BingXClient, bot: Bot):
         self.ex          = exchange
         self.bot         = bot
-        self._scan_count = 0    # count scans to limit "no signal" spam
+        self._scan_count = 0
+        self._sl_cooldown: dict = {}  # symbol → datetime of last SL hit
 
     # ------------------------------------------------------------------ notify
 
@@ -82,9 +86,12 @@ class Scanner:
         signals = []
         for i in range(0, len(state.pairs), cfg.SCAN_BATCH_SIZE):
             batch = state.pairs[i:i + cfg.SCAN_BATCH_SIZE]
+            now = datetime.utcnow()
             tasks = [
                 self._analyze(s) for s in batch
                 if s not in state.positions and s not in state.pending
+                and (s not in self._sl_cooldown or
+                     (now - self._sl_cooldown[s]).total_seconds() > SL_COOLDOWN_MIN * 60)
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
@@ -273,35 +280,16 @@ class Scanner:
             sl_id    = str(sl_order.get("data", {}).get("orderId", ""))
             if sl_order.get("code") != 0:
                 err_code = sl_order.get("code", "?")
-                # 110411: price already moved through SL — try to adjust SL to current price
-                if err_code == 110411:
-                    try:
-                        ticker = await self.ex.get_ticker(sig.symbol)
-                        cur_price = float(ticker.get("lastPrice", 0))
-                        if cur_price > 0:
-                            # Place SL 0.3% below/above current price
-                            adj_sl = round(cur_price * (0.997 if sig.side == "LONG" else 1.003), 8)
-                            sl_order = await self.ex.place_stop_loss(sig.symbol, side, qty, adj_sl)
-                            sl_id    = str(sl_order.get("data", {}).get("orderId", ""))
-                            if sl_order.get("code") == 0:
-                                sig.sl = adj_sl
-                                log.warning(f"SL скорректирован {sig.symbol}: {adj_sl:.6f} (рынок ушёл)")
-                    except Exception as ae:
-                        log.error(f"adjust SL {sig.symbol}: {ae}")
-                if sl_order.get("code") != 0:
-                    err_msg = sl_order.get("msg", str(sl_order))
-                    log.error(f"SL не выставился {sig.symbol}: {sl_order} — аварийное закрытие")
-                    await self._notify(
-                        f"⚠️ SL не выставился <b>{sig.symbol}</b>\n"
-                        f"Код: <code>{err_code}</code> | {err_msg}\n"
-                        f"SL цена: <code>{sig.sl:.4f}</code> | qty: <code>{qty}</code>\n"
-                        f"Закрываем позицию..."
-                    )
-                    try:
-                        await self.ex.close_position(sig.symbol, qty, sig.side)
-                    except Exception as ce:
-                        log.error(f"emergency close {sig.symbol}: {ce}")
-                    return
+                err_msg  = sl_order.get("msg", str(sl_order))
+                log.error(f"SL не выставился {sig.symbol}: код {err_code} — аварийное закрытие")
+                await self._notify(
+                    f"⚠️ SL не выставился <b>{sig.symbol}</b> (код {err_code}) — закрываем"
+                )
+                try:
+                    await self.ex.close_position(sig.symbol, qty, sig.side)
+                except Exception as ce:
+                    log.error(f"emergency close {sig.symbol}: {ce}")
+                return
             if not sl_id:
                 log.warning(f"SL выставлен (code=0) но orderId не получен {sig.symbol} — отмена SL позже недоступна")
 
@@ -546,6 +534,10 @@ class Scanner:
             log.error(f"db.save_trade: {e}")
 
         del state.positions[pos.symbol]
+
+        # Cooldown after SL hit — don't re-enter same symbol for 1 hour
+        if sl_hit:
+            self._sl_cooldown[pos.symbol] = datetime.utcnow()
 
         sign = "+" if pnl >= 0 else ""
         icon = "✅ WIN" if pnl > 0 else "❌ LOSS"

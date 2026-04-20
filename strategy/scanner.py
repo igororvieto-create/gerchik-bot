@@ -383,6 +383,9 @@ class Scanner:
                     except Exception:
                         pass
                     del state.positions[symbol]
+                    # Set cooldown if closed at a loss (likely SL hit)
+                    if pnl <= 0:
+                        self._sl_cooldown[symbol] = datetime.utcnow()
                     sign = "+" if pnl >= 0 else ""
                     await self._notify(
                         f"{'✅ WIN' if pnl > 0 else '❌ LOSS'} | {symbol} {pos.side}\n"

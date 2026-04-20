@@ -260,19 +260,35 @@ class Scanner:
             sl_id    = str(sl_order.get("data", {}).get("orderId", ""))
             if sl_order.get("code") != 0:
                 err_code = sl_order.get("code", "?")
-                err_msg  = sl_order.get("msg", str(sl_order))
-                log.error(f"SL не выставился {sig.symbol}: {sl_order} — аварийное закрытие")
-                await self._notify(
-                    f"⚠️ SL не выставился <b>{sig.symbol}</b>\n"
-                    f"Код: <code>{err_code}</code> | {err_msg}\n"
-                    f"SL цена: <code>{sig.sl:.4f}</code> | qty: <code>{qty}</code>\n"
-                    f"Закрываем позицию..."
-                )
-                try:
-                    await self.ex.close_position(sig.symbol, qty, sig.side)
-                except Exception as ce:
-                    log.error(f"emergency close {sig.symbol}: {ce}")
-                return
+                # 110411: price already moved through SL — try to adjust SL to current price
+                if err_code == 110411:
+                    try:
+                        ticker = await self.ex.get_ticker(sig.symbol)
+                        cur_price = float(ticker.get("lastPrice", 0))
+                        if cur_price > 0:
+                            # Place SL 0.3% below/above current price
+                            adj_sl = round(cur_price * (0.997 if sig.side == "LONG" else 1.003), 8)
+                            sl_order = await self.ex.place_stop_loss(sig.symbol, side, qty, adj_sl)
+                            sl_id    = str(sl_order.get("data", {}).get("orderId", ""))
+                            if sl_order.get("code") == 0:
+                                sig.sl = adj_sl
+                                log.warning(f"SL скорректирован {sig.symbol}: {adj_sl:.6f} (рынок ушёл)")
+                    except Exception as ae:
+                        log.error(f"adjust SL {sig.symbol}: {ae}")
+                if sl_order.get("code") != 0:
+                    err_msg = sl_order.get("msg", str(sl_order))
+                    log.error(f"SL не выставился {sig.symbol}: {sl_order} — аварийное закрытие")
+                    await self._notify(
+                        f"⚠️ SL не выставился <b>{sig.symbol}</b>\n"
+                        f"Код: <code>{err_code}</code> | {err_msg}\n"
+                        f"SL цена: <code>{sig.sl:.4f}</code> | qty: <code>{qty}</code>\n"
+                        f"Закрываем позицию..."
+                    )
+                    try:
+                        await self.ex.close_position(sig.symbol, qty, sig.side)
+                    except Exception as ce:
+                        log.error(f"emergency close {sig.symbol}: {ce}")
+                    return
             if not sl_id:
                 log.warning(f"SL выставлен (code=0) но orderId не получен {sig.symbol} — отмена SL позже недоступна")
 

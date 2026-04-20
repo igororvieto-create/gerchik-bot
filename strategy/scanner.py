@@ -259,8 +259,15 @@ class Scanner:
             sl_order = await self.ex.place_stop_loss(sig.symbol, side, qty, sig.sl)
             sl_id    = str(sl_order.get("data", {}).get("orderId", ""))
             if sl_order.get("code") != 0 or not sl_id:
+                err_code = sl_order.get("code", "?")
+                err_msg  = sl_order.get("msg", str(sl_order))
                 log.error(f"SL не выставился {sig.symbol}: {sl_order} — аварийное закрытие")
-                await self._notify(f"⚠️ SL не выставился <b>{sig.symbol}</b> — закрываем")
+                await self._notify(
+                    f"⚠️ SL не выставился <b>{sig.symbol}</b>\n"
+                    f"Код: <code>{err_code}</code> | {err_msg}\n"
+                    f"SL цена: <code>{sig.sl:.4f}</code> | qty: <code>{qty}</code>\n"
+                    f"Закрываем позицию..."
+                )
                 try:
                     await self.ex.close_position(sig.symbol, qty, sig.side)
                 except Exception as ce:

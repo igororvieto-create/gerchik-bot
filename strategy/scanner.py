@@ -118,8 +118,10 @@ class Scanner:
                 )
             return
 
-        top = "\n".join(f"• {s.symbol} {s.side} ⭐{s.score}" for s in qualified[:3])
-        await self._notify(f"🔍 Найдено <b>{len(qualified)}</b> сигналов:\n{top}")
+        # Take only top 3 by score
+        qualified = qualified[:cfg.MAX_POSITIONS]
+        top = "\n".join(f"• {s.symbol} {s.side} ⭐{s.score}" for s in qualified)
+        await self._notify(f"🔍 Найдено <b>{len(qualified)}</b> сигналов (топ по score):\n{top}")
 
         for sig in qualified:
             can, _ = state.can_trade(cfg.MAX_DAILY_LOSS, cfg.MAX_POSITIONS, cfg.MAX_DAILY_TRADES)

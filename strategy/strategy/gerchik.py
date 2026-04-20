@@ -216,7 +216,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     if not near:
         near, level = near_level(price, secondary, tol=1.0)
     if not near:
-        log.debug(f"{symbol}: цена {price:.4f} не у уровня (найдено {len(all_levels)} уровней)")
+        log.debug(f"{symbol}: цена {price:.4f} не у уровня (primary={len(primary)}, secondary={len(secondary)})")
         return None
 
     touches = level_touches(level, h4["high"][-120:], h4["low"][-120:])

@@ -51,5 +51,13 @@ class Config:
     MIN_POSITION_USDT:    float = float(os.getenv("MIN_POSITION_USDT", "20.0").strip())
     # Auto-leverage: adjust leverage based on balance tiers (True/False)
     AUTO_LEVERAGE:        bool  = os.getenv("AUTO_LEVERAGE", "true").strip().lower() == "true"
+    # Time filter: skip scanning during low-liquidity hours (UTC)
+    QUIET_HOURS_START:    int   = int(os.getenv("QUIET_HOURS_START", "0").strip())
+    QUIET_HOURS_END:      int   = int(os.getenv("QUIET_HOURS_END", "7").strip())
+    # BTC trend filter: skip LONG when BTC drops >2% in 3h, skip SHORT when BTC rises >2%
+    BTC_FILTER:           bool  = os.getenv("BTC_FILTER", "true").strip().lower() == "true"
+    BTC_FILTER_PCT:       float = float(os.getenv("BTC_FILTER_PCT", "2.0").strip())
+    # ADX minimum — below this value market is ranging, skip signal
+    ADX_MIN:              float = float(os.getenv("ADX_MIN", "18.0").strip())
 
 cfg = Config()

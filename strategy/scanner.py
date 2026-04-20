@@ -83,6 +83,11 @@ class Scanner:
         if not can:
             log.info(f"Пропуск скана: {reason}")
             return
+        # Time filter: skip low-liquidity hours
+        hour = datetime.utcnow().hour
+        if cfg.QUIET_HOURS_START <= hour < cfg.QUIET_HOURS_END:
+            log.info(f"Тихая сессия {hour}:00 UTC ({cfg.QUIET_HOURS_START}-{cfg.QUIET_HOURS_END}) — скан пропущен")
+            return
         log.info(f"Сканирую {len(state.pairs)} пар...")
         signals = []
         for i in range(0, len(state.pairs), cfg.SCAN_BATCH_SIZE):
@@ -133,10 +138,32 @@ class Scanner:
         top = "\n".join(f"• {s.symbol} {s.side} ⭐{s.score}" for s in qualified)
         await self._notify(f"🔍 Найдено <b>{len(qualified)}</b> сигналов (топ по score):\n{top}")
 
+        # BTC trend filter: fetch BTC once before handling signals
+        btc_bias = "NEUTRAL"
+        if cfg.BTC_FILTER:
+            try:
+                btc_h1 = parse_klines(await self.ex.get_klines("BTC-USDT", cfg.SIGNAL_TF, limit=10))
+                if btc_h1 and len(btc_h1["close"]) >= 4:
+                    btc_change = (btc_h1["close"][-1] - btc_h1["close"][-4]) / btc_h1["close"][-4] * 100
+                    if btc_change < -cfg.BTC_FILTER_PCT:
+                        btc_bias = "DOWN"
+                    elif btc_change > cfg.BTC_FILTER_PCT:
+                        btc_bias = "UP"
+                    log.info(f"BTC 3h: {btc_change:+.2f}% → bias={btc_bias}")
+            except Exception as e:
+                log.warning(f"BTC filter: {e}")
+
         for sig in qualified:
             can, _ = state.can_trade(cfg.MAX_DAILY_LOSS, cfg.MAX_POSITIONS, cfg.MAX_DAILY_TRADES)
             if not can:
                 break
+            # BTC filter: skip signals against BTC trend
+            if btc_bias == "DOWN" and sig.side == "LONG":
+                log.info(f"BTC падает ({btc_bias}) — пропуск LONG {sig.symbol}")
+                continue
+            if btc_bias == "UP" and sig.side == "SHORT":
+                log.info(f"BTC растёт ({btc_bias}) — пропуск SHORT {sig.symbol}")
+                continue
             # Correlation filter: max 2 bot-opened positions in same direction
             same_dir = sum(1 for p in state.positions.values() if p.side == sig.side and p.sl > 0)
             if same_dir >= 2:

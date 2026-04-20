@@ -114,9 +114,42 @@ def level_touches(level, highs, lows, tol=0.3):
     return sum(1 for h,l in zip(highs, lows) if abs(h-level)<=t or abs(l-level)<=t)
 
 def trend_slope(values, period=5):
-    """EMA slope: positive = rising, negative = falling."""
     e = ema(values, 20)
     return (e[-1] - e[-period]) / e[-period] * 100
+
+def adx(highs, lows, closes, period=14):
+    n = len(closes)
+    tr = np.zeros(n); plus_dm = np.zeros(n); minus_dm = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
+        up   = highs[i] - highs[i-1]
+        down = lows[i-1] - lows[i]
+        plus_dm[i]  = up   if up > down and up > 0   else 0
+        minus_dm[i] = down if down > up and down > 0 else 0
+    atr_s = np.zeros(n); pdm_s = np.zeros(n); mdm_s = np.zeros(n)
+    atr_s[period] = tr[1:period+1].sum()
+    pdm_s[period] = plus_dm[1:period+1].sum()
+    mdm_s[period] = minus_dm[1:period+1].sum()
+    for i in range(period+1, n):
+        atr_s[i] = atr_s[i-1] - atr_s[i-1]/period + tr[i]
+        pdm_s[i] = pdm_s[i-1] - pdm_s[i-1]/period + plus_dm[i]
+        mdm_s[i] = mdm_s[i-1] - mdm_s[i-1]/period + minus_dm[i]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        pdi = np.where(atr_s > 0, pdm_s / atr_s * 100, 0)
+        mdi = np.where(atr_s > 0, mdm_s / atr_s * 100, 0)
+        dx  = np.where((pdi + mdi) > 0, np.abs(pdi - mdi) / (pdi + mdi) * 100, 0)
+    adx_v = np.zeros(n)
+    start = 2 * period
+    if start < n:
+        adx_v[start] = dx[period:start+1].mean()
+        for i in range(start+1, n):
+            adx_v[i] = (adx_v[i-1] * (period-1) + dx[i]) / period
+    return adx_v
+
+def macd(closes, fast=12, slow=26, signal_period=9):
+    macd_line   = ema(closes, fast) - ema(closes, slow)
+    signal_line = ema(macd_line, signal_period)
+    return macd_line, signal_line, macd_line - signal_line
 
 # ─────────────────────────────────────── patterns ──
 
@@ -171,7 +204,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     if len(h4["close"]) < cfg.TREND_EMA_H4 + 5:
         log.debug(f"{symbol}: недостаточно H4 свечей")
         return None
-    if len(h1["close"]) < 30:
+    if len(h1["close"]) < 40:
         log.debug(f"{symbol}: недостаточно H1 свечей")
         return None
 
@@ -227,6 +260,18 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     # ── ATR-based SL ──
     h1_atr  = atr(h1["high"], h1["low"], h1["close"], 14)
     cur_atr = h1_atr[-1]
+
+    # ── ADX — market regime filter (skip ranging markets) ──
+    h4_adx  = adx(h4["high"], h4["low"], h4["close"], 14)
+    cur_adx = h4_adx[-1]
+    if cur_adx < cfg.ADX_MIN:
+        log.debug(f"{symbol}: ADX {cur_adx:.1f} < {cfg.ADX_MIN} — рынок в боковике")
+        return None
+
+    # ── MACD on H1 — momentum confirmation ──
+    _, _, macd_hist = macd(h1["close"])
+    macd_aligned = (trend == "LONG"  and macd_hist[-1] > macd_hist[-2]) or \
+                   (trend == "SHORT" and macd_hist[-1] < macd_hist[-2])
 
     # ── Filter 1: ATR volatility — skip flat or explosive markets ──
     atr_pct = cur_atr / price * 100
@@ -322,18 +367,25 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     if (trend == "LONG"  and d1_slope > 0.1) or \
        (trend == "SHORT" and d1_slope < -0.1):
         score += 5
+    # MACD momentum confirmation
+    if macd_aligned:
+        score += 8
+    # ADX strength bonus
+    if cur_adx >= 30:   score += 5
+    elif cur_adx >= 25: score += 3
     score = min(score, 100)
 
-    rsi_str = f"{cur_rsi:.0f}"
-    atr_str = f"{cur_atr:.4f}"
+    rsi_str  = f"{cur_rsi:.0f}"
+    atr_str  = f"{cur_atr:.4f}"
+    macd_str = "🟢" if macd_aligned else "⚪"
     reason  = (
         f"📊 <b>{symbol}</b> | {trend}\n"
         f"🕯 H1: {pname} | H4: {h4p if h4ok else '—'}\n"
         f"📈 D1: {'🟢' if d1_up else '🔴'} EMA200 slope {d1_slope:+.2f}%\n"
-        f"H4: {'🟢' if h4_up else '🔴'} EMA50\n"
+        f"H4: {'🟢' if h4_up else '🔴'} EMA50 | ADX: <code>{cur_adx:.1f}</code>\n"
         f"🎯 Уровень: <code>{level:.4f}</code> ({touches} кас.)\n"
         f"📦 Объём: <code>{vrat:.2f}×</code> | RSI: <code>{rsi_str}</code> | "
-        f"ATR: <code>{atr_str}</code>\n"
+        f"MACD: {macd_str} | ATR: <code>{atr_str}</code>\n"
         f"💱 Funding: <code>{funding:.4f}%</code>\n"
         f"🟡 Вход: <code>{price:.4f}</code> | 🔴 SL: <code>{sl:.4f}</code>\n"
         f"🟢 TP2: <code>{tp2:.4f}</code> | TP3: <code>{tp3:.4f}</code>\n"

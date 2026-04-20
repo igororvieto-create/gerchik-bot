@@ -243,19 +243,21 @@ class Scanner:
                 return
             qty = (risk_usdt / sl_pct) / sig.entry
             notional = qty * sig.entry
-            max_notional = max(balance * 0.3, cfg.MIN_POSITION_USDT)
+            # MIN_POSITION_USDT is margin — notional minimum = margin * leverage
+            min_notional = cfg.MIN_POSITION_USDT * leverage
+            max_notional = max(balance * 0.3 * leverage, min_notional)
             if notional > max_notional:
                 log.warning(f"Позиция {sig.symbol}: {notional:.2f} > {max_notional:.2f} — обрезаем")
                 qty = max_notional / sig.entry
                 risk_usdt = qty * sig.entry * sl_pct
-            min_qty = cfg.MIN_POSITION_USDT / sig.entry
+            min_qty = min_notional / sig.entry
             if qty < min_qty:
                 qty = min_qty
-                log.info(f"qty увеличен до минимума {cfg.MIN_POSITION_USDT} USDT для {sig.symbol}")
+                log.info(f"qty увеличен до минимума {min_notional:.2f} USDT (маржа {cfg.MIN_POSITION_USDT}×{leverage}) для {sig.symbol}")
             qty = round(qty, 3)
             # After rounding, notional may dip below minimum — correct with ceiling
-            if qty * sig.entry < cfg.MIN_POSITION_USDT:
-                qty = math.ceil(cfg.MIN_POSITION_USDT / sig.entry * 1000) / 1000
+            if qty * sig.entry < min_notional:
+                qty = math.ceil(min_notional / sig.entry * 1000) / 1000
             if qty <= 0:
                 log.warning(f"{sig.symbol}: qty=0, пропуск")
                 return
@@ -299,10 +301,11 @@ class Scanner:
                         if actual > 0:
                             qty = round(actual, 3)
                             actual_notional = qty * sig.entry
-                            if actual_notional < cfg.MIN_POSITION_USDT:
+                            min_notional_check = cfg.MIN_POSITION_USDT * leverage
+                            if actual_notional < min_notional_check:
                                 log.warning(
                                     f"{sig.symbol}: реальный объём {actual_notional:.2f} USDT "
-                                    f"< минимума {cfg.MIN_POSITION_USDT} USDT (биржа округлила qty)"
+                                    f"< минимума {min_notional_check:.2f} USDT (биржа округлила qty)"
                                 )
                             break
             except Exception as pe:

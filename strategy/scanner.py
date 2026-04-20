@@ -298,6 +298,12 @@ class Scanner:
                         actual = abs(float(p.get("positionAmt", 0)))
                         if actual > 0:
                             qty = round(actual, 3)
+                            actual_notional = qty * sig.entry
+                            if actual_notional < cfg.MIN_POSITION_USDT:
+                                log.warning(
+                                    f"{sig.symbol}: реальный объём {actual_notional:.2f} USDT "
+                                    f"< минимума {cfg.MIN_POSITION_USDT} USDT (биржа округлила qty)"
+                                )
                             break
             except Exception as pe:
                 log.warning(f"Не удалось получить реальный qty {sig.symbol}: {pe}")

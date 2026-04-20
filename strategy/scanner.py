@@ -256,6 +256,19 @@ class Scanner:
                 return
             order_id = str(order.get("data", {}).get("orderId", ""))
 
+            # Get actual filled qty from exchange (may differ from calculated)
+            await asyncio.sleep(0.5)
+            try:
+                live = await self.ex.get_open_positions()
+                for p in live:
+                    if p.get("symbol") == sig.symbol and p.get("positionSide") == sig.side:
+                        actual = abs(float(p.get("positionAmt", 0)))
+                        if actual > 0:
+                            qty = round(actual, 3)
+                            break
+            except Exception as pe:
+                log.warning(f"Не удалось получить реальный qty {sig.symbol}: {pe}")
+
             sl_order = await self.ex.place_stop_loss(sig.symbol, side, qty, sig.sl)
             sl_id    = str(sl_order.get("data", {}).get("orderId", ""))
             if sl_order.get("code") != 0:

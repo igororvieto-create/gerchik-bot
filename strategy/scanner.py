@@ -263,7 +263,14 @@ class Scanner:
                 if against:
                     drift = abs(cur_price - sig.entry) / sig.entry * 100
                     log.info(f"{sig.symbol}: цена ушла против сигнала на {drift:.2f}% — пропуск")
+                    await self._notify(
+                        f"⏭ <b>{sig.symbol}</b> пропущен\n"
+                        f"Цена ушла против сигнала: {drift:.1f}%\n"
+                        f"Сигнал: <code>{sig.entry:.6f}</code> → Сейчас: <code>{cur_price:.6f}</code>"
+                    )
                     return
+                # Use current price as actual entry
+                sig.entry = cur_price
             except Exception:
                 pass
 

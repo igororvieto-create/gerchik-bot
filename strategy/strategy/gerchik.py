@@ -250,9 +250,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         return None
     h4p, h4s = detect_pattern(h4)
     h4ok = h4p != "" and (h4s == trend or h4s == "DOJI")
-    if not h4ok:
-        log.debug(f"{symbol}: нет подтверждающего паттерна на H4")
-        return None
+    # H4 pattern is bonus (+10 score), not mandatory
 
     # ── Volume ──
     vm    = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)

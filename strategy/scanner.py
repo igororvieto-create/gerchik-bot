@@ -258,7 +258,7 @@ class Scanner:
 
             sl_order = await self.ex.place_stop_loss(sig.symbol, side, qty, sig.sl)
             sl_id    = str(sl_order.get("data", {}).get("orderId", ""))
-            if sl_order.get("code") != 0 or not sl_id:
+            if sl_order.get("code") != 0:
                 err_code = sl_order.get("code", "?")
                 err_msg  = sl_order.get("msg", str(sl_order))
                 log.error(f"SL не выставился {sig.symbol}: {sl_order} — аварийное закрытие")
@@ -273,6 +273,8 @@ class Scanner:
                 except Exception as ce:
                     log.error(f"emergency close {sig.symbol}: {ce}")
                 return
+            if not sl_id:
+                log.warning(f"SL выставлен (code=0) но orderId не получен {sig.symbol} — отмена SL позже недоступна")
 
             tp_order = await self.ex.place_take_profit(sig.symbol, side, qty, sig.tp3)
             tp_id    = str(tp_order.get("data", {}).get("orderId", ""))

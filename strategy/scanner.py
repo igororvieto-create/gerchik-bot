@@ -240,9 +240,9 @@ class Scanner:
                 return
             qty = (risk_usdt / sl_pct) / sig.entry
             notional = qty * sig.entry
-            max_notional = balance * 0.3
+            max_notional = max(balance * 0.3, cfg.MIN_POSITION_USDT)
             if notional > max_notional:
-                log.warning(f"Позиция {sig.symbol} слишком большая: {notional:.2f} > {max_notional:.2f} — обрезаем")
+                log.warning(f"Позиция {sig.symbol}: {notional:.2f} > {max_notional:.2f} — обрезаем")
                 qty = max_notional / sig.entry
                 risk_usdt = qty * sig.entry * sl_pct
             min_qty = cfg.MIN_POSITION_USDT / sig.entry

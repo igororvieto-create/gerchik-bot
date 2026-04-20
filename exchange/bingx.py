@@ -114,19 +114,20 @@ class BingXClient:
             if isinstance(d, dict) and "balance" in d:
                 bal = d["balance"]
                 if isinstance(bal, dict):
-                    for field in ("availableMargin", "available", "equity", "balance"):
+                    # Prefer equity (total account value incl. unrealized PnL)
+                    for field in ("equity", "balance", "availableMargin", "available"):
                         if field in bal and float(bal[field]) > 0:
                             return float(bal[field])
                 # Format 2: data.balance is a list of assets
                 if isinstance(bal, list):
                     for a in bal:
                         if a.get("asset") in ("USDT", "usdt"):
-                            for field in ("availableMargin", "available", "equity", "balance"):
+                            for field in ("equity", "balance", "availableMargin", "available"):
                                 if field in a:
                                     return float(a[field])
             # Format 3: data itself is the balance dict
             if isinstance(d, dict):
-                for field in ("availableMargin", "available"):
+                for field in ("equity", "balance", "availableMargin", "available"):
                     if field in d:
                         return float(d[field])
         except Exception as e:

@@ -138,12 +138,35 @@ class Scanner:
         top = "\n".join(f"• {s.symbol} {s.side} ⭐{s.score}" for s in qualified)
         await self._notify(f"🔍 Найдено <b>{len(qualified)}</b> сигналов (топ по score):\n{top}")
 
-        # BTC trend filter: fetch BTC once before handling signals
+        # BTC trend filter: fetch BTC once and cache, refresh if signals span >2 min
         btc_bias = "NEUTRAL"
+        btc_fetched_at = datetime.utcnow()
+
+        async def _get_btc_bias():
+            nonlocal btc_bias, btc_fetched_at
+            age = (datetime.utcnow() - btc_fetched_at).total_seconds()
+            if age > 120:  # refresh BTC snapshot every 2 minutes
+                btc_fetched_at = datetime.utcnow()
+            else:
+                return
+            try:
+                btc_h1 = parse_klines(await self.ex.get_klines("BTC-USDT", cfg.SIGNAL_TF, limit=10))
+                if btc_h1 and len(btc_h1.get("close", [])) >= 4:
+                    btc_change = (btc_h1["close"][-1] - btc_h1["close"][-4]) / btc_h1["close"][-4] * 100
+                    if btc_change < -cfg.BTC_FILTER_PCT:
+                        btc_bias = "DOWN"
+                    elif btc_change > cfg.BTC_FILTER_PCT:
+                        btc_bias = "UP"
+                    else:
+                        btc_bias = "NEUTRAL"
+                    log.info(f"BTC обновлён: {btc_change:+.2f}% → bias={btc_bias}")
+            except Exception as e:
+                log.warning(f"BTC filter refresh: {e}")
+
         if cfg.BTC_FILTER:
             try:
                 btc_h1 = parse_klines(await self.ex.get_klines("BTC-USDT", cfg.SIGNAL_TF, limit=10))
-                if btc_h1 and len(btc_h1["close"]) >= 4:
+                if btc_h1 and len(btc_h1.get("close", [])) >= 4:
                     btc_change = (btc_h1["close"][-1] - btc_h1["close"][-4]) / btc_h1["close"][-4] * 100
                     if btc_change < -cfg.BTC_FILTER_PCT:
                         btc_bias = "DOWN"
@@ -157,6 +180,9 @@ class Scanner:
             can, _ = state.can_trade(cfg.MAX_DAILY_LOSS, cfg.MAX_POSITIONS, cfg.MAX_DAILY_TRADES)
             if not can:
                 break
+            # Refresh BTC bias if scan is taking long
+            if cfg.BTC_FILTER:
+                await _get_btc_bias()
             # BTC filter: skip signals against BTC trend
             if btc_bias == "DOWN" and sig.side == "LONG":
                 log.info(f"BTC падает ({btc_bias}) — пропуск LONG {sig.symbol}")
@@ -176,6 +202,12 @@ class Scanner:
             d1      = parse_klines(await self.ex.get_klines(symbol, cfg.TREND_TF,  limit=250))
             h4      = parse_klines(await self.ex.get_klines(symbol, cfg.H4_TF,     limit=150))
             h1      = parse_klines(await self.ex.get_klines(symbol, cfg.SIGNAL_TF, limit=100))
+
+            # Validate that we actually got usable candle data
+            if not d1.get("close") or not h4.get("close") or not h1.get("close"):
+                log.debug(f"{symbol}: пустые данные свечей — пропуск")
+                return None
+
             funding = await self.ex.get_funding_rate(symbol)
 
             # Funding rate extreme alert
@@ -459,6 +491,13 @@ class Scanner:
         # Clean up stale sl_cooldown entries (older than 2x cooldown window)
         cutoff = datetime.utcnow() - timedelta(minutes=SL_COOLDOWN_MIN * 2)
         self._sl_cooldown = {s: t for s, t in self._sl_cooldown.items() if t > cutoff}
+
+        # Clean up expired pending signals
+        now = datetime.utcnow()
+        expired = [s for s, p in state.pending.items() if now > p["expires"]]
+        for s in expired:
+            state.pending.pop(s, None)
+            log.info(f"Pending сигнал {s} истёк — удалён")
 
         for symbol, pos in list(state.positions.items()):
             try:

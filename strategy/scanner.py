@@ -32,36 +32,33 @@ class Scanner:
         self._restore_cooldowns()
 
     def _set_cooldown(self, symbol: str):
-        """Set cooldown and persist to DB so it survives restarts."""
-        self._set_cooldown(symbol)
+        """Set cooldown in memory and persist to DB for restart survival."""
+        self._sl_cooldown[symbol] = datetime.utcnow()
         try:
             db.save_kv(f"sl_cd:{symbol}", datetime.utcnow().isoformat())
         except Exception as e:
             log.warning(f"cooldown save {symbol}: {e}")
 
     def _in_cooldown(self, symbol: str) -> bool:
-        """Check cooldown — in-memory first, then DB fallback."""
-        now = datetime.utcnow()
-        if symbol in self._sl_cooldown:
-            return (now - self._sl_cooldown[symbol]).total_seconds() < SL_COOLDOWN_MIN * 60
-        try:
-            val = db.get_kv(f"sl_cd:{symbol}")
-            if val:
-                cd_time = datetime.fromisoformat(val)
-                if (now - cd_time).total_seconds() < SL_COOLDOWN_MIN * 60:
-                    self._sl_cooldown[symbol] = cd_time  # restore in memory
-                    return True
-        except Exception:
-            pass
-        return False
+        """Check in-memory cooldown only (DB loaded once at startup)."""
+        if symbol not in self._sl_cooldown:
+            return False
+        return (datetime.utcnow() - self._sl_cooldown[symbol]).total_seconds() < SL_COOLDOWN_MIN * 60
 
     def _restore_cooldowns(self):
-        """Load active cooldowns from DB on startup."""
+        """Load all cooldowns from DB in one query at startup."""
         try:
-            # get_kv doesn't support prefix scan, so we rely on lazy load in _in_cooldown
-            log.debug("Cooldowns will be lazily restored from DB on first check")
-        except Exception:
-            pass
+            loaded = db.load_all_cooldowns()
+            now = datetime.utcnow()
+            active = 0
+            for sym, cd_time in loaded.items():
+                if (now - cd_time).total_seconds() < SL_COOLDOWN_MIN * 60:
+                    self._sl_cooldown[sym] = cd_time
+                    active += 1
+            if active:
+                log.info(f"Восстановлено {active} кулдаунов из БД")
+        except Exception as e:
+            log.warning(f"restore_cooldowns: {e}")
 
     # ------------------------------------------------------------------ notify
 
@@ -396,11 +393,32 @@ class Scanner:
             except Exception as pe:
                 log.warning(f"Не удалось получить реальный qty {sig.symbol}: {pe}")
 
+            # Pre-validate SL price vs current mark price (avoids error 110411)
+            # For LONG: SL (SELL stop) must be below current price
+            # For SHORT: SL (BUY stop) must be above current price
+            try:
+                mk = await self.ex.get_ticker(sig.symbol)
+                mark = float(mk.get("lastPrice", sig.entry))
+                sl_invalid = (sig.side == "LONG"  and sig.sl >= mark) or \
+                             (sig.side == "SHORT" and sig.sl <= mark)
+                if sl_invalid:
+                    log.warning(f"{sig.symbol}: SL {sig.sl} уже за mark {mark:.4f} — аварийное закрытие")
+                    await self._notify(
+                        f"⚠️ <b>{sig.symbol}</b>: цена уже за SL при входе — закрываем"
+                    )
+                    try:
+                        await self.ex.close_position(sig.symbol, qty, sig.side)
+                    except Exception as ce:
+                        log.error(f"emergency close (pre-SL) {sig.symbol}: {ce}")
+                    self._set_cooldown(sig.symbol)
+                    return
+            except Exception as e:
+                log.warning(f"{sig.symbol}: не удалось проверить mark price перед SL: {e}")
+
             sl_order = await self.ex.place_stop_loss(sig.symbol, side, qty, sig.sl)
             sl_id    = str(sl_order.get("data", {}).get("orderId", ""))
             if sl_order.get("code") != 0:
                 err_code = sl_order.get("code", "?")
-                err_msg  = sl_order.get("msg", str(sl_order))
                 log.error(f"SL не выставился {sig.symbol}: код {err_code} — аварийное закрытие")
                 await self._notify(
                     f"⚠️ SL не выставился <b>{sig.symbol}</b> (код {err_code}) — закрываем"
@@ -409,7 +427,7 @@ class Scanner:
                     await self.ex.close_position(sig.symbol, qty, sig.side)
                 except Exception as ce:
                     log.error(f"emergency close {sig.symbol}: {ce}")
-                self._set_cooldown(sig.symbol)  # don't retry this symbol for 1h
+                self._set_cooldown(sig.symbol)
                 return
             if not sl_id:
                 log.warning(f"SL выставлен (code=0) но orderId не получен {sig.symbol} — отмена SL позже недоступна")

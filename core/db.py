@@ -101,6 +101,23 @@ def load_total_pnl() -> float:
     return get_stats()["pnl"]
 
 
+def load_all_cooldowns() -> dict:
+    """Load all sl_cd:* cooldown entries at once (used on scanner startup)."""
+    result = {}
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.execute("SELECT key, value FROM kv WHERE key LIKE 'sl_cd:%'")
+            for key, val in cur.fetchall():
+                symbol = key[len("sl_cd:"):]
+                try:
+                    result[symbol] = datetime.fromisoformat(val)
+                except Exception:
+                    pass
+    except Exception as e:
+        log.error(f"load_all_cooldowns: {e}")
+    return result
+
+
 def save_kv(key: str, value):
     try:
         with sqlite3.connect(DB_PATH) as conn:

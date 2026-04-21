@@ -81,8 +81,27 @@ class BingXClient:
         tickers = data.get("data", [])
         if isinstance(tickers, dict):
             tickers = [tickers]
-        sorted_t = sorted(tickers, key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
-        symbols = [t["symbol"] for t in sorted_t if "USDT" in t.get("symbol", "")]
+
+        scored = []
+        for t in tickers:
+            sym = t.get("symbol", "")
+            if "USDT" not in sym:
+                continue
+            try:
+                volume = float(t.get("quoteVolume", 0))
+                change = abs(float(t.get("priceChangePercent", 0)))
+                # Momentum score: high volume + moving (0.5–12% in 24h)
+                # Exclude flat (<0.5%) and overextended (>15%) coins
+                if change < 0.5 or change > 15.0:
+                    momentum = 0.5  # deprioritize, don't exclude completely
+                else:
+                    momentum = 1.0 + change / 10.0  # 1.05 – 2.2×
+                scored.append((sym, volume * momentum))
+            except Exception:
+                continue
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        symbols = [s for s, _ in scored]
         return symbols[:n] if n > 0 else symbols
 
     async def get_klines(self, symbol, interval, limit=200):

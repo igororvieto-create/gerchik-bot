@@ -62,7 +62,7 @@ class Scanner:
             else:
                 symbols = await self.ex.get_top_symbols(cfg.TOP_N_PAIRS)
                 state.pairs = [s for s in symbols if s not in cfg.BLACKLIST]
-            log.info(f"Пар: {len(state.pairs)}")
+            log.info(f"Пар: {len(state.pairs)} | топ-5: {state.pairs[:5]}")
         except Exception as e:
             log.error(f"update_pairs: {e}")
 

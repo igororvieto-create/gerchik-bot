@@ -319,16 +319,16 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         return None
 
     buf     = price * cfg.SL_BUFFER_PCT / 100
-    atr_sl  = cur_atr * 1.5
+    atr_sl  = cur_atr * 2.0
 
     if trend == "LONG":
         sl_candle = h1["low"][-1]  - buf
         sl_atr    = price - atr_sl
-        sl        = max(sl_candle, sl_atr)   # tighter of two
+        sl        = min(sl_candle, sl_atr)   # wider of two — more room for noise
     else:
         sl_candle = h1["high"][-1] + buf
         sl_atr    = price + atr_sl
-        sl        = min(sl_candle, sl_atr)
+        sl        = max(sl_candle, sl_atr)
 
     sld = abs(price - sl)
     if sld <= 0 or sld/price > 0.05:   # reject if SL > 5% away (too wide)

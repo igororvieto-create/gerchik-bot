@@ -319,6 +319,10 @@ class Scanner:
                 if against:
                     drift = abs(cur_price - sig.entry) / sig.entry * 100
                     log.info(f"{sig.symbol}: цена ушла против сигнала на {drift:.2f}% — пропуск")
+                    # Large drift (>3%) = signal fully invalidated — cooldown to avoid spam
+                    if drift > 3.0:
+                        self._sl_cooldown[sig.symbol] = datetime.utcnow()
+                        log.info(f"{sig.symbol}: дрейф {drift:.1f}% > 3% — кулдаун 1ч")
                     await self._notify(
                         f"⏭ <b>{sig.symbol}</b> пропущен\n"
                         f"Цена ушла против сигнала: {drift:.1f}%\n"

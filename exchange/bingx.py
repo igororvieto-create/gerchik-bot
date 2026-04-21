@@ -248,6 +248,15 @@ class BingXClient:
         await self._post("/openApi/swap/v2/trade/leverage",
                          {"symbol": symbol, "side": "SHORT", "leverage": leverage})
 
+    async def set_margin_type(self, symbol):
+        """Set isolated margin mode for both sides."""
+        for side in ("LONG", "SHORT"):
+            try:
+                await self._post("/openApi/swap/v2/trade/marginType",
+                                 {"symbol": symbol, "side": side, "marginType": "ISOLATED"})
+            except Exception as e:
+                log.debug(f"set_margin_type {symbol} {side}: {e}")
+
     async def close(self):
         if self._session:
             await self._session.close()

@@ -330,6 +330,7 @@ class Scanner:
             except Exception as e:
                 log.warning(f"{sig.symbol}: не удалось получить текущую цену перед входом — используется цена сигнала: {e}")
 
+            await self.ex.set_margin_type(sig.symbol)
             await self.ex.set_leverage(sig.symbol, leverage)
             side  = "BUY" if sig.side == "LONG" else "SELL"
             order = await self.ex.place_order(sig.symbol, side, qty, position_side=sig.side)

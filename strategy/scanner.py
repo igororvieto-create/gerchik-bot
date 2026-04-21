@@ -409,6 +409,7 @@ class Scanner:
                     await self.ex.close_position(sig.symbol, qty, sig.side)
                 except Exception as ce:
                     log.error(f"emergency close {sig.symbol}: {ce}")
+                self._set_cooldown(sig.symbol)  # don't retry this symbol for 1h
                 return
             if not sl_id:
                 log.warning(f"SL выставлен (code=0) но orderId не получен {sig.symbol} — отмена SL позже недоступна")

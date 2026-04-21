@@ -334,9 +334,17 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     if sld <= 0 or sld/price > 0.05:   # reject if SL > 5% away (too wide)
         return None
 
-    tp1 = price + sld*cfg.TP1_RR if trend=="LONG" else price - sld*cfg.TP1_RR
-    tp2 = price + sld*cfg.TP2_RR if trend=="LONG" else price - sld*cfg.TP2_RR
-    tp3 = price + sld*cfg.TP3_RR if trend=="LONG" else price - sld*cfg.TP3_RR
+    # Round prices to match exchange precision
+    def _px(p):
+        if p >= 10:   return round(p, 2)
+        if p >= 1:    return round(p, 4)
+        if p >= 0.01: return round(p, 5)
+        return round(p, 6)
+
+    sl  = _px(sl)
+    tp1 = _px(price + sld*cfg.TP1_RR if trend=="LONG" else price - sld*cfg.TP1_RR)
+    tp2 = _px(price + sld*cfg.TP2_RR if trend=="LONG" else price - sld*cfg.TP2_RR)
+    tp3 = _px(price + sld*cfg.TP3_RR if trend=="LONG" else price - sld*cfg.TP3_RR)
     rr  = cfg.TP2_RR
     if rr < cfg.MIN_RR:
         return None

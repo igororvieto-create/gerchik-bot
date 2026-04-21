@@ -151,6 +151,19 @@ def macd(closes, fast=12, slow=26, signal_period=9):
     signal_line = ema(macd_line, signal_period)
     return macd_line, signal_line, macd_line - signal_line
 
+def bollinger(closes, period=20, std_mult=2.0):
+    n = len(closes)
+    mid   = np.zeros(n)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    for i in range(period - 1, n):
+        w = closes[i - period + 1:i + 1]
+        m = w.mean(); s = w.std()
+        mid[i]   = m
+        upper[i] = m + std_mult * s
+        lower[i] = m - std_mult * s
+    return mid, upper, lower
+
 # ─────────────────────────────────────── patterns ──
 
 def hammer(o,h,l,c):
@@ -396,5 +409,188 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         entry=price, sl=sl,
         tp1=tp1, tp2=tp2, tp3=tp3,
         rr=rr, pattern=pname, tf="H1+H4",
+        score=score, reason=reason,
+    )
+
+
+# ─────────────────────────────────────── BB breakout ──
+
+def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
+    """Bollinger Band breakout strategy — catches momentum moves, not pullbacks."""
+    if not getattr(cfg, "BB_BREAKOUT", False):
+        return None
+    if not d1 or not h4 or not h1:
+        return None
+    if len(d1["close"]) < cfg.TREND_EMA_D1:
+        return None
+    if len(h4["close"]) < cfg.TREND_EMA_H4 + 5:
+        return None
+    if len(h1["close"]) < 40:
+        return None
+
+    # ── D1 trend ──
+    ema200   = ema(d1["close"], cfg.TREND_EMA_D1)
+    d1_up    = d1["close"][-1] > ema200[-1]
+    trend    = "LONG" if d1_up else "SHORT"
+    d1_slope = trend_slope(d1["close"], 5)
+
+    # ── H4 filter (lenient 3% for breakout momentum) ──
+    ema50      = ema(h4["close"], cfg.TREND_EMA_H4)
+    h4_up      = h4["close"][-1] > ema50[-1]
+    h4_dn      = h4["close"][-1] < ema50[-1]
+    h4_aligned = (trend == "LONG" and h4_up) or (trend == "SHORT" and h4_dn)
+    h4_near    = abs(h4["close"][-1] - ema50[-1]) / ema50[-1] * 100 < 3.0
+    if not h4_aligned and not h4_near:
+        log.debug(f"{symbol} BB: H4 не выровнен с трендом {trend}")
+        return None
+
+    price = h1["close"][-1]
+
+    # ── Bollinger Bands on H1 ──
+    bb_period = getattr(cfg, "BB_PERIOD", 20)
+    bb_std    = getattr(cfg, "BB_STD", 2.0)
+    bb_mid, bb_upper, bb_lower = bollinger(h1["close"], bb_period, bb_std)
+
+    if bb_mid[-1] == 0:
+        return None
+
+    # ── Breakout condition: price closed above/below band in last 3 candles ──
+    if trend == "LONG":
+        broke = h1["close"][-1] > bb_upper[-1]
+        # Must be a fresh breakout — at least one of last 3 prev candles was inside band
+        was_inside = any(h1["close"][i] <= bb_upper[i] for i in range(-4, -1))
+        if not broke or not was_inside:
+            log.debug(f"{symbol} BB: нет свежего пробоя вверх (broke={broke}, was_inside={was_inside})")
+            return None
+    else:
+        broke = h1["close"][-1] < bb_lower[-1]
+        was_inside = any(h1["close"][i] >= bb_lower[i] for i in range(-4, -1))
+        if not broke or not was_inside:
+            log.debug(f"{symbol} BB: нет свежего пробоя вниз")
+            return None
+
+    # ── ATR volatility ──
+    h1_atr  = atr(h1["high"], h1["low"], h1["close"], 14)
+    cur_atr = h1_atr[-1]
+    atr_pct = cur_atr / price * 100
+    if atr_pct < 0.2 or atr_pct > 5.0:
+        log.debug(f"{symbol} BB: ATR вне диапазона {atr_pct:.2f}%")
+        return None
+
+    # ── Breakout candle must be strong (body ≥ 0.3×ATR) ──
+    pat_body = abs(h1["close"][-1] - h1["open"][-1])
+    if pat_body < cur_atr * 0.3:
+        log.debug(f"{symbol} BB: слабое тело пробойной свечи")
+        return None
+
+    # ── RSI — more lenient for breakouts ──
+    h1_rsi  = rsi(h1["close"], 14)
+    cur_rsi = h1_rsi[-1]
+    if trend == "LONG"  and cur_rsi > 82:
+        log.debug(f"{symbol} BB: RSI перекуплен {cur_rsi:.1f}")
+        return None
+    if trend == "SHORT" and cur_rsi < 18:
+        log.debug(f"{symbol} BB: RSI перепродан {cur_rsi:.1f}")
+        return None
+
+    # ── MACD — mandatory for breakout (momentum must confirm) ──
+    _, _, macd_hist = macd(h1["close"])
+    macd_aligned = (trend == "LONG"  and macd_hist[-1] > macd_hist[-2]) or \
+                   (trend == "SHORT" and macd_hist[-1] < macd_hist[-2])
+    if not macd_aligned:
+        log.debug(f"{symbol} BB: MACD не подтверждает импульс")
+        return None
+
+    # ── Volume ──
+    vm   = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
+    vrat = max(h1["volume"][-1], h1["volume"][-2]) / vm[-2] if vm[-2] > 0 else 0
+    if vrat < cfg.VOLUME_MULT:
+        log.debug(f"{symbol} BB: объём {vrat:.2f}× ниже порога {cfg.VOLUME_MULT}×")
+        return None
+
+    # ── ADX ──
+    h4_adx  = adx(h4["high"], h4["low"], h4["close"], 14)
+    cur_adx = h4_adx[-1]
+    if cur_adx < cfg.ADX_MIN:
+        log.debug(f"{symbol} BB: ADX {cur_adx:.1f} < {cfg.ADX_MIN}")
+        return None
+
+    # ── Funding rate ──
+    if trend == "LONG"  and funding > cfg.FUNDING_MAX_LONG:
+        return None
+    if trend == "SHORT" and funding < cfg.FUNDING_MAX_SHORT:
+        return None
+
+    # ── SL: tighter of candle-low/high vs ATR; keep above mid-BB ──
+    buf    = price * cfg.SL_BUFFER_PCT / 100
+    atr_sl = cur_atr * 1.5
+    if trend == "LONG":
+        sl = max(h1["low"][-1] - buf, price - atr_sl, bb_mid[-1] - buf)
+    else:
+        sl = min(h1["high"][-1] + buf, price + atr_sl, bb_mid[-1] + buf)
+
+    sld = abs(price - sl)
+    if sld <= 0 or sld / price > 0.05:
+        return None
+
+    tp1 = price + sld * cfg.TP1_RR if trend == "LONG" else price - sld * cfg.TP1_RR
+    tp2 = price + sld * cfg.TP2_RR if trend == "LONG" else price - sld * cfg.TP2_RR
+    tp3 = price + sld * cfg.TP3_RR if trend == "LONG" else price - sld * cfg.TP3_RR
+    rr  = cfg.TP2_RR
+    if rr < cfg.MIN_RR:
+        return None
+
+    # ── BB width expanding = stronger breakout ──
+    bb_width_now  = (bb_upper[-1]  - bb_lower[-1])  / bb_mid[-1]  * 100
+    bb_width_prev = (bb_upper[-5]  - bb_lower[-5])  / bb_mid[-5]  * 100 \
+                    if bb_mid[-5] > 0 else bb_width_now
+    bb_expanding = bb_width_now > bb_width_prev
+
+    # ── Score ──
+    score = 50
+    if vrat >= 2.5:   score += 12
+    elif vrat >= 2.0: score += 10
+    elif vrat >= 1.5: score += 6
+    else:             score += 3
+    score += 10   # MACD confirmed (mandatory — always counts)
+    if h4_aligned:    score += 5
+    elif h4_near:     score += 3
+    rsi_ok = (trend == "LONG"  and 40 <= cur_rsi <= 72) or \
+             (trend == "SHORT" and 28 <= cur_rsi <= 60)
+    if rsi_ok:        score += 8
+    if abs(funding) < 0.01:   score += 8
+    elif abs(funding) < 0.03: score += 4
+    if (trend == "LONG"  and d1_slope > 0.1) or \
+       (trend == "SHORT" and d1_slope < -0.1):
+        score += 5
+    if cur_adx >= 30:   score += 5
+    elif cur_adx >= 25: score += 3
+    if bb_expanding:    score += 7
+    score = min(score, 100)
+
+    bb_min_score = getattr(cfg, "BB_MIN_SCORE", 65)
+    if score < bb_min_score:
+        log.debug(f"{symbol} BB: score {score} < BB_MIN_SCORE {bb_min_score}")
+        return None
+
+    pname = "BB Пробой (бычий)" if trend == "LONG" else "BB Пробой (медвежий)"
+    reason = (
+        f"📊 <b>{symbol}</b> | {trend} [BB ПРОБОЙ]\n"
+        f"🕯 {pname}\n"
+        f"📈 D1: {'🟢' if d1_up else '🔴'} EMA200 slope {d1_slope:+.2f}%\n"
+        f"H4: {'🟢' if h4_up else '🔴'} EMA50 | ADX: <code>{cur_adx:.1f}</code>\n"
+        f"🎯 BB Upper: <code>{bb_upper[-1]:.4f}</code> | Mid: <code>{bb_mid[-1]:.4f}</code>\n"
+        f"📦 Объём: <code>{vrat:.2f}×</code> | RSI: <code>{cur_rsi:.0f}</code> | "
+        f"ATR: <code>{cur_atr:.4f}</code>\n"
+        f"💱 Funding: <code>{funding:.4f}%</code>\n"
+        f"🟡 Вход: <code>{price:.4f}</code> | 🔴 SL: <code>{sl:.4f}</code>\n"
+        f"🟢 TP2: <code>{tp2:.4f}</code> | TP3: <code>{tp3:.4f}</code>\n"
+        f"⚡ R/R: 1:{rr:.1f} | ⭐ Score: {score}/100"
+    )
+    return Signal(
+        symbol=symbol, side=trend,
+        entry=price, sl=sl,
+        tp1=tp1, tp2=tp2, tp3=tp3,
+        rr=rr, pattern=pname, tf="H1+BB",
         score=score, reason=reason,
     )

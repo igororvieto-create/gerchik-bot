@@ -10,7 +10,7 @@ from core.config import cfg
 from core.state import Position, state
 from core import db
 from exchange.bingx import BingXClient
-from strategy.strategy.gerchik import Signal, analyze, parse_klines
+from strategy.strategy.gerchik import Signal, analyze, analyze_breakout, parse_klines
 
 log = logging.getLogger("scanner")
 
@@ -214,7 +214,11 @@ class Scanner:
             if funding > 0.1 or funding < -0.1:
                 log.warning(f"⚠️ Экстремальный фандинг {symbol}: {funding:.4f}%")
 
-            return analyze(symbol, d1, h4, h1, funding, cfg)
+            sig1 = analyze(symbol, d1, h4, h1, funding, cfg)
+            sig2 = analyze_breakout(symbol, d1, h4, h1, funding, cfg)
+            if sig1 and sig2:
+                return sig1 if sig1.score >= sig2.score else sig2
+            return sig1 or sig2
         except Exception as e:
             log.error(f"analyze {symbol}: {e}")
             return None

@@ -59,5 +59,10 @@ class Config:
     BTC_FILTER_PCT:       float = float(os.getenv("BTC_FILTER_PCT", "2.0").strip())
     # ADX minimum — below this value market is ranging, skip signal
     ADX_MIN:              float = float(os.getenv("ADX_MIN", "18.0").strip())
+    # Bollinger Band breakout mode — catches momentum breakouts (not pullbacks)
+    BB_BREAKOUT:          bool  = os.getenv("BB_BREAKOUT", "true").strip().lower() == "true"
+    BB_PERIOD:            int   = int(os.getenv("BB_PERIOD", "20").strip())
+    BB_STD:               float = float(os.getenv("BB_STD", "2.0").strip())
+    BB_MIN_SCORE:         int   = int(os.getenv("BB_MIN_SCORE", "65").strip())
 
 cfg = Config()

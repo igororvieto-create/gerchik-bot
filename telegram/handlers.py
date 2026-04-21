@@ -91,7 +91,8 @@ async def cmd_help(msg: Message):
         "/setmode auto|manual — режим\n"
         "/setrisk 1.0 — риск %\n"
         "/setlev 5 — плечо\n"
-        "/closeall — закрыть все позиции",
+        "/closeall — закрыть все позиции\n"
+        "/setbbmode on|off — BB пробой режим",
         parse_mode="HTML",
         reply_markup=main_keyboard(),
     )
@@ -186,6 +187,7 @@ async def cmd_settings(msg: Message):
     status = "⏸ ПАУЗА" if state.paused else "▶️ Работает"
     be_mode = f"+{cfg.BE_TRIGGER_PCT}% от входа" if cfg.BE_TRIGGER_PCT > 0 else "TP1"
     al = "✅ вкл" if cfg.AUTO_LEVERAGE else "❌ выкл"
+    bb_mode = "✅ вкл" if cfg.BB_BREAKOUT else "❌ выкл"
     text = (
         f"⚙️ <b>Настройки бота:</b>\n\n"
         f"Статус: {status}\n"
@@ -207,7 +209,8 @@ async def cmd_settings(msg: Message):
         f"Трейлинг стоп: <code>{cfg.TRAIL_PCT}%</code>\n"
         f"Фандинг LONG макс: <code>{cfg.FUNDING_MAX_LONG}%</code>\n"
         f"Фандинг SHORT макс: <code>{cfg.FUNDING_MAX_SHORT}%</code>\n\n"
-        f"<i>/setrisk 1.0 | /setlev 5 | /setbe 0.5 | /settrail 1.0</i>"
+        f"📊 <b>BB Пробой:</b> {bb_mode} | период {cfg.BB_PERIOD} | {cfg.BB_STD}σ | мин.score {cfg.BB_MIN_SCORE}\n\n"
+        f"<i>/setrisk 1.0 | /setlev 5 | /setbe 0.5 | /settrail 1.0 | /setbbmode on|off</i>"
     )
     await msg.answer(text, parse_mode="HTML", reply_markup=main_keyboard())
 
@@ -409,6 +412,30 @@ async def cmd_setmaxrisk(msg: Message):
         )
     except Exception:
         await msg.answer("Введи число от 1 до 10000 (например: /setmaxrisk 20)")
+
+
+async def cmd_setbbmode(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2 or args[1].lower() not in ("on", "off"):
+        status = "✅ вкл" if cfg.BB_BREAKOUT else "❌ выкл"
+        await msg.answer(
+            f"📊 <b>BB Пробой режим:</b> {status}\n\n"
+            f"Период: <code>{cfg.BB_PERIOD}</code> | Отклонение: <code>{cfg.BB_STD}σ</code>\n"
+            f"Мин. score: <code>{cfg.BB_MIN_SCORE}</code>\n\n"
+            f"Включить: <code>/setbbmode on</code>\n"
+            f"Выключить: <code>/setbbmode off</code>",
+            parse_mode="HTML",
+        )
+        return
+    cfg.BB_BREAKOUT = args[1].lower() == "on"
+    status = "✅ включён" if cfg.BB_BREAKOUT else "❌ выключен"
+    await msg.answer(
+        f"📊 BB Пробой режим {status}",
+        parse_mode="HTML",
+        reply_markup=main_keyboard(),
+    )
 
 
 async def cmd_setpairs(msg: Message):
@@ -729,8 +756,9 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_setmaxpos,  Command("setmaxpos"))
     dp.message.register(cmd_setmaxrisk, Command("setmaxrisk"))
     dp.message.register(cmd_setbe,      Command("setbe"))
-    dp.message.register(cmd_settrail, Command("settrail"))
-    dp.message.register(cmd_setpairs, Command("setpairs"))
+    dp.message.register(cmd_settrail,  Command("settrail"))
+    dp.message.register(cmd_setbbmode, Command("setbbmode"))
+    dp.message.register(cmd_setpairs,  Command("setpairs"))
     dp.message.register(cmd_pause,    Command("pause"))
     dp.message.register(cmd_resume,   Command("resume"))
     dp.message.register(cmd_setmode,  Command("setmode"))

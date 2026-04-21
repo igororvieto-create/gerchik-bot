@@ -29,6 +29,39 @@ class Scanner:
         self._scan_count = 0
         self._sl_cooldown: dict = {}  # symbol → datetime of last SL hit
         _global_scanner = self
+        self._restore_cooldowns()
+
+    def _set_cooldown(self, symbol: str):
+        """Set cooldown and persist to DB so it survives restarts."""
+        self._set_cooldown(symbol)
+        try:
+            db.save_kv(f"sl_cd:{symbol}", datetime.utcnow().isoformat())
+        except Exception as e:
+            log.warning(f"cooldown save {symbol}: {e}")
+
+    def _in_cooldown(self, symbol: str) -> bool:
+        """Check cooldown — in-memory first, then DB fallback."""
+        now = datetime.utcnow()
+        if symbol in self._sl_cooldown:
+            return (now - self._sl_cooldown[symbol]).total_seconds() < SL_COOLDOWN_MIN * 60
+        try:
+            val = db.get_kv(f"sl_cd:{symbol}")
+            if val:
+                cd_time = datetime.fromisoformat(val)
+                if (now - cd_time).total_seconds() < SL_COOLDOWN_MIN * 60:
+                    self._sl_cooldown[symbol] = cd_time  # restore in memory
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _restore_cooldowns(self):
+        """Load active cooldowns from DB on startup."""
+        try:
+            # get_kv doesn't support prefix scan, so we rely on lazy load in _in_cooldown
+            log.debug("Cooldowns will be lazily restored from DB on first check")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ notify
 
@@ -99,8 +132,7 @@ class Scanner:
             tasks = [
                 self._analyze(s) for s in batch
                 if s not in state.positions and s not in state.pending
-                and (s not in self._sl_cooldown or
-                     (now - self._sl_cooldown[s]).total_seconds() > SL_COOLDOWN_MIN * 60)
+                and not self._in_cooldown(s)
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
@@ -321,7 +353,7 @@ class Scanner:
                     log.info(f"{sig.symbol}: цена ушла против сигнала на {drift:.2f}% — пропуск")
                     # Large drift (>3%) = signal fully invalidated — cooldown to avoid spam
                     if drift > 3.0:
-                        self._sl_cooldown[sig.symbol] = datetime.utcnow()
+                        self._set_cooldown(sig.symbol)
                         log.info(f"{sig.symbol}: дрейф {drift:.1f}% > 3% — кулдаун 1ч")
                     await self._notify(
                         f"⏭ <b>{sig.symbol}</b> пропущен\n"
@@ -454,7 +486,7 @@ class Scanner:
                     del state.positions[symbol]
                     # Set cooldown if closed at a loss (likely SL hit)
                     if pnl <= 0:
-                        self._sl_cooldown[symbol] = datetime.utcnow()
+                        self._set_cooldown(symbol)
                     sign = "+" if pnl >= 0 else ""
                     await self._notify(
                         f"{'✅ WIN' if pnl > 0 else '❌ LOSS'} | {symbol} {pos.side}\n"
@@ -639,7 +671,7 @@ class Scanner:
 
         # Cooldown after SL hit — don't re-enter same symbol for 1 hour
         if sl_hit:
-            self._sl_cooldown[pos.symbol] = datetime.utcnow()
+            self._set_cooldown(pos.symbol)
 
         sign = "+" if pnl >= 0 else ""
         icon = "✅ WIN" if pnl > 0 else "❌ LOSS"

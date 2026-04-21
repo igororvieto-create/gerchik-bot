@@ -22,10 +22,13 @@ SL_COOLDOWN_MIN = 60  # minutes to skip a symbol after SL hit
 
 class Scanner:
     def __init__(self, exchange: BingXClient, bot: Bot):
-        self.ex          = exchange
-        self.bot         = bot
-        self._scan_count = 0
+        self.ex           = exchange
+        self.bot          = bot
+        self._scan_count  = 0
         self._sl_cooldown: dict = {}  # symbol → datetime of last SL hit
+        self._started_at  = datetime.utcnow()
+        self._last_scan_at: datetime | None = None
+        self._error_count = 0
 
     # ------------------------------------------------------------------ notify
 
@@ -109,6 +112,7 @@ class Scanner:
                 await asyncio.sleep(cfg.SCAN_BATCH_DELAY)
 
         self._scan_count += 1
+        self._last_scan_at = datetime.utcnow()
         if not signals:
             log.info("Сигналов нет")
             # Notify only every 4th scan (~1 hour) to avoid spam
@@ -423,6 +427,7 @@ class Scanner:
                 pattern=sig.pattern, tf=sig.tf, rr=sig.rr, score=sig.score,
             )
             state.positions[sig.symbol] = pos
+            db.save_position(pos)
             state.day.trades += 1
             state.pending.pop(sig.symbol, None)
 
@@ -477,6 +482,7 @@ class Scanner:
                     try:
                         from core import db
                         db.save_trade(pos, price, pnl, result)
+                        db.delete_position(symbol)
                     except Exception as e:
                         log.error(f"{symbol}: ошибка сохранения сделки в БД: {e}")
                     del state.positions[symbol]
@@ -558,6 +564,7 @@ class Scanner:
             pos.sl          = be_price
             pos.be_moved    = True
             pos.trail_price = be_price
+            db.save_position(pos)
 
             trigger_info = (
                 f"+{cfg.BE_TRIGGER_PCT}% от входа"
@@ -600,6 +607,7 @@ class Scanner:
             r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, new_sl)
             pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
             pos.sl = new_sl
+            db.save_position(pos)
             log.info(f"Trail SL {pos.symbol} → {new_sl:.4f}")
         except Exception as e:
             log.error(f"trail_sl {pos.symbol}: {e}")
@@ -618,6 +626,7 @@ class Scanner:
                 side = "BUY" if pos.side == "LONG" else "SELL"
                 r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, pos.sl)
                 pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
+            db.save_position(pos)
             await self._notify(
                 f"💚 <b>{label}</b> | {pos.symbol}\n"
                 f"Закрыто {int(pct * 100)}% позиции | цена рынка ~<code>{pos.tp2:.4f}</code>"
@@ -657,9 +666,9 @@ class Scanner:
             state.day.loss_streak += 1
             state.day.paused_until = datetime.utcnow() + timedelta(minutes=cfg.PAUSE_AFTER_LOSS_MIN)
 
-        # Save to DB
         try:
             db.save_trade(pos, price, pnl, result)
+            db.delete_position(pos.symbol)
         except Exception as e:
             log.error(f"db.save_trade: {e}")
 
@@ -678,6 +687,39 @@ class Scanner:
             f"PnL: <code>{sign}{pnl:.2f} USDT</code>\n"
             f"Итого: <code>{sign}{state.total_pnl:.2f} USDT</code>"
         )
+
+    # ------------------------------------------------------------------ watchdog
+
+    async def watchdog(self):
+        """Hourly health check — sends status to Telegram and alerts on stale scans."""
+        try:
+            uptime_h = (datetime.utcnow() - self._started_at).total_seconds() / 3600
+            last_scan = "никогда"
+            if self._last_scan_at:
+                mins_ago = int((datetime.utcnow() - self._last_scan_at).total_seconds() / 60)
+                last_scan = f"{mins_ago} мин назад"
+                # Alert if last scan was too long ago (missed 2+ scheduled scans)
+                if mins_ago > 35:
+                    await self._notify(
+                        f"⚠️ <b>Watchdog</b>: последний скан был {mins_ago} мин назад!\n"
+                        f"Возможна проблема со планировщиком."
+                    )
+                    return
+
+            can, reason = state.can_trade(cfg.MAX_DAILY_LOSS, cfg.MAX_POSITIONS, cfg.MAX_DAILY_TRADES)
+            status = "✅ Торгует" if can else f"⏸ {reason}"
+            pos_count = len(state.positions)
+            bal_str = f"{state.current_balance:.2f}" if state.current_balance else "?"
+
+            await self._notify(
+                f"🤖 <b>Watchdog</b> | uptime {uptime_h:.1f}ч\n"
+                f"Статус: {status}\n"
+                f"Позиций: {pos_count} | Баланс: {bal_str} USDT\n"
+                f"Сканов: {self._scan_count} | Последний: {last_scan}\n"
+                f"PnL сегодня: {'+' if state.day.pnl_usdt >= 0 else ''}{state.day.pnl_usdt:.2f} USDT"
+            )
+        except Exception as e:
+            log.error(f"watchdog: {e}")
 
     # ------------------------------------------------------------------ reports
 

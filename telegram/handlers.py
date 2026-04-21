@@ -45,7 +45,29 @@ def main_keyboard():
 # ------------------------------------------------------------------ /ping
 
 async def cmd_ping(msg: Message):
-    await msg.answer("🟢 Бот работает", reply_markup=main_keyboard())
+    if not _auth(msg):
+        return
+    from datetime import datetime as dt
+    pos_count = len(state.pairs)
+    open_pos  = len(state.positions)
+    bal_str   = f"{state.current_balance:.2f}" if state.current_balance else "?"
+    can, reason = state.can_trade(
+        __import__("core.config", fromlist=["cfg"]).cfg.MAX_DAILY_LOSS,
+        __import__("core.config", fromlist=["cfg"]).cfg.MAX_POSITIONS,
+        __import__("core.config", fromlist=["cfg"]).cfg.MAX_DAILY_TRADES,
+    )
+    status = "✅ Торгует" if can else f"⏸ {reason}"
+    await msg.answer(
+        f"🟢 <b>Бот работает</b>\n\n"
+        f"Статус: {status}\n"
+        f"Режим: <code>{cfg.MODE}</code>\n"
+        f"Баланс: <code>{bal_str} USDT</code>\n"
+        f"Позиций открыто: <code>{open_pos}</code>\n"
+        f"Пар в мониторинге: <code>{pos_count}</code>\n"
+        f"PnL сегодня: <code>{'+' if state.day.pnl_usdt >= 0 else ''}{state.day.pnl_usdt:.2f} USDT</code>",
+        parse_mode="HTML",
+        reply_markup=main_keyboard(),
+    )
 
 
 async def cmd_debug(msg: Message):

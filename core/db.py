@@ -31,7 +31,72 @@ def init_db():
             key   TEXT PRIMARY KEY,
             value TEXT
         )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS positions (
+            symbol       TEXT PRIMARY KEY,
+            side         TEXT,
+            entry        REAL,
+            sl           REAL,
+            tp1          REAL,
+            tp2          REAL,
+            tp3          REAL,
+            qty          REAL,
+            risk_usdt    REAL,
+            order_id     TEXT DEFAULT '',
+            sl_order_id  TEXT DEFAULT '',
+            tp_order_id  TEXT DEFAULT '',
+            be_moved     INTEGER DEFAULT 0,
+            tp2_hit      INTEGER DEFAULT 0,
+            trail_price  REAL DEFAULT 0,
+            opened_at    TEXT,
+            pattern      TEXT DEFAULT '',
+            tf           TEXT DEFAULT 'H1+H4',
+            rr           REAL DEFAULT 0,
+            score        INTEGER DEFAULT 0
+        )""")
         conn.commit()
+
+
+def save_position(pos) -> None:
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO positions
+                   (symbol,side,entry,sl,tp1,tp2,tp3,qty,risk_usdt,
+                    order_id,sl_order_id,tp_order_id,
+                    be_moved,tp2_hit,trail_price,
+                    opened_at,pattern,tf,rr,score)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (pos.symbol, pos.side, pos.entry, pos.sl,
+                 pos.tp1, pos.tp2, pos.tp3, pos.qty, pos.risk_usdt,
+                 pos.order_id, pos.sl_order_id, pos.tp_order_id,
+                 int(pos.be_moved), int(pos.tp2_hit), pos.trail_price,
+                 pos.opened_at.isoformat(),
+                 pos.pattern, pos.tf, pos.rr, pos.score),
+            )
+            conn.commit()
+    except Exception as e:
+        log.error(f"save_position {pos.symbol}: {e}")
+
+
+def delete_position(symbol: str) -> None:
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM positions WHERE symbol=?", (symbol,))
+            conn.commit()
+    except Exception as e:
+        log.error(f"delete_position {symbol}: {e}")
+
+
+def load_positions():
+    """Return list of dicts for all persisted open positions."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute("SELECT * FROM positions")
+            return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        log.error(f"load_positions: {e}")
+        return []
 
 
 def save_trade(pos, exit_price: float, pnl: float, result: str):

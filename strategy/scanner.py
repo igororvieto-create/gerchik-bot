@@ -15,6 +15,7 @@ from strategy.strategy.gerchik import Signal, analyze, parse_klines
 log = logging.getLogger("scanner")
 
 _SCANNING = False   # module-level lock — shared by ALL Scanner instances
+_global_scanner = None  # shared instance for /scan command in handlers
 
 
 SL_COOLDOWN_MIN = 60  # minutes to skip a symbol after SL hit
@@ -22,10 +23,12 @@ SL_COOLDOWN_MIN = 60  # minutes to skip a symbol after SL hit
 
 class Scanner:
     def __init__(self, exchange: BingXClient, bot: Bot):
+        global _global_scanner
         self.ex          = exchange
         self.bot         = bot
         self._scan_count = 0
         self._sl_cooldown: dict = {}  # symbol → datetime of last SL hit
+        _global_scanner = self
 
     # ------------------------------------------------------------------ notify
 
@@ -569,12 +572,19 @@ class Scanner:
             await self.ex.close_position(pos.symbol, qty, pos.side)
             pos.qty    -= qty
             pos.tp2_hit = True
+            side = "BUY" if pos.side == "LONG" else "SELL"
             # Re-place SL for remaining qty
             if pos.sl_order_id:
                 await self.ex.cancel_order(pos.symbol, pos.sl_order_id)
-                side = "BUY" if pos.side == "LONG" else "SELL"
                 r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, pos.sl)
                 pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
+            # Re-place TP3 for remaining qty (old order had original full qty)
+            if pos.tp_order_id:
+                await self.ex.cancel_order(pos.symbol, pos.tp_order_id)
+                pos.tp_order_id = ""
+            if pos.tp3 > 0 and pos.qty > 0:
+                r = await self.ex.place_take_profit(pos.symbol, side, pos.qty, pos.tp3)
+                pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))
             await self._notify(
                 f"💚 <b>{label}</b> | {pos.symbol}\n"
                 f"Закрыто {int(pct * 100)}% позиции | цена рынка ~<code>{pos.tp2:.4f}</code>"

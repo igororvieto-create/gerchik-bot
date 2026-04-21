@@ -526,11 +526,15 @@ async def cmd_scan(msg: Message):
 
     async def _do():
         try:
-            from exchange.bingx import BingXClient
-            from strategy.scanner import Scanner
-            ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-            await Scanner(ex, msg.bot).scan_all()
-            await ex.close()
+            from strategy.scanner import _global_scanner
+            if _global_scanner:
+                await _global_scanner.scan_all()
+            else:
+                from exchange.bingx import BingXClient
+                from strategy.scanner import Scanner
+                ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+                await Scanner(ex, msg.bot).scan_all()
+                await ex.close()
         except Exception as e:
             log.error(f"cmd_scan bg: {e}")
 

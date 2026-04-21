@@ -222,17 +222,25 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         return None
 
     # ── D1 trend ──
-    ema200  = ema(d1["close"], cfg.TREND_EMA_D1)
-    d1_up   = d1["close"][-1] > ema200[-1]
-    trend   = "LONG" if d1_up else "SHORT"
-    d1_slope= trend_slope(d1["close"], 5)
+    ema200   = ema(d1["close"], cfg.TREND_EMA_D1)
+    d1_up    = d1["close"][-1] > ema200[-1]
+    trend    = "LONG" if d1_up else "SHORT"
+    d1_slope = trend_slope(d1["close"], 5)
 
-    # ── H4 filter ──
+    # D1 slope mandatory — only trade when trend is clearly moving
+    if trend == "LONG"  and d1_slope <= 0.05:
+        log.debug(f"{symbol}: D1 slope слаб для LONG ({d1_slope:+.2f}%)")
+        return None
+    if trend == "SHORT" and d1_slope >= -0.05:
+        log.debug(f"{symbol}: D1 slope слаб для SHORT ({d1_slope:+.2f}%)")
+        return None
+
+    # ── H4 filter (tolerance tightened to 1.5%) ──
     ema50   = ema(h4["close"], cfg.TREND_EMA_H4)
     h4_up   = h4["close"][-1] > ema50[-1]
     h4_dn   = h4["close"][-1] < ema50[-1]
     h4_aligned = (trend=="LONG" and h4_up) or (trend=="SHORT" and h4_dn)
-    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 2.0
+    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 1.5
     if not h4_aligned and not h4_near:
         log.debug(f"{symbol}: H4 не выровнен с трендом {trend} и не рядом с EMA50")
         return None
@@ -266,8 +274,8 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         return None
 
     touches = level_touches(level, h4["high"][-120:], h4["low"][-120:])
-    if touches > 6:
-        log.debug(f"{symbol}: уровень {level:.4f} пробит ({touches} касаний)")
+    if touches > 5:
+        log.debug(f"{symbol}: уровень {level:.4f} слишком затёрт ({touches} касаний)")
         return None
 
     # ── ATR-based SL ──
@@ -281,10 +289,13 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         log.debug(f"{symbol}: ADX {cur_adx:.1f} < {cfg.ADX_MIN} — рынок в боковике")
         return None
 
-    # ── MACD on H1 — momentum confirmation ──
+    # ── MACD on H1 — mandatory momentum confirmation ──
     _, _, macd_hist = macd(h1["close"])
     macd_aligned = (trend == "LONG"  and macd_hist[-1] > macd_hist[-2]) or \
                    (trend == "SHORT" and macd_hist[-1] < macd_hist[-2])
+    if not macd_aligned:
+        log.debug(f"{symbol}: MACD не подтверждает импульс {trend}")
+        return None
 
     # ── Filter 1: ATR volatility — skip flat or explosive markets ──
     atr_pct = cur_atr / price * 100

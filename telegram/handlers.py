@@ -588,10 +588,16 @@ async def handle_signal_callback(cb: CallbackQuery):
     action, symbol = cb.data.split(":", 1)
     if action == "skip":
         state.pending.pop(symbol, None)
-        await cb.message.edit_caption(
-            caption=(cb.message.caption or "") + "\n\n⏭ <b>Пропущено</b>",
-            parse_mode="HTML",
-        )
+        if cb.message.photo:
+            await cb.message.edit_caption(
+                caption=(cb.message.caption or "") + "\n\n⏭ <b>Пропущено</b>",
+                parse_mode="HTML",
+            )
+        else:
+            await cb.message.edit_text(
+                text=(cb.message.text or "") + "\n\n⏭ <b>Пропущено</b>",
+                parse_mode="HTML",
+            )
         await cb.answer("Пропущено")
         return
 
@@ -605,10 +611,16 @@ async def handle_signal_callback(cb: CallbackQuery):
         await cb.answer("⏰ Время истекло", show_alert=True)
         return
 
-    await cb.message.edit_caption(
-        caption=(cb.message.caption or "") + "\n\n⏳ <b>Входим...</b>",
-        parse_mode="HTML",
-    )
+    if cb.message.photo:
+        await cb.message.edit_caption(
+            caption=(cb.message.caption or "") + "\n\n⏳ <b>Входим...</b>",
+            parse_mode="HTML",
+        )
+    else:
+        await cb.message.edit_text(
+            text=(cb.message.text or "") + "\n\n⏳ <b>Входим...</b>",
+            parse_mode="HTML",
+        )
     await cb.answer("Входим...")
 
     try:

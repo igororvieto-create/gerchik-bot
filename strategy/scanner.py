@@ -539,7 +539,7 @@ class Scanner:
                 pos.trail_price = price
                 new_sl = round(price * (1 - cfg.TRAIL_PCT / 100), 8)
             else:
-                if price >= pos.trail_price and pos.trail_price != 0:
+                if price >= pos.trail_price:
                     return
                 pos.trail_price = price
                 new_sl = round(price * (1 + cfg.TRAIL_PCT / 100), 8)

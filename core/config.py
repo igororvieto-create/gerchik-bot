@@ -8,7 +8,7 @@ class Config:
     TELEGRAM_CHAT_ID: str   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     BINGX_API_KEY:    str   = os.getenv("BINGX_API_KEY", "").strip()
     BINGX_SECRET:     str   = os.getenv("BINGX_SECRET", "").strip()
-    MODE:             str   = "auto"
+    MODE:             str   = os.getenv("BOT_MODE", "auto").strip()
     RISK_PER_TRADE:   float = float(os.getenv("RISK_PER_TRADE", "1.0").strip())
     MAX_DAILY_LOSS:   float = float(os.getenv("MAX_DAILY_LOSS", "10.0").strip())
     MAX_POSITIONS:    int   = int(os.getenv("MAX_POSITIONS", "3").strip())

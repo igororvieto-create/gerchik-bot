@@ -18,6 +18,14 @@ _SCANNING = False   # module-level lock — shared by ALL Scanner instances
 _global_scanner = None  # shared instance for /scan command in handlers
 
 
+def _px(p: float) -> float:
+    """Round price to exchange-compatible precision."""
+    if p >= 10:   return round(p, 2)
+    if p >= 1:    return round(p, 4)
+    if p >= 0.01: return round(p, 5)
+    return round(p, 6)
+
+
 SL_COOLDOWN_MIN = 60  # minutes to skip a symbol after SL hit
 
 
@@ -562,9 +570,9 @@ class Scanner:
             # Place SL at entry + small buffer to lock in tiny profit above fees
             buffer = pos.entry * cfg.BE_BUFFER_PCT / 100
             if pos.side == "LONG":
-                be_price = round(pos.entry + buffer, 8)
+                be_price = _px(pos.entry + buffer)
             else:
-                be_price = round(pos.entry - buffer, 8)
+                be_price = _px(pos.entry - buffer)
 
             if pos.sl_order_id:
                 await self.ex.cancel_order(pos.symbol, pos.sl_order_id)
@@ -596,12 +604,12 @@ class Scanner:
                 if price <= pos.trail_price:
                     return
                 pos.trail_price = price
-                new_sl = round(price * (1 - cfg.TRAIL_PCT / 100), 8)
+                new_sl = _px(price * (1 - cfg.TRAIL_PCT / 100))
             else:
                 if price >= pos.trail_price and pos.trail_price != 0:
                     return
                 pos.trail_price = price
-                new_sl = round(price * (1 + cfg.TRAIL_PCT / 100), 8)
+                new_sl = _px(price * (1 + cfg.TRAIL_PCT / 100))
 
             # Only move if improvement is meaningful (≥0.1%)
             min_move = pos.entry * 0.001

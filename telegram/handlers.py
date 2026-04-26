@@ -429,11 +429,15 @@ async def cmd_setpairs(msg: Message):
     raw = args[1].strip()
     if raw.lower() == "auto":
         cfg.WHITELIST = []
-        from exchange.bingx import BingXClient
-        from strategy.scanner import Scanner
-        ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-        await Scanner(ex, msg.bot).update_pairs()
-        await ex.close()
+        from strategy.scanner import _global_scanner
+        if _global_scanner:
+            await _global_scanner.update_pairs()
+        else:
+            from exchange.bingx import BingXClient
+            from strategy.scanner import Scanner
+            ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+            await Scanner(ex, msg.bot).update_pairs()
+            await ex.close()
         await msg.answer(f"✅ Режим авто, пар: {len(state.pairs)}", reply_markup=main_keyboard())
     else:
         pairs = [p.strip().upper() for p in raw.split(",") if p.strip()]
@@ -616,11 +620,15 @@ async def handle_signal_callback(cb: CallbackQuery):
     await cb.answer("Входим...")
 
     try:
-        from exchange.bingx import BingXClient
-        from strategy.scanner import Scanner
-        ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-        await Scanner(ex, cb.message.bot)._enter(pend["signal"], confirmed=True)
-        await ex.close()
+        from strategy.scanner import _global_scanner
+        if _global_scanner:
+            await _global_scanner._enter(pend["signal"], confirmed=True)
+        else:
+            from exchange.bingx import BingXClient
+            from strategy.scanner import Scanner
+            ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+            await Scanner(ex, cb.message.bot)._enter(pend["signal"], confirmed=True)
+            await ex.close()
     except Exception as e:
         log.error(f"confirm callback {symbol}: {e}")
 
@@ -691,11 +699,15 @@ async def handle_misc(msg: Message):
             state.pending.pop(sym, None)
             await msg.answer("⏰ Время подтверждения истекло")
             return
-        from exchange.bingx import BingXClient
-        from strategy.scanner import Scanner
-        ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-        await Scanner(ex, msg.bot)._enter(pend["signal"], confirmed=True)
-        await ex.close()
+        from strategy.scanner import _global_scanner
+        if _global_scanner:
+            await _global_scanner._enter(pend["signal"], confirmed=True)
+        else:
+            from exchange.bingx import BingXClient
+            from strategy.scanner import Scanner
+            ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+            await Scanner(ex, msg.bot)._enter(pend["signal"], confirmed=True)
+            await ex.close()
         return
 
     if text.startswith("/skip_"):

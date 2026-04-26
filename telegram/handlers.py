@@ -244,7 +244,7 @@ async def cmd_history(msg: Message):
         return
     lines = ["📜 <b>Последние сделки:</b>\n"]
     for sym, side, entry, exit_p, pnl, result, closed_at in rows:
-        icon = "✅" if result == "WIN" else "❌"
+        icon = "✅" if pnl >= 0 else "❌"
         dt   = closed_at[:16].replace("T", " ") if closed_at else "?"
         sign = "+" if pnl >= 0 else ""
         lines.append(

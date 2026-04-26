@@ -29,10 +29,17 @@ async def main():
         log.error("TELEGRAM_TOKEN не задан — бот не запустится")
         return
 
-    # Init SQLite and restore total PnL
+    # Init SQLite and restore state
     db.init_db()
     state.total_pnl = db.load_total_pnl()
     log.info(f"Восстановлен total_pnl из БД: {state.total_pnl:.2f} USDT")
+    # Restore today's stats so daily limits and /report are correct after restart
+    today = db.get_today_stats()
+    state.day.trades    = today["total"]
+    state.day.wins      = today["wins"]
+    state.day.losses    = today["losses"]
+    state.day.pnl_usdt  = today["pnl"]
+    log.info(f"Восстановлена дневная статистика: {today['total']} сделок, PnL {today['pnl']:.2f} USDT")
     state.paused = db.get_kv("paused", "0") == "1"
     if state.paused:
         log.info("Бот восстановлен на паузе (из БД)")

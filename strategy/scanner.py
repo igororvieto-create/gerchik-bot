@@ -118,6 +118,13 @@ class Scanner:
             _SCANNING = False
 
     async def _scan_all_inner(self):
+        # Clean up expired pending signals — blocked symbols get unlocked
+        now = datetime.utcnow()
+        expired = [sym for sym, p in list(state.pending.items()) if now > p["expires"]]
+        for sym in expired:
+            del state.pending[sym]
+            log.info(f"Pending сигнал {sym} истёк — символ разблокирован")
+
         if not state.pairs:
             await self.update_pairs()
         can, reason = state.can_trade(cfg.MAX_DAILY_LOSS, cfg.MAX_POSITIONS, cfg.MAX_DAILY_TRADES)
@@ -634,6 +641,26 @@ class Scanner:
             if qty <= 0:
                 return
             await self.ex.close_position(pos.symbol, qty, pos.side)
+
+            # Record PnL for the closed portion
+            partial_pnl = 0.0
+            close_price = pos.tp2
+            try:
+                ticker = await self.ex.get_ticker(pos.symbol)
+                close_price = float(ticker.get("lastPrice", pos.tp2)) if ticker else pos.tp2
+                partial_pnl = (close_price - pos.entry) * qty if pos.side == "LONG" \
+                              else (pos.entry - close_price) * qty
+                state.total_pnl    += partial_pnl
+                state.day.pnl_usdt += partial_pnl
+                # Save to DB so total_pnl survives restarts
+                import copy
+                pos_snap = copy.copy(pos)
+                pos_snap.qty = qty
+                db.save_trade(pos_snap, close_price, round(partial_pnl, 4),
+                              "WIN" if partial_pnl > 0 else "LOSS")
+            except Exception as pe:
+                log.warning(f"partial_close pnl {pos.symbol}: {pe}")
+
             pos.qty    -= qty
             pos.tp2_hit = True
             side = "BUY" if pos.side == "LONG" else "SELL"
@@ -649,9 +676,13 @@ class Scanner:
             if pos.tp3 > 0 and pos.qty > 0:
                 r = await self.ex.place_take_profit(pos.symbol, side, pos.qty, pos.tp3)
                 pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))
+
+            sign = "+" if partial_pnl >= 0 else ""
             await self._notify(
                 f"💚 <b>{label}</b> | {pos.symbol}\n"
-                f"Закрыто {int(pct * 100)}% позиции | цена рынка ~<code>{pos.tp2:.4f}</code>"
+                f"Закрыто {int(pct * 100)}% позиции | цена <code>{close_price:.4f}</code>\n"
+                f"PnL частичный: <code>{sign}{partial_pnl:.2f} USDT</code>\n"
+                f"Остаток {int((1-pct)*100)}% → TP3 <code>{pos.tp3:.4f}</code>"
             )
         except Exception as e:
             log.error(f"partial_close {pos.symbol}: {e}")

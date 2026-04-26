@@ -101,6 +101,27 @@ def load_total_pnl() -> float:
     return get_stats()["pnl"]
 
 
+def get_today_stats() -> dict:
+    """Stats for today (UTC) — used to restore state.day after restart."""
+    try:
+        today = datetime.utcnow().date().isoformat() + "T00:00:00"
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.execute(
+                """SELECT COUNT(*), SUM(pnl),
+                          SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)
+                   FROM trades WHERE closed_at >= ?""",
+                (today,),
+            )
+            row = cur.fetchone()
+        total = row[0] or 0
+        pnl   = row[1] or 0.0
+        wins  = row[2] or 0
+        return {"total": total, "pnl": round(pnl, 2), "wins": wins, "losses": total - wins}
+    except Exception as e:
+        log.error(f"get_today_stats: {e}")
+        return {"total": 0, "pnl": 0.0, "wins": 0, "losses": 0}
+
+
 def load_all_cooldowns() -> dict:
     """Load all sl_cd:* cooldown entries at once (used on scanner startup)."""
     result = {}

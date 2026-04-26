@@ -49,11 +49,13 @@ def parse_klines(raw):
     }
 
 def ema(values, period):
-    result = np.zeros_like(values)
-    k = 2/(period+1)
-    result[0] = values[0]
-    for i in range(1, len(values)):
-        result[i] = values[i]*k + result[i-1]*(1-k)
+    result = np.zeros(len(values))
+    if len(values) < period:
+        return result
+    k = 2.0 / (period + 1)
+    result[period - 1] = values[:period].mean()
+    for i in range(period, len(values)):
+        result[i] = values[i] * k + result[i - 1] * (1 - k)
     return result
 
 def rsi(closes, period=14):
@@ -90,16 +92,29 @@ def vol_ma(volumes, period=20):
         result[i] = volumes[i-period+1:i+1].mean()
     return result
 
+def _merge_levels(levels, merge_pct=1.0):
+    """Deduplicate levels within merge_pct% of each other, keeping the average."""
+    if not levels:
+        return []
+    sorted_lvls = sorted(levels)
+    merged = [sorted_lvls[0]]
+    for lvl in sorted_lvls[1:]:
+        if abs(lvl - merged[-1]) / merged[-1] * 100 <= merge_pct:
+            merged[-1] = (merged[-1] + lvl) / 2.0
+        else:
+            merged.append(lvl)
+    return merged
+
 def find_levels(highs, lows, lookback=80):
     rh, rl = highs[-lookback:], lows[-lookback:]
     res, sup = [], []
-    for i in range(2, len(rh)-2):
-        if rh[i] > max(rh[i-1], rh[i-2], rh[i+1], rh[i+2]):
+    for i in range(3, len(rh)-3):
+        if rh[i] > max(rh[i-1], rh[i-2], rh[i-3], rh[i+1], rh[i+2], rh[i+3]):
             res.append(float(rh[i]))
-    for i in range(2, len(rl)-2):
-        if rl[i] < min(rl[i-1], rl[i-2], rl[i+1], rl[i+2]):
+    for i in range(3, len(rl)-3):
+        if rl[i] < min(rl[i-1], rl[i-2], rl[i-3], rl[i+1], rl[i+2], rl[i+3]):
             sup.append(float(rl[i]))
-    return {"resistance": res, "support": sup}
+    return {"resistance": _merge_levels(res), "support": _merge_levels(sup)}
 
 def near_level(price, levels, tol=0.8):
     best = (False, 0.0, 999.0)
@@ -169,11 +184,11 @@ def bear_engulf(o1,c1,o2,c2):
 
 def bull_pin(o,h,l,c):
     body=abs(c-o); full=h-l
-    return full>0 and (min(o,c)-l)>full*0.55 and body<full*0.3
+    return full>0 and (min(o,c)-l)>full*0.55 and body<full*0.3 and c>=o
 
 def bear_pin(o,h,l,c):
     body=abs(c-o); full=h-l
-    return full>0 and (h-max(o,c))>full*0.55 and body<full*0.3
+    return full>0 and (h-max(o,c))>full*0.55 and body<full*0.3 and c<=o
 
 def doji(o,h,l,c):
     body=abs(c-o); full=h-l
@@ -223,6 +238,16 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     if not h4_aligned and not h4_near:
         log.debug(f"{symbol}: H4 не выровнен с трендом {trend} и не рядом с EMA50")
         return None
+    # When only h4_near (price near EMA50 but on wrong side), reject if EMA50
+    # slope is clearly opposing the trend direction — avoids counter-trend entries.
+    if h4_near and not h4_aligned:
+        h4_slope = (ema50[-1] - ema50[-5]) / ema50[-5] * 100 if ema50[-5] > 0 else 0
+        if trend == "LONG"  and h4_slope < -0.1:
+            log.debug(f"{symbol}: H4 EMA50 наклон {h4_slope:.2f}% — против тренда LONG")
+            return None
+        if trend == "SHORT" and h4_slope > 0.1:
+            log.debug(f"{symbol}: H4 EMA50 наклон {h4_slope:.2f}% — против тренда SHORT")
+            return None
 
     price = h1["close"][-1]
 
@@ -245,9 +270,9 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     else:
         primary   = lv4["resistance"] + lv1["resistance"]
         secondary = lv4["support"]    + lv1["support"]
-    near, level = near_level(price, primary, tol=1.5)
+    near, level = near_level(price, primary, tol=1.0)
     if not near:
-        near, level = near_level(price, secondary, tol=1.0)
+        near, level = near_level(price, secondary, tol=0.8)
     if not near:
         log.debug(f"{symbol}: цена {price:.4f} не у уровня (primary={len(primary)}, secondary={len(secondary)})")
         return None

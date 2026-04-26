@@ -14,7 +14,8 @@ from strategy.strategy.gerchik import Signal, analyze, parse_klines
 
 log = logging.getLogger("scanner")
 
-_SCANNING = False   # module-level lock — shared by ALL Scanner instances
+_SCANNING   = False   # prevents overlapping scan cycles
+_MONITORING = False   # prevents overlapping monitor cycles
 _global_scanner = None  # shared instance for /scan command in handlers
 
 
@@ -463,6 +464,7 @@ class Scanner:
             state.positions[sig.symbol] = pos
             state.day.trades += 1
             state.pending.pop(sig.symbol, None)
+            db.save_open_position(pos)  # persist for restart recovery
 
             icon = "✅" if confirmed else "🤖"
             await self._notify(
@@ -481,6 +483,16 @@ class Scanner:
     # ------------------------------------------------------------------ monitor
 
     async def monitor_positions(self):
+        global _MONITORING
+        if _MONITORING:
+            return
+        _MONITORING = True
+        try:
+            await self._monitor_inner()
+        finally:
+            _MONITORING = False
+
+    async def _monitor_inner(self):
         # Sync with BingX: detect positions closed externally (SL/TP hit on exchange)
         try:
             live = await self.ex.get_open_positions()
@@ -518,6 +530,7 @@ class Scanner:
                     except Exception as e:
                         log.error(f"{symbol}: ошибка сохранения сделки в БД: {e}")
                     del state.positions[symbol]
+                    db.delete_open_position(symbol)
                     # Set cooldown if closed at a loss (likely SL hit)
                     if pnl <= 0:
                         self._set_cooldown(symbol)
@@ -585,10 +598,18 @@ class Scanner:
                 await self.ex.cancel_order(pos.symbol, pos.sl_order_id)
             side = "BUY" if pos.side == "LONG" else "SELL"
             r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, be_price)
+            if r.get("code") != 0:
+                log.error(f"BE SL не выставился {pos.symbol}: {r.get('code')} {r.get('msg','')}")
+                await self._notify(
+                    f"⚠️ <b>{pos.symbol}</b>: SL на безубыток не выставился "
+                    f"(код {r.get('code')}) — позиция без защиты!"
+                )
+                return
             pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
             pos.sl          = be_price
             pos.be_moved    = True
             pos.trail_price = be_price
+            db.save_open_position(pos)  # persist BE state change
 
             trigger_info = (
                 f"+{cfg.BE_TRIGGER_PCT}% от входа"
@@ -629,7 +650,11 @@ class Scanner:
                 await self.ex.cancel_order(pos.symbol, pos.sl_order_id)
             side = "BUY" if pos.side == "LONG" else "SELL"
             r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, new_sl)
-            pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
+            new_id = str(r.get("data", {}).get("orderId", ""))
+            if r.get("code") != 0 or not new_id:
+                log.warning(f"Trail SL не обновился {pos.symbol}: код {r.get('code')}")
+                return
+            pos.sl_order_id = new_id
             pos.sl = new_sl
             log.info(f"Trail SL {pos.symbol} → {new_sl:.4f}")
         except Exception as e:
@@ -676,6 +701,8 @@ class Scanner:
             if pos.tp3 > 0 and pos.qty > 0:
                 r = await self.ex.place_take_profit(pos.symbol, side, pos.qty, pos.tp3)
                 pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))
+
+            db.save_open_position(pos)  # persist updated qty and tp2_hit flag
 
             sign = "+" if partial_pnl >= 0 else ""
             await self._notify(
@@ -726,6 +753,7 @@ class Scanner:
             log.error(f"db.save_trade: {e}")
 
         del state.positions[pos.symbol]
+        db.delete_open_position(pos.symbol)
 
         # Cooldown after SL hit — don't re-enter same symbol for 1 hour
         if sl_hit:

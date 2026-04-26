@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -160,3 +161,49 @@ def get_kv(key: str, default=None):
     except Exception as e:
         log.error(f"get_kv: {e}")
         return default
+
+
+# ── Open position persistence ─────────────────────────────────────────────────
+
+def save_open_position(pos) -> None:
+    """Persist open position to KV store so it survives bot restarts."""
+    data = {
+        "symbol": pos.symbol, "side": pos.side,
+        "entry": pos.entry, "sl": pos.sl,
+        "tp1": pos.tp1, "tp2": pos.tp2, "tp3": pos.tp3,
+        "qty": pos.qty, "risk_usdt": pos.risk_usdt,
+        "order_id": pos.order_id, "sl_order_id": pos.sl_order_id,
+        "tp_order_id": pos.tp_order_id,
+        "be_moved": pos.be_moved, "tp2_hit": pos.tp2_hit,
+        "trail_price": pos.trail_price,
+        "opened_at": pos.opened_at.isoformat(),
+        "pattern": pos.pattern, "tf": pos.tf,
+        "rr": pos.rr, "score": pos.score,
+    }
+    save_kv(f"pos:{pos.symbol}", json.dumps(data))
+
+
+def delete_open_position(symbol: str) -> None:
+    """Remove persisted position when it closes."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM kv WHERE key=?", (f"pos:{symbol}",))
+            conn.commit()
+    except Exception as e:
+        log.error(f"delete_open_position {symbol}: {e}")
+
+
+def load_open_positions() -> list:
+    """Load all persisted open positions at startup."""
+    result = []
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.execute("SELECT value FROM kv WHERE key LIKE 'pos:%'")
+            for (val,) in cur.fetchall():
+                try:
+                    result.append(json.loads(val))
+                except Exception:
+                    pass
+    except Exception as e:
+        log.error(f"load_open_positions: {e}")
+    return result

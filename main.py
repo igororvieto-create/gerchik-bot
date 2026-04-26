@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -71,23 +72,60 @@ async def main():
             balance = await exchange.get_balance()
             state.current_balance = balance
 
-            # Sync open positions from exchange to prevent re-opening after restart
+            # Get live positions from exchange (ground truth)
             live = await exchange.get_open_positions()
-            synced = 0
-            for p in live:
-                sym  = p.get("symbol", "")
-                side = p.get("positionSide", "LONG")
-                amt  = abs(float(p.get("positionAmt", 0)))
-                entry = float(p.get("entryPrice", 0))
-                if sym and amt > 0 and sym not in state.positions:
-                    from core.state import Position
+            live_map = {
+                p.get("symbol"): p for p in live
+                if abs(float(p.get("positionAmt", 0))) > 0
+            }
+
+            # Restore positions from DB (full data: SL, TP, pattern, BE state, etc.)
+            from core.state import Position
+            saved = db.load_open_positions()
+            restored = 0
+            for d in saved:
+                sym = d.get("symbol", "")
+                if not sym:
+                    continue
+                if sym not in live_map:
+                    # Closed during downtime — clean up DB
+                    db.delete_open_position(sym)
+                    log.info(f"Позиция {sym} закрыта в downtime — убрана из БД")
+                    continue
+                if sym not in state.positions:
                     state.positions[sym] = Position(
-                        symbol=sym, side=side, entry=entry, sl=0.0,
-                        tp1=0.0, tp2=0.0, tp3=0.0, qty=amt, risk_usdt=0.0,
+                        symbol=sym, side=d["side"],
+                        entry=float(d["entry"]), sl=float(d["sl"]),
+                        tp1=float(d["tp1"]), tp2=float(d["tp2"]), tp3=float(d["tp3"]),
+                        qty=float(d["qty"]), risk_usdt=float(d.get("risk_usdt", 0)),
+                        order_id=d.get("order_id", ""),
+                        sl_order_id=d.get("sl_order_id", ""),
+                        tp_order_id=d.get("tp_order_id", ""),
+                        be_moved=bool(d.get("be_moved", False)),
+                        tp2_hit=bool(d.get("tp2_hit", False)),
+                        trail_price=float(d.get("trail_price", 0.0)),
+                        opened_at=datetime.fromisoformat(
+                            d.get("opened_at", datetime.utcnow().isoformat())
+                        ),
+                        pattern=d.get("pattern", ""),
+                        tf=d.get("tf", "H1+H4"),
+                        rr=float(d.get("rr", 0.0)),
+                        score=int(d.get("score", 0)),
                     )
-                    synced += 1
-            if synced:
-                log.info(f"Синхронизировано {synced} открытых позиций с биржи")
+                    restored += 1
+            if restored:
+                log.info(f"Восстановлено {restored} позиций из БД с полными данными (SL/TP/BE)")
+
+            # Any live exchange position not in DB → add with sl=0 (manual / unknown)
+            for sym, lp in live_map.items():
+                if sym not in state.positions:
+                    state.positions[sym] = Position(
+                        symbol=sym, side=lp.get("positionSide", "LONG"),
+                        entry=float(lp.get("entryPrice", 0)), sl=0.0,
+                        tp1=0.0, tp2=0.0, tp3=0.0,
+                        qty=abs(float(lp.get("positionAmt", 0))), risk_usdt=0.0,
+                    )
+                    log.info(f"Внешняя позиция {sym} добавлена без SL/TP")
 
             await bot.send_message(
                 cfg.TELEGRAM_CHAT_ID,

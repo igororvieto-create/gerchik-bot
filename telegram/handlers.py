@@ -567,6 +567,7 @@ async def cmd_closeall(msg: Message):
         try:
             await ex.close_position(sym, amt, side)
             state.positions.pop(sym, None)
+            from core import db as _db; _db.delete_open_position(sym)
             closed.append(sym)
         except Exception as e:
             log.error(f"closeall {sym}: {e}")
@@ -576,6 +577,7 @@ async def cmd_closeall(msg: Message):
             try:
                 await ex.close_position(sym, p.qty, p.side)
                 del state.positions[sym]
+                from core import db as _db; _db.delete_open_position(sym)
                 closed.append(sym)
             except Exception as e:
                 log.error(f"closeall {sym}: {e}")

@@ -18,7 +18,7 @@ class Config:
     SL_BUFFER_PCT:    float = float(os.getenv("SL_BUFFER_PCT", "0.15").strip())
     VOLUME_MULT:      float = float(os.getenv("VOLUME_MULT", "1.3").strip())
     VOLUME_MA_PERIOD: int   = int(os.getenv("VOLUME_MA_PERIOD", "20").strip())
-    MIN_SCORE:        int   = int(os.getenv("MIN_SCORE", "60").strip())
+    MIN_SCORE:        int   = int(os.getenv("MIN_SCORE", "65").strip())
     TREND_EMA_D1:     int   = int(os.getenv("TREND_EMA_D1", "200").strip())
     TREND_EMA_H4:     int   = int(os.getenv("TREND_EMA_H4", "50").strip())
     TREND_EMA_H1:     int   = int(os.getenv("TREND_EMA_H1", "21").strip())
@@ -58,6 +58,6 @@ class Config:
     BTC_FILTER:           bool  = os.getenv("BTC_FILTER", "true").strip().lower() == "true"
     BTC_FILTER_PCT:       float = float(os.getenv("BTC_FILTER_PCT", "2.0").strip())
     # ADX minimum — below this value market is ranging, skip signal
-    ADX_MIN:              float = float(os.getenv("ADX_MIN", "18.0").strip())
+    ADX_MIN:              float = float(os.getenv("ADX_MIN", "22.0").strip())
 
 cfg = Config()

@@ -81,8 +81,30 @@ class BingXClient:
         tickers = data.get("data", [])
         if isinstance(tickers, dict):
             tickers = [tickers]
-        sorted_t = sorted(tickers, key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
-        symbols = [t["symbol"] for t in sorted_t if "USDT" in t.get("symbol", "")]
+
+        MIN_VOLUME_USDT = 5_000_000  # skip illiquid coins (< $5M/day)
+        scored = []
+        for t in tickers:
+            sym = t.get("symbol", "")
+            if "USDT" not in sym:
+                continue
+            try:
+                volume = float(t.get("quoteVolume", 0))
+                if volume < MIN_VOLUME_USDT:
+                    continue
+                change = abs(float(t.get("priceChangePercent", 0)))
+                # Momentum score: high volume + moving (0.5–12% in 24h)
+                # Exclude flat (<0.5%) and overextended (>15%) coins
+                if change < 0.5 or change > 15.0:
+                    momentum = 0.5  # deprioritize, don't exclude completely
+                else:
+                    momentum = 1.0 + change / 10.0  # 1.05 – 2.2×
+                scored.append((sym, volume * momentum))
+            except Exception:
+                continue
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        symbols = [s for s, _ in scored]
         return symbols[:n] if n > 0 else symbols
 
     async def get_klines(self, symbol, interval, limit=200):
@@ -114,19 +136,20 @@ class BingXClient:
             if isinstance(d, dict) and "balance" in d:
                 bal = d["balance"]
                 if isinstance(bal, dict):
-                    for field in ("availableMargin", "available", "equity", "balance"):
+                    # Prefer equity (total account value incl. unrealized PnL)
+                    for field in ("equity", "balance", "availableMargin", "available"):
                         if field in bal and float(bal[field]) > 0:
                             return float(bal[field])
                 # Format 2: data.balance is a list of assets
                 if isinstance(bal, list):
                     for a in bal:
                         if a.get("asset") in ("USDT", "usdt"):
-                            for field in ("availableMargin", "available", "equity", "balance"):
+                            for field in ("equity", "balance", "availableMargin", "available"):
                                 if field in a:
                                     return float(a[field])
             # Format 3: data itself is the balance dict
             if isinstance(d, dict):
-                for field in ("availableMargin", "available"):
+                for field in ("equity", "balance", "availableMargin", "available"):
                     if field in d:
                         return float(d[field])
         except Exception as e:
@@ -136,6 +159,31 @@ class BingXClient:
     async def get_balance_raw(self):
         """Returns the raw API response for debugging."""
         return await self._get("/openApi/swap/v2/user/balance", {}, signed=True)
+
+    async def get_available_margin(self):
+        """Returns available (free) margin for new positions."""
+        data = await self._get("/openApi/swap/v2/user/balance", {}, signed=True)
+        try:
+            d = data.get("data", {})
+            if isinstance(d, dict) and "balance" in d:
+                bal = d["balance"]
+                if isinstance(bal, dict):
+                    for field in ("availableMargin", "available"):
+                        if field in bal:
+                            return float(bal[field])
+                if isinstance(bal, list):
+                    for a in bal:
+                        if a.get("asset") in ("USDT", "usdt"):
+                            for field in ("availableMargin", "available"):
+                                if field in a:
+                                    return float(a[field])
+            if isinstance(d, dict):
+                for field in ("availableMargin", "available"):
+                    if field in d:
+                        return float(d[field])
+        except Exception as e:
+            log.error(f"get_available_margin error: {e}")
+        return 0.0
 
     async def get_open_positions(self):
         data = await self._get("/openApi/swap/v2/user/positions", {}, signed=True)
@@ -202,6 +250,15 @@ class BingXClient:
                          {"symbol": symbol, "side": "LONG",  "leverage": leverage})
         await self._post("/openApi/swap/v2/trade/leverage",
                          {"symbol": symbol, "side": "SHORT", "leverage": leverage})
+
+    async def set_margin_type(self, symbol):
+        """Set isolated margin mode for both sides."""
+        for side in ("LONG", "SHORT"):
+            try:
+                await self._post("/openApi/swap/v2/trade/marginType",
+                                 {"symbol": symbol, "side": side, "marginType": "ISOLATED"})
+            except Exception as e:
+                log.debug(f"set_margin_type {symbol} {side}: {e}")
 
     async def close(self):
         if self._session:

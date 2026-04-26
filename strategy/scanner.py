@@ -14,7 +14,17 @@ from strategy.strategy.gerchik import Signal, analyze, parse_klines
 
 log = logging.getLogger("scanner")
 
-_SCANNING = False   # module-level lock — shared by ALL Scanner instances
+_SCANNING   = False   # prevents overlapping scan cycles
+_MONITORING = False   # prevents overlapping monitor cycles
+_global_scanner = None  # shared instance for /scan command in handlers
+
+
+def _px(p: float) -> float:
+    """Round price to exchange-compatible precision."""
+    if p >= 10:   return round(p, 2)
+    if p >= 1:    return round(p, 4)
+    if p >= 0.01: return round(p, 5)
+    return round(p, 6)
 
 
 SL_COOLDOWN_MIN = 60  # minutes to skip a symbol after SL hit
@@ -22,10 +32,42 @@ SL_COOLDOWN_MIN = 60  # minutes to skip a symbol after SL hit
 
 class Scanner:
     def __init__(self, exchange: BingXClient, bot: Bot):
+        global _global_scanner
         self.ex          = exchange
         self.bot         = bot
         self._scan_count = 0
         self._sl_cooldown: dict = {}  # symbol → datetime of last SL hit
+        _global_scanner = self
+        self._restore_cooldowns()
+
+    def _set_cooldown(self, symbol: str):
+        """Set cooldown in memory and persist to DB for restart survival."""
+        self._sl_cooldown[symbol] = datetime.utcnow()
+        try:
+            db.save_kv(f"sl_cd:{symbol}", datetime.utcnow().isoformat())
+        except Exception as e:
+            log.warning(f"cooldown save {symbol}: {e}")
+
+    def _in_cooldown(self, symbol: str) -> bool:
+        """Check in-memory cooldown only (DB loaded once at startup)."""
+        if symbol not in self._sl_cooldown:
+            return False
+        return (datetime.utcnow() - self._sl_cooldown[symbol]).total_seconds() < SL_COOLDOWN_MIN * 60
+
+    def _restore_cooldowns(self):
+        """Load all cooldowns from DB in one query at startup."""
+        try:
+            loaded = db.load_all_cooldowns()
+            now = datetime.utcnow()
+            active = 0
+            for sym, cd_time in loaded.items():
+                if (now - cd_time).total_seconds() < SL_COOLDOWN_MIN * 60:
+                    self._sl_cooldown[sym] = cd_time
+                    active += 1
+            if active:
+                log.info(f"Восстановлено {active} кулдаунов из БД")
+        except Exception as e:
+            log.warning(f"restore_cooldowns: {e}")
 
     # ------------------------------------------------------------------ notify
 
@@ -59,7 +101,7 @@ class Scanner:
             else:
                 symbols = await self.ex.get_top_symbols(cfg.TOP_N_PAIRS)
                 state.pairs = [s for s in symbols if s not in cfg.BLACKLIST]
-            log.info(f"Пар: {len(state.pairs)}")
+            log.info(f"Пар: {len(state.pairs)} | топ-5: {state.pairs[:5]}")
         except Exception as e:
             log.error(f"update_pairs: {e}")
 
@@ -77,6 +119,13 @@ class Scanner:
             _SCANNING = False
 
     async def _scan_all_inner(self):
+        # Clean up expired pending signals — blocked symbols get unlocked
+        now = datetime.utcnow()
+        expired = [sym for sym, p in list(state.pending.items()) if now > p["expires"]]
+        for sym in expired:
+            del state.pending[sym]
+            log.info(f"Pending сигнал {sym} истёк — символ разблокирован")
+
         if not state.pairs:
             await self.update_pairs()
         can, reason = state.can_trade(cfg.MAX_DAILY_LOSS, cfg.MAX_POSITIONS, cfg.MAX_DAILY_TRADES)
@@ -96,8 +145,7 @@ class Scanner:
             tasks = [
                 self._analyze(s) for s in batch
                 if s not in state.positions and s not in state.pending
-                and (s not in self._sl_cooldown or
-                     (now - self._sl_cooldown[s]).total_seconds() > SL_COOLDOWN_MIN * 60)
+                and not self._in_cooldown(s)
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
@@ -289,6 +337,24 @@ class Scanner:
                 log.warning(f"{sig.symbol}: qty=0, пропуск")
                 return
 
+            # Pre-check available margin to avoid "Insufficient margin" rejection
+            required_margin = min_notional / leverage
+            try:
+                avail_margin = await self.ex.get_available_margin()
+                if avail_margin > 0 and avail_margin < required_margin * 1.05:
+                    log.warning(
+                        f"{sig.symbol}: недостаточно свободной маржи "
+                        f"{avail_margin:.2f} < {required_margin:.2f} USDT — пропуск"
+                    )
+                    await self._notify(
+                        f"⚠️ <b>{sig.symbol}</b> пропущен\n"
+                        f"Недостаточно маржи: {avail_margin:.2f} USDT\n"
+                        f"Требуется: {required_margin:.2f} USDT (мин. позиция)"
+                    )
+                    return
+            except Exception as e:
+                log.warning(f"{sig.symbol}: не удалось проверить маржу — продолжаем: {e}")
+
             # Staleness check: skip only if price moved AGAINST the signal
             try:
                 ticker = await self.ex.get_ticker(sig.symbol)
@@ -298,6 +364,10 @@ class Scanner:
                 if against:
                     drift = abs(cur_price - sig.entry) / sig.entry * 100
                     log.info(f"{sig.symbol}: цена ушла против сигнала на {drift:.2f}% — пропуск")
+                    # Large drift (>3%) = signal fully invalidated — cooldown to avoid spam
+                    if drift > 3.0:
+                        self._set_cooldown(sig.symbol)
+                        log.info(f"{sig.symbol}: дрейф {drift:.1f}% > 3% — кулдаун 1ч")
                     await self._notify(
                         f"⏭ <b>{sig.symbol}</b> пропущен\n"
                         f"Цена ушла против сигнала: {drift:.1f}%\n"
@@ -309,6 +379,7 @@ class Scanner:
             except Exception as e:
                 log.warning(f"{sig.symbol}: не удалось получить текущую цену перед входом — используется цена сигнала: {e}")
 
+            await self.ex.set_margin_type(sig.symbol)
             await self.ex.set_leverage(sig.symbol, leverage)
             side  = "BUY" if sig.side == "LONG" else "SELL"
             order = await self.ex.place_order(sig.symbol, side, qty, position_side=sig.side)
@@ -338,11 +409,32 @@ class Scanner:
             except Exception as pe:
                 log.warning(f"Не удалось получить реальный qty {sig.symbol}: {pe}")
 
+            # Pre-validate SL price vs current mark price (avoids error 110411)
+            # For LONG: SL (SELL stop) must be below current price
+            # For SHORT: SL (BUY stop) must be above current price
+            try:
+                mk = await self.ex.get_ticker(sig.symbol)
+                mark = float(mk.get("lastPrice", sig.entry))
+                sl_invalid = (sig.side == "LONG"  and sig.sl >= mark) or \
+                             (sig.side == "SHORT" and sig.sl <= mark)
+                if sl_invalid:
+                    log.warning(f"{sig.symbol}: SL {sig.sl} уже за mark {mark:.4f} — аварийное закрытие")
+                    await self._notify(
+                        f"⚠️ <b>{sig.symbol}</b>: цена уже за SL при входе — закрываем"
+                    )
+                    try:
+                        await self.ex.close_position(sig.symbol, qty, sig.side)
+                    except Exception as ce:
+                        log.error(f"emergency close (pre-SL) {sig.symbol}: {ce}")
+                    self._set_cooldown(sig.symbol)
+                    return
+            except Exception as e:
+                log.warning(f"{sig.symbol}: не удалось проверить mark price перед SL: {e}")
+
             sl_order = await self.ex.place_stop_loss(sig.symbol, side, qty, sig.sl)
             sl_id    = str(sl_order.get("data", {}).get("orderId", ""))
             if sl_order.get("code") != 0:
                 err_code = sl_order.get("code", "?")
-                err_msg  = sl_order.get("msg", str(sl_order))
                 log.error(f"SL не выставился {sig.symbol}: код {err_code} — аварийное закрытие")
                 await self._notify(
                     f"⚠️ SL не выставился <b>{sig.symbol}</b> (код {err_code}) — закрываем"
@@ -351,6 +443,7 @@ class Scanner:
                     await self.ex.close_position(sig.symbol, qty, sig.side)
                 except Exception as ce:
                     log.error(f"emergency close {sig.symbol}: {ce}")
+                self._set_cooldown(sig.symbol)
                 return
             if not sl_id:
                 log.warning(f"SL выставлен (code=0) но orderId не получен {sig.symbol} — отмена SL позже недоступна")
@@ -371,6 +464,7 @@ class Scanner:
             state.positions[sig.symbol] = pos
             state.day.trades += 1
             state.pending.pop(sig.symbol, None)
+            db.save_open_position(pos)  # persist for restart recovery
 
             icon = "✅" if confirmed else "🤖"
             await self._notify(
@@ -389,6 +483,16 @@ class Scanner:
     # ------------------------------------------------------------------ monitor
 
     async def monitor_positions(self):
+        global _MONITORING
+        if _MONITORING:
+            return
+        _MONITORING = True
+        try:
+            await self._monitor_inner()
+        finally:
+            _MONITORING = False
+
+    async def _monitor_inner(self):
         # Sync with BingX: detect positions closed externally (SL/TP hit on exchange)
         try:
             live = await self.ex.get_open_positions()
@@ -426,9 +530,10 @@ class Scanner:
                     except Exception as e:
                         log.error(f"{symbol}: ошибка сохранения сделки в БД: {e}")
                     del state.positions[symbol]
+                    db.delete_open_position(symbol)
                     # Set cooldown if closed at a loss (likely SL hit)
                     if pnl <= 0:
-                        self._sl_cooldown[symbol] = datetime.utcnow()
+                        self._set_cooldown(symbol)
                     sign = "+" if pnl >= 0 else ""
                     await self._notify(
                         f"{'✅ WIN' if pnl > 0 else '❌ LOSS'} | {symbol} {pos.side}\n"
@@ -437,6 +542,10 @@ class Scanner:
                     )
         except Exception as e:
             log.error(f"monitor sync: {e}")
+
+        # Clean up stale sl_cooldown entries (older than 2x cooldown window)
+        cutoff = datetime.utcnow() - timedelta(minutes=SL_COOLDOWN_MIN * 2)
+        self._sl_cooldown = {s: t for s, t in self._sl_cooldown.items() if t > cutoff}
 
         for symbol, pos in list(state.positions.items()):
             try:
@@ -481,18 +590,26 @@ class Scanner:
             # Place SL at entry + small buffer to lock in tiny profit above fees
             buffer = pos.entry * cfg.BE_BUFFER_PCT / 100
             if pos.side == "LONG":
-                be_price = round(pos.entry + buffer, 8)
+                be_price = _px(pos.entry + buffer)
             else:
-                be_price = round(pos.entry - buffer, 8)
+                be_price = _px(pos.entry - buffer)
 
             if pos.sl_order_id:
                 await self.ex.cancel_order(pos.symbol, pos.sl_order_id)
             side = "BUY" if pos.side == "LONG" else "SELL"
             r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, be_price)
+            if r.get("code") != 0:
+                log.error(f"BE SL не выставился {pos.symbol}: {r.get('code')} {r.get('msg','')}")
+                await self._notify(
+                    f"⚠️ <b>{pos.symbol}</b>: SL на безубыток не выставился "
+                    f"(код {r.get('code')}) — позиция без защиты!"
+                )
+                return
             pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
             pos.sl          = be_price
             pos.be_moved    = True
             pos.trail_price = be_price
+            db.save_open_position(pos)  # persist BE state change
 
             trigger_info = (
                 f"+{cfg.BE_TRIGGER_PCT}% от входа"
@@ -515,12 +632,12 @@ class Scanner:
                 if price <= pos.trail_price:
                     return
                 pos.trail_price = price
-                new_sl = round(price * (1 - cfg.TRAIL_PCT / 100), 8)
+                new_sl = _px(price * (1 - cfg.TRAIL_PCT / 100))
             else:
                 if price >= pos.trail_price and pos.trail_price != 0:
                     return
                 pos.trail_price = price
-                new_sl = round(price * (1 + cfg.TRAIL_PCT / 100), 8)
+                new_sl = _px(price * (1 + cfg.TRAIL_PCT / 100))
 
             # Only move if improvement is meaningful (≥0.1%)
             min_move = pos.entry * 0.001
@@ -533,7 +650,11 @@ class Scanner:
                 await self.ex.cancel_order(pos.symbol, pos.sl_order_id)
             side = "BUY" if pos.side == "LONG" else "SELL"
             r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, new_sl)
-            pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
+            new_id = str(r.get("data", {}).get("orderId", ""))
+            if r.get("code") != 0 or not new_id:
+                log.warning(f"Trail SL не обновился {pos.symbol}: код {r.get('code')}")
+                return
+            pos.sl_order_id = new_id
             pos.sl = new_sl
             log.info(f"Trail SL {pos.symbol} → {new_sl:.4f}")
         except Exception as e:
@@ -545,17 +666,50 @@ class Scanner:
             if qty <= 0:
                 return
             await self.ex.close_position(pos.symbol, qty, pos.side)
+
+            # Record PnL for the closed portion
+            partial_pnl = 0.0
+            close_price = pos.tp2
+            try:
+                ticker = await self.ex.get_ticker(pos.symbol)
+                close_price = float(ticker.get("lastPrice", pos.tp2)) if ticker else pos.tp2
+                partial_pnl = (close_price - pos.entry) * qty if pos.side == "LONG" \
+                              else (pos.entry - close_price) * qty
+                state.total_pnl    += partial_pnl
+                state.day.pnl_usdt += partial_pnl
+                # Save to DB so total_pnl survives restarts
+                import copy
+                pos_snap = copy.copy(pos)
+                pos_snap.qty = qty
+                db.save_trade(pos_snap, close_price, round(partial_pnl, 4),
+                              "WIN" if partial_pnl > 0 else "LOSS")
+            except Exception as pe:
+                log.warning(f"partial_close pnl {pos.symbol}: {pe}")
+
             pos.qty    -= qty
             pos.tp2_hit = True
+            side = "BUY" if pos.side == "LONG" else "SELL"
             # Re-place SL for remaining qty
             if pos.sl_order_id:
                 await self.ex.cancel_order(pos.symbol, pos.sl_order_id)
-                side = "BUY" if pos.side == "LONG" else "SELL"
                 r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, pos.sl)
                 pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
+            # Re-place TP3 for remaining qty (old order had original full qty)
+            if pos.tp_order_id:
+                await self.ex.cancel_order(pos.symbol, pos.tp_order_id)
+                pos.tp_order_id = ""
+            if pos.tp3 > 0 and pos.qty > 0:
+                r = await self.ex.place_take_profit(pos.symbol, side, pos.qty, pos.tp3)
+                pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))
+
+            db.save_open_position(pos)  # persist updated qty and tp2_hit flag
+
+            sign = "+" if partial_pnl >= 0 else ""
             await self._notify(
                 f"💚 <b>{label}</b> | {pos.symbol}\n"
-                f"Закрыто {int(pct * 100)}% позиции по <code>{pos.tp2:.4f}</code>"
+                f"Закрыто {int(pct * 100)}% позиции | цена <code>{close_price:.4f}</code>\n"
+                f"PnL частичный: <code>{sign}{partial_pnl:.2f} USDT</code>\n"
+                f"Остаток {int((1-pct)*100)}% → TP3 <code>{pos.tp3:.4f}</code>"
             )
         except Exception as e:
             log.error(f"partial_close {pos.symbol}: {e}")
@@ -590,7 +744,6 @@ class Scanner:
         else:
             state.day.losses     += 1
             state.day.loss_streak += 1
-            from datetime import timedelta
             state.day.paused_until = datetime.utcnow() + timedelta(minutes=cfg.PAUSE_AFTER_LOSS_MIN)
 
         # Save to DB
@@ -600,10 +753,11 @@ class Scanner:
             log.error(f"db.save_trade: {e}")
 
         del state.positions[pos.symbol]
+        db.delete_open_position(pos.symbol)
 
         # Cooldown after SL hit — don't re-enter same symbol for 1 hour
         if sl_hit:
-            self._sl_cooldown[pos.symbol] = datetime.utcnow()
+            self._set_cooldown(pos.symbol)
 
         sign = "+" if pnl >= 0 else ""
         icon = "✅ WIN" if pnl > 0 else "❌ LOSS"

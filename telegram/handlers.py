@@ -244,7 +244,7 @@ async def cmd_history(msg: Message):
         return
     lines = ["📜 <b>Последние сделки:</b>\n"]
     for sym, side, entry, exit_p, pnl, result, closed_at in rows:
-        icon = "✅" if result == "WIN" else "❌"
+        icon = "✅" if pnl >= 0 else "❌"
         dt   = closed_at[:16].replace("T", " ") if closed_at else "?"
         sign = "+" if pnl >= 0 else ""
         lines.append(
@@ -429,11 +429,15 @@ async def cmd_setpairs(msg: Message):
     raw = args[1].strip()
     if raw.lower() == "auto":
         cfg.WHITELIST = []
-        from exchange.bingx import BingXClient
-        from strategy.scanner import Scanner
-        ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-        await Scanner(ex, msg.bot).update_pairs()
-        await ex.close()
+        from strategy.scanner import _global_scanner
+        if _global_scanner:
+            await _global_scanner.update_pairs()
+        else:
+            from exchange.bingx import BingXClient
+            from strategy.scanner import Scanner
+            ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+            await Scanner(ex, msg.bot).update_pairs()
+            await ex.close()
         await msg.answer(f"✅ Режим авто, пар: {len(state.pairs)}", reply_markup=main_keyboard())
     else:
         pairs = [p.strip().upper() for p in raw.split(",") if p.strip()]
@@ -526,11 +530,15 @@ async def cmd_scan(msg: Message):
 
     async def _do():
         try:
-            from exchange.bingx import BingXClient
-            from strategy.scanner import Scanner
-            ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-            await Scanner(ex, msg.bot).scan_all()
-            await ex.close()
+            from strategy.scanner import _global_scanner
+            if _global_scanner:
+                await _global_scanner.scan_all()
+            else:
+                from exchange.bingx import BingXClient
+                from strategy.scanner import Scanner
+                ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+                await Scanner(ex, msg.bot).scan_all()
+                await ex.close()
         except Exception as e:
             log.error(f"cmd_scan bg: {e}")
 
@@ -559,6 +567,7 @@ async def cmd_closeall(msg: Message):
         try:
             await ex.close_position(sym, amt, side)
             state.positions.pop(sym, None)
+            from core import db as _db; _db.delete_open_position(sym)
             closed.append(sym)
         except Exception as e:
             log.error(f"closeall {sym}: {e}")
@@ -568,6 +577,7 @@ async def cmd_closeall(msg: Message):
             try:
                 await ex.close_position(sym, p.qty, p.side)
                 del state.positions[sym]
+                from core import db as _db; _db.delete_open_position(sym)
                 closed.append(sym)
             except Exception as e:
                 log.error(f"closeall {sym}: {e}")
@@ -612,11 +622,15 @@ async def handle_signal_callback(cb: CallbackQuery):
     await cb.answer("Входим...")
 
     try:
-        from exchange.bingx import BingXClient
-        from strategy.scanner import Scanner
-        ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-        await Scanner(ex, cb.message.bot)._enter(pend["signal"], confirmed=True)
-        await ex.close()
+        from strategy.scanner import _global_scanner
+        if _global_scanner:
+            await _global_scanner._enter(pend["signal"], confirmed=True)
+        else:
+            from exchange.bingx import BingXClient
+            from strategy.scanner import Scanner
+            ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+            await Scanner(ex, cb.message.bot)._enter(pend["signal"], confirmed=True)
+            await ex.close()
     except Exception as e:
         log.error(f"confirm callback {symbol}: {e}")
 
@@ -687,11 +701,15 @@ async def handle_misc(msg: Message):
             state.pending.pop(sym, None)
             await msg.answer("⏰ Время подтверждения истекло")
             return
-        from exchange.bingx import BingXClient
-        from strategy.scanner import Scanner
-        ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-        await Scanner(ex, msg.bot)._enter(pend["signal"], confirmed=True)
-        await ex.close()
+        from strategy.scanner import _global_scanner
+        if _global_scanner:
+            await _global_scanner._enter(pend["signal"], confirmed=True)
+        else:
+            from exchange.bingx import BingXClient
+            from strategy.scanner import Scanner
+            ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+            await Scanner(ex, msg.bot)._enter(pend["signal"], confirmed=True)
+            await ex.close()
         return
 
     if text.startswith("/skip_"):

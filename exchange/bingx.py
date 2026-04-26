@@ -21,8 +21,14 @@ class BingXClient:
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def _sess(self):
-        if not self._session or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
+        if self._session and not self._session.closed:
+            return self._session
+        if self._session:
+            try:
+                await self._session.close()
+            except Exception:
+                pass
+        self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
         return self._session
 
     def _sign(self, params):

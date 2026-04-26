@@ -191,7 +191,7 @@ class Scanner:
         if cfg.BTC_FILTER:
             try:
                 btc_h1 = parse_klines(await self.ex.get_klines("BTC-USDT", cfg.SIGNAL_TF, limit=10))
-                if btc_h1 and len(btc_h1["close"]) >= 4:
+                if btc_h1 and len(btc_h1["close"]) >= 4 and btc_h1["close"][-4] > 0:
                     btc_change = (btc_h1["close"][-1] - btc_h1["close"][-4]) / btc_h1["close"][-4] * 100
                     if btc_change < -cfg.BTC_FILTER_PCT:
                         btc_bias = "DOWN"
@@ -678,9 +678,8 @@ class Scanner:
                 state.total_pnl    += partial_pnl
                 state.day.pnl_usdt += partial_pnl
                 # Save to DB so total_pnl survives restarts
-                import copy
-                pos_snap = copy.copy(pos)
-                pos_snap.qty = qty
+                from dataclasses import replace as dc_replace
+                pos_snap = dc_replace(pos, qty=qty)
                 db.save_trade(pos_snap, close_price, round(partial_pnl, 4),
                               "WIN" if partial_pnl > 0 else "LOSS")
             except Exception as pe:

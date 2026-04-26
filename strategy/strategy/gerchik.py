@@ -28,16 +28,17 @@ def parse_klines(raw):
     for k in raw:
         try:
             if isinstance(k, dict):
-                rows.append([
-                    float(k.get("time", k.get("t", 0))),
-                    float(k.get("open", k.get("o", 0))),
-                    float(k.get("high", k.get("h", 0))),
-                    float(k.get("low",  k.get("l", 0))),
-                    float(k.get("close", k.get("c", 0))),
-                    float(k.get("volume", k.get("v", 0))),
-                ])
+                t = float(k.get("time", k.get("t", 0)))
+                o = float(k.get("open",   k.get("o", 0)))
+                h = float(k.get("high",   k.get("h", 0)))
+                l = float(k.get("low",    k.get("l", 0)))
+                c = float(k.get("close",  k.get("c", 0)))
+                v = float(k.get("volume", k.get("v", 0)))
             else:
-                rows.append([float(c) for c in k[:6]])
+                t, o, h, l, c, v = (float(x) for x in k[:6])
+            if o <= 0 or h <= 0 or l <= 0 or c <= 0 or l > h or o > h or c > h or o < l or c < l:
+                continue
+            rows.append([t, o, h, l, c, v])
         except Exception:
             continue
     if not rows:
@@ -99,8 +100,9 @@ def _merge_levels(levels, merge_pct=1.0):
     sorted_lvls = sorted(levels)
     merged = [sorted_lvls[0]]
     for lvl in sorted_lvls[1:]:
-        if abs(lvl - merged[-1]) / merged[-1] * 100 <= merge_pct:
-            merged[-1] = (merged[-1] + lvl) / 2.0
+        base = merged[-1]
+        if base > 0 and abs(lvl - base) / base * 100 <= merge_pct:
+            merged[-1] = (base + lvl) / 2.0
         else:
             merged.append(lvl)
     return merged
@@ -117,6 +119,8 @@ def find_levels(highs, lows, lookback=80):
     return {"resistance": _merge_levels(res), "support": _merge_levels(sup)}
 
 def near_level(price, levels, tol=0.8):
+    if price <= 0:
+        return False, 0.0
     best = (False, 0.0, 999.0)
     for lvl in levels:
         dist = abs(price-lvl)/price*100
@@ -130,7 +134,8 @@ def level_touches(level, highs, lows, tol=0.3):
 
 def trend_slope(values, period=5):
     e = ema(values, 20)
-    return (e[-1] - e[-period]) / e[-period] * 100
+    ref = e[-period] if len(e) >= period else 0
+    return (e[-1] - ref) / ref * 100 if ref > 0 else 0.0
 
 def adx(highs, lows, closes, period=14):
     n = len(closes)

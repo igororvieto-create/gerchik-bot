@@ -229,11 +229,11 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     # ── RSI filter ──
     h1_rsi  = rsi(h1["close"], 14)
     cur_rsi = h1_rsi[-1]
-    if trend == "LONG"  and cur_rsi > 75:
-        log.debug(f"{symbol}: RSI перекуплен {cur_rsi:.1f} > 75")
+    if trend == "LONG"  and cur_rsi > 65:
+        log.debug(f"{symbol}: RSI перекуплен {cur_rsi:.1f} > 65 — плохая точка входа LONG")
         return None
-    if trend == "SHORT" and cur_rsi < 25:
-        log.debug(f"{symbol}: RSI перепродан {cur_rsi:.1f} < 25")
+    if trend == "SHORT" and cur_rsi < 35:
+        log.debug(f"{symbol}: RSI перепродан {cur_rsi:.1f} < 35 — плохая точка входа SHORT")
         return None
 
     # ── S/R levels — LONG at support, SHORT at resistance ──
@@ -282,10 +282,12 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         log.debug(f"{symbol}: ATR слишком велик {atr_pct:.2f}% > 5.0% — рынок взрывной")
         return None
 
-    # ── Candle pattern on H1 (last candle only — stale patterns skipped) ──
-    pname, pside = detect_pattern(h1, -1)
+    # ── Candle pattern on H1: use index -2 (last COMPLETED candle) ──
+    # BingX returns the current forming candle as index -1 — its shape may change.
+    # Detecting on -2 ensures we use a fully closed candle.
+    pname, pside = detect_pattern(h1, -2)
     if not pname:
-        log.debug(f"{symbol}: нет паттерна на H1")
+        log.debug(f"{symbol}: нет паттерна на H1 (завершённая свеча)")
         return None
     if pside == "DOJI":
         pside = trend
@@ -293,21 +295,38 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         log.debug(f"{symbol}: паттерн {pname} не совпадает с трендом {trend}")
         return None
 
+    # Pattern invalidation: price must not have broken through the pattern candle boundary
+    pat_close = h1["close"][-2]
+    pat_low   = h1["low"][-2]
+    pat_high  = h1["high"][-2]
+    if trend == "LONG"  and price < pat_low:
+        log.debug(f"{symbol}: цена {price:.4f} пробила low паттерна {pat_low:.4f} — паттерн недействителен")
+        return None
+    if trend == "SHORT" and price > pat_high:
+        log.debug(f"{symbol}: цена {price:.4f} пробила high паттерна {pat_high:.4f} — паттерн недействителен")
+        return None
+    # Don't chase: skip if price already ran too far from pattern candle close
+    if trend == "LONG"  and price > pat_close * 1.015:
+        log.debug(f"{symbol}: цена ушла на {(price/pat_close-1)*100:.1f}% от паттерна — не гонимся")
+        return None
+    if trend == "SHORT" and price < pat_close * 0.985:
+        log.debug(f"{symbol}: цена ушла на {(pat_close/price-1)*100:.1f}% от паттерна — не гонимся")
+        return None
+
     # ── Filter 2: Pattern body size ≥ 0.3× ATR (no tiny/weak candles) ──
-    pat_i    = len(h1["open"]) - 1
-    pat_body = abs(h1["close"][pat_i] - h1["open"][pat_i])
+    pat_body = abs(h1["close"][-2] - h1["open"][-2])
     if pat_body < cur_atr * 0.3:
         log.debug(f"{symbol}: тело паттерна {pat_body:.6f} < 0.3×ATR {cur_atr*0.3:.6f} — слабая свеча")
         return None
-    h4p, h4s = detect_pattern(h4)
+    h4p, h4s = detect_pattern(h4, -2)
     h4ok = h4p != "" and (h4s == trend or h4s == "DOJI")
     # H4 pattern is bonus (+10 score), not mandatory
 
-    # ── Volume ──
+    # ── Volume: use completed pattern candle (-2) vs preceding MA ──
     vm    = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
-    vrat  = max(h1["volume"][-1], h1["volume"][-2]) / vm[-2] if vm[-2] > 0 else 0
+    vrat  = h1["volume"][-2] / vm[-3] if vm[-3] > 0 else 0
     if vrat < cfg.VOLUME_MULT:
-        log.debug(f"{symbol}: объём {vrat:.2f}× ниже порога {cfg.VOLUME_MULT}×")
+        log.debug(f"{symbol}: объём паттерн-свечи {vrat:.2f}× ниже порога {cfg.VOLUME_MULT}×")
         return None
 
     # ── Funding rate ──
@@ -322,11 +341,11 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     atr_sl  = cur_atr * 2.0
 
     if trend == "LONG":
-        sl_candle = h1["low"][-1]  - buf
+        sl_candle = h1["low"][-2]  - buf   # low of completed pattern candle
         sl_atr    = price - atr_sl
         sl        = min(sl_candle, sl_atr)   # wider of two — more room for noise
     else:
-        sl_candle = h1["high"][-1] + buf
+        sl_candle = h1["high"][-2] + buf   # high of completed pattern candle
         sl_atr    = price + atr_sl
         sl        = max(sl_candle, sl_atr)
 

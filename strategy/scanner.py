@@ -42,9 +42,10 @@ class Scanner:
 
     def _set_cooldown(self, symbol: str):
         """Set cooldown in memory and persist to DB for restart survival."""
-        self._sl_cooldown[symbol] = datetime.utcnow()
+        now = datetime.utcnow()
+        self._sl_cooldown[symbol] = now
         try:
-            db.save_kv(f"sl_cd:{symbol}", datetime.utcnow().isoformat())
+            db.save_kv(f"sl_cd:{symbol}", now.isoformat())
         except Exception as e:
             log.warning(f"cooldown save {symbol}: {e}")
 
@@ -657,6 +658,7 @@ class Scanner:
             pos.sl_order_id = new_id
             pos.sl = new_sl
             log.info(f"Trail SL {pos.symbol} → {new_sl:.4f}")
+            db.save_open_position(pos)
         except Exception as e:
             log.error(f"trail_sl {pos.symbol}: {e}")
 
@@ -667,23 +669,25 @@ class Scanner:
                 return
             await self.ex.close_position(pos.symbol, qty, pos.side)
 
-            # Record PnL for the closed portion
-            partial_pnl = 0.0
+            # Record PnL for the closed portion (use tp2 as fallback if ticker fails)
             close_price = pos.tp2
             try:
                 ticker = await self.ex.get_ticker(pos.symbol)
-                close_price = float(ticker.get("lastPrice", pos.tp2)) if ticker else pos.tp2
-                partial_pnl = (close_price - pos.entry) * qty if pos.side == "LONG" \
-                              else (pos.entry - close_price) * qty
-                state.total_pnl    += partial_pnl
-                state.day.pnl_usdt += partial_pnl
-                # Save to DB so total_pnl survives restarts
+                if ticker and float(ticker.get("lastPrice", 0)) > 0:
+                    close_price = float(ticker["lastPrice"])
+            except Exception as pe:
+                log.warning(f"partial_close ticker {pos.symbol}: {pe}")
+            partial_pnl = (close_price - pos.entry) * qty if pos.side == "LONG" \
+                          else (pos.entry - close_price) * qty
+            state.total_pnl    += partial_pnl
+            state.day.pnl_usdt += partial_pnl
+            try:
                 from dataclasses import replace as dc_replace
                 pos_snap = dc_replace(pos, qty=qty)
                 db.save_trade(pos_snap, close_price, round(partial_pnl, 4),
                               "WIN" if partial_pnl > 0 else "LOSS")
             except Exception as pe:
-                log.warning(f"partial_close pnl {pos.symbol}: {pe}")
+                log.error(f"partial_close db.save_trade {pos.symbol}: {pe}")
 
             pos.qty    -= qty
             pos.tp2_hit = True
@@ -758,14 +762,15 @@ class Scanner:
         if sl_hit:
             self._set_cooldown(pos.symbol)
 
-        sign = "+" if pnl >= 0 else ""
+        trade_sign = "+" if pnl >= 0 else ""
+        total_sign = "+" if state.total_pnl >= 0 else ""
         icon = "✅ WIN" if pnl > 0 else "❌ LOSS"
         reason = "TP3 🎯" if tp3_hit else "SL 🛑"
         await self._notify(
             f"{icon} | {pos.symbol} {pos.side}\n"
             f"{reason} | Цена: <code>{price:.4f}</code>\n"
-            f"PnL: <code>{sign}{pnl:.2f} USDT</code>\n"
-            f"Итого: <code>{sign}{state.total_pnl:.2f} USDT</code>"
+            f"PnL: <code>{trade_sign}{pnl:.2f} USDT</code>\n"
+            f"Итого: <code>{total_sign}{state.total_pnl:.2f} USDT</code>"
         )
 
     # ------------------------------------------------------------------ reports

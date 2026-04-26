@@ -149,10 +149,16 @@ async def cmd_balance(msg: Message):
     if not _auth(msg):
         return
     from exchange.bingx import BingXClient
-    ex  = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-    bal = await ex.get_balance()
-    await ex.close()
-    state.current_balance = bal
+    ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+    try:
+        bal = await ex.get_balance()
+        state.current_balance = bal
+    except Exception as e:
+        log.error(f"cmd_balance: {e}")
+        await msg.answer("❌ Ошибка получения баланса", reply_markup=main_keyboard())
+        return
+    finally:
+        await ex.close()
     d  = state.day
     wr = round(d.wins / d.trades * 100) if d.trades else 0
     await msg.answer(
@@ -575,6 +581,16 @@ async def cmd_closeall(msg: Message):
     if not live:
         for sym, p in list(state.positions.items()):
             try:
+                if p.sl_order_id:
+                    try:
+                        await ex.cancel_order(sym, p.sl_order_id)
+                    except Exception:
+                        pass
+                if p.tp_order_id:
+                    try:
+                        await ex.cancel_order(sym, p.tp_order_id)
+                    except Exception:
+                        pass
                 await ex.close_position(sym, p.qty, p.side)
                 del state.positions[sym]
                 from core import db as _db; _db.delete_open_position(sym)
@@ -595,13 +611,26 @@ async def handle_signal_callback(cb: CallbackQuery):
     if not _auth_cb(cb):
         await cb.answer("Нет доступа", show_alert=True)
         return
-    action, symbol = cb.data.split(":", 1)
+    parts = cb.data.split(":", 1)
+    if len(parts) != 2:
+        await cb.answer("Некорректные данные", show_alert=True)
+        return
+    action, symbol = parts
     if action == "skip":
         state.pending.pop(symbol, None)
-        await cb.message.edit_caption(
-            caption=(cb.message.caption or "") + "\n\n⏭ <b>Пропущено</b>",
-            parse_mode="HTML",
-        )
+        try:
+            if cb.message.photo:
+                await cb.message.edit_caption(
+                    caption=(cb.message.caption or "") + "\n\n⏭ <b>Пропущено</b>",
+                    parse_mode="HTML",
+                )
+            else:
+                await cb.message.edit_text(
+                    text=(cb.message.text or "") + "\n\n⏭ <b>Пропущено</b>",
+                    parse_mode="HTML",
+                )
+        except Exception:
+            pass
         await cb.answer("Пропущено")
         return
 
@@ -615,10 +644,19 @@ async def handle_signal_callback(cb: CallbackQuery):
         await cb.answer("⏰ Время истекло", show_alert=True)
         return
 
-    await cb.message.edit_caption(
-        caption=(cb.message.caption or "") + "\n\n⏳ <b>Входим...</b>",
-        parse_mode="HTML",
-    )
+    try:
+        if cb.message.photo:
+            await cb.message.edit_caption(
+                caption=(cb.message.caption or "") + "\n\n⏳ <b>Входим...</b>",
+                parse_mode="HTML",
+            )
+        else:
+            await cb.message.edit_text(
+                text=(cb.message.text or "") + "\n\n⏳ <b>Входим...</b>",
+                parse_mode="HTML",
+            )
+    except Exception:
+        pass
     await cb.answer("Входим...")
 
     try:

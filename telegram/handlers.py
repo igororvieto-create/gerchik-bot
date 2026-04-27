@@ -45,6 +45,8 @@ def main_keyboard():
 # ------------------------------------------------------------------ /ping
 
 async def cmd_ping(msg: Message):
+    if not _auth(msg):
+        return
     await msg.answer("🟢 Бот работает", reply_markup=main_keyboard())
 
 
@@ -571,6 +573,15 @@ async def cmd_closeall(msg: Message):
         if amt == 0:
             continue
         try:
+            # Cancel SL/TP orders if tracked in state
+            tracked = state.positions.get(sym)
+            if tracked:
+                for oid in (tracked.sl_order_id, tracked.tp_order_id):
+                    if oid:
+                        try:
+                            await ex.cancel_order(sym, oid)
+                        except Exception:
+                            pass
             await ex.close_position(sym, amt, side)
             state.positions.pop(sym, None)
             from core import db as _db; _db.delete_open_position(sym)

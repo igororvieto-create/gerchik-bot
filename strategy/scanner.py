@@ -239,6 +239,26 @@ class Scanner:
     # ------------------------------------------------------------------ handle
 
     async def _handle(self, sig: Signal):
+        # In auto mode: validate price BEFORE notifying to avoid "signal → skipped" spam
+        price_checked = False
+        if cfg.MODE == "auto":
+            try:
+                ticker = await self.ex.get_ticker(sig.symbol)
+                cur_price = float(ticker.get("lastPrice", sig.entry))
+                if cur_price > 0:
+                    against = (sig.side == "LONG"  and cur_price < sig.entry * 0.992) or \
+                              (sig.side == "SHORT" and cur_price > sig.entry * 1.008)
+                    if against:
+                        drift = abs(cur_price - sig.entry) / sig.entry * 100
+                        log.info(f"{sig.symbol}: цена ушла против сигнала на {drift:.2f}% — тихий пропуск")
+                        if drift > 3.0:
+                            self._set_cooldown(sig.symbol)
+                        return  # Silent — no notification to avoid confusion
+                    sig.entry = cur_price  # Update to current price before notify
+                    price_checked = True
+            except Exception as e:
+                log.warning(f"_handle pre-check {sig.symbol}: {e}")
+
         # Build chart
         chart_bytes = None
         try:
@@ -263,7 +283,7 @@ class Scanner:
                 await self._notify_photo(chart_bytes, caption)
             else:
                 await self._notify(caption)
-            await self._enter(sig)
+            await self._enter(sig, price_checked=price_checked)
         else:
             expires = datetime.utcnow() + timedelta(seconds=cfg.CONFIRM_TIMEOUT_SEC)
             state.pending[sig.symbol] = {"signal": sig, "expires": expires}
@@ -288,7 +308,7 @@ class Scanner:
 
     # ------------------------------------------------------------------ enter
 
-    async def _enter(self, sig: Signal, confirmed: bool = False):
+    async def _enter(self, sig: Signal, confirmed: bool = False, price_checked: bool = False):
         try:
             balance = await self.ex.get_balance()
             if balance <= 0:
@@ -356,29 +376,29 @@ class Scanner:
             except Exception as e:
                 log.warning(f"{sig.symbol}: не удалось проверить маржу — продолжаем: {e}")
 
-            # Staleness check: skip only if price moved AGAINST the signal
-            try:
-                ticker = await self.ex.get_ticker(sig.symbol)
-                cur_price = float(ticker.get("lastPrice", sig.entry))
-                against = (sig.side == "LONG"  and cur_price < sig.entry * 0.992) or \
-                          (sig.side == "SHORT" and cur_price > sig.entry * 1.008)
-                if against:
-                    drift = abs(cur_price - sig.entry) / sig.entry * 100
-                    log.info(f"{sig.symbol}: цена ушла против сигнала на {drift:.2f}% — пропуск")
-                    # Large drift (>3%) = signal fully invalidated — cooldown to avoid spam
-                    if drift > 3.0:
-                        self._set_cooldown(sig.symbol)
-                        log.info(f"{sig.symbol}: дрейф {drift:.1f}% > 3% — кулдаун 1ч")
-                    await self._notify(
-                        f"⏭ <b>{sig.symbol}</b> пропущен\n"
-                        f"Цена ушла против сигнала: {drift:.1f}%\n"
-                        f"Сигнал: <code>{sig.entry:.6f}</code> → Сейчас: <code>{cur_price:.6f}</code>"
-                    )
-                    return
-                # Use current price as actual entry
-                sig.entry = cur_price
-            except Exception as e:
-                log.warning(f"{sig.symbol}: не удалось получить текущую цену перед входом — используется цена сигнала: {e}")
+            # Staleness check: skip only if price moved AGAINST the signal.
+            # Skipped in auto mode when _handle already validated the price (price_checked=True).
+            if not price_checked:
+                try:
+                    ticker = await self.ex.get_ticker(sig.symbol)
+                    cur_price = float(ticker.get("lastPrice", sig.entry))
+                    against = (sig.side == "LONG"  and cur_price < sig.entry * 0.992) or \
+                              (sig.side == "SHORT" and cur_price > sig.entry * 1.008)
+                    if against:
+                        drift = abs(cur_price - sig.entry) / sig.entry * 100
+                        log.info(f"{sig.symbol}: цена ушла против сигнала на {drift:.2f}% — пропуск")
+                        if drift > 3.0:
+                            self._set_cooldown(sig.symbol)
+                            log.info(f"{sig.symbol}: дрейф {drift:.1f}% > 3% — кулдаун 1ч")
+                        await self._notify(
+                            f"⏭ <b>{sig.symbol}</b> пропущен\n"
+                            f"Цена ушла против сигнала: {drift:.1f}%\n"
+                            f"Сигнал: <code>{sig.entry:.6f}</code> → Сейчас: <code>{cur_price:.6f}</code>"
+                        )
+                        return
+                    sig.entry = cur_price
+                except Exception as e:
+                    log.warning(f"{sig.symbol}: не удалось получить текущую цену перед входом — используется цена сигнала: {e}")
 
             await self.ex.set_margin_type(sig.symbol)
             await self.ex.set_leverage(sig.symbol, leverage)

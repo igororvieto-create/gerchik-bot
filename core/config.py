@@ -37,7 +37,7 @@ class Config:
     TP2_CLOSE_PCT:        float = 0.60
     PAUSE_AFTER_LOSS_MIN: int   = 30
     CONFIRM_TIMEOUT_SEC:  int   = 300
-    SCAN_H1_INTERVAL_MIN: int   = int(os.getenv("SCAN_H1_INTERVAL_MIN", "5").strip())
+    SCAN_H1_INTERVAL_MIN: int   = int(os.getenv("SCAN_H1_INTERVAL_MIN", "15").strip())
     SCAN_BATCH_SIZE:      int   = int(os.getenv("SCAN_BATCH_SIZE", "10").strip())
     SCAN_BATCH_DELAY:     float = float(os.getenv("SCAN_BATCH_DELAY", "1.0").strip())
     # Breakeven: move SL when price moves BE_TRIGGER_PCT% from entry in profit direction

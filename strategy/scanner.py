@@ -142,7 +142,6 @@ class Scanner:
         signals = []
         for i in range(0, len(state.pairs), cfg.SCAN_BATCH_SIZE):
             batch = state.pairs[i:i + cfg.SCAN_BATCH_SIZE]
-            now = datetime.utcnow()
             tasks = [
                 self._analyze(s) for s in batch
                 if s not in state.positions and s not in state.pending
@@ -255,6 +254,17 @@ class Scanner:
                             self._set_cooldown(sig.symbol)
                         return  # Silent — no notification to avoid confusion
                     sig.entry = cur_price  # Update to current price before notify
+                    # Recalculate TP from new entry (SL is structural, stays fixed)
+                    sld = abs(sig.entry - sig.sl)
+                    if sld > 0:
+                        if sig.side == "LONG":
+                            sig.tp1 = _px(sig.entry + sld * cfg.TP1_RR)
+                            sig.tp2 = _px(sig.entry + sld * cfg.TP2_RR)
+                            sig.tp3 = _px(sig.entry + sld * cfg.TP3_RR)
+                        else:
+                            sig.tp1 = _px(sig.entry - sld * cfg.TP1_RR)
+                            sig.tp2 = _px(sig.entry - sld * cfg.TP2_RR)
+                            sig.tp3 = _px(sig.entry - sld * cfg.TP3_RR)
                     price_checked = True
             except Exception as e:
                 log.warning(f"_handle pre-check {sig.symbol}: {e}")

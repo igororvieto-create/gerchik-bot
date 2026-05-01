@@ -277,9 +277,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         secondary = lv4["support"]    + lv1["support"]
     near, level = near_level(price, primary, tol=1.0)
     if not near:
-        near, level = near_level(price, secondary, tol=0.8)
-    if not near:
-        log.debug(f"{symbol}: цена {price:.4f} не у уровня (primary={len(primary)}, secondary={len(secondary)})")
+        log.debug(f"{symbol}: цена {price:.4f} не у уровня поддержки/сопротивления (primary={len(primary)})")
         return None
 
     touches = level_touches(level, h4["high"][-120:], h4["low"][-120:])
@@ -319,7 +317,8 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     if not pname:
         log.debug(f"{symbol}: нет паттерна на H1 (завершённая свеча)")
         return None
-    if pside == "DOJI":
+    is_doji = pside == "DOJI"
+    if is_doji:
         pside = trend
     if pside != trend:
         log.debug(f"{symbol}: паттерн {pname} не совпадает с трендом {trend}")
@@ -345,7 +344,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
 
     h4p, h4s = detect_pattern(h4, -2)
     h4ok = h4p != "" and (h4s == trend or h4s == "DOJI")
-    # H4 pattern is bonus (+10 score), not mandatory
+    # H4 pattern is bonus (+10 score), not mandatory — except for Doji on H1
+    if is_doji and not h4ok:
+        log.debug(f"{symbol}: доджи без H4 подтверждения — слабый сигнал, пропуск")
+        return None
 
     # ── Volume: use completed pattern candle (-2) vs preceding MA ──
     vm    = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
@@ -363,12 +365,12 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         return None
 
     buf     = price * cfg.SL_BUFFER_PCT / 100
-    atr_sl  = cur_atr * 2.0
+    atr_sl  = cur_atr * 1.0
 
     if trend == "LONG":
         sl_candle = h1["low"][-2]  - buf   # low of completed pattern candle
         sl_atr    = price - atr_sl
-        sl        = min(sl_candle, sl_atr)   # wider of two — more room for noise
+        sl        = min(sl_candle, sl_atr)   # wider of two — noise tolerance
     else:
         sl_candle = h1["high"][-2] + buf   # high of completed pattern candle
         sl_atr    = price + atr_sl

@@ -10,7 +10,7 @@ from core.config import cfg
 from core.state import Position, state
 from core import db
 from exchange.bingx import BingXClient
-from strategy.strategy.gerchik import Signal, analyze, parse_klines
+from strategy.strategy.gerchik import Signal, analyze, parse_klines, reset_stats, get_stats
 
 log = logging.getLogger("scanner")
 
@@ -139,6 +139,7 @@ class Scanner:
             log.info(f"Тихая сессия {hour}:00 UTC ({cfg.QUIET_HOURS_START}-{cfg.QUIET_HOURS_END}) — скан пропущен")
             return
         log.info(f"Сканирую {len(state.pairs)} пар...")
+        reset_stats()
         signals = []
         for i in range(0, len(state.pairs), cfg.SCAN_BATCH_SIZE):
             batch = state.pairs[i:i + cfg.SCAN_BATCH_SIZE]
@@ -157,12 +158,17 @@ class Scanner:
                 await asyncio.sleep(cfg.SCAN_BATCH_DELAY)
 
         self._scan_count += 1
+        scan_stats = get_stats()
+        top_reasons = sorted(scan_stats.items(), key=lambda x: x[1], reverse=True)[:4]
+        diag = " | ".join(f"{r}: {n}" for r, n in top_reasons) if top_reasons else "—"
+
         if not signals:
-            log.info("Сигналов нет")
+            log.info(f"Сигналов нет. Причины: {diag}")
             # Notify only every 4th scan (~1 hour) to avoid spam
             if self._scan_count % 4 == 1:
                 await self._notify(
                     f"🔍 Скан: {len(state.pairs)} пар — сигналов нет\n"
+                    f"📊 Фильтры: {diag}\n"
                     f"Следующий через 15 мин"
                 )
             return
@@ -173,10 +179,11 @@ class Scanner:
         if skipped:
             log.info(f"Отфильтровано по MIN_SCORE ({cfg.MIN_SCORE}): {skipped} сигналов")
         if not qualified:
-            log.info("Нет сигналов с достаточным score")
+            log.info(f"Нет сигналов с достаточным score. Причины отсева: {diag}")
             if self._scan_count % 4 == 1:
                 await self._notify(
                     f"🔍 Скан: {len(state.pairs)} пар — {len(signals)} сигналов ниже MIN_SCORE {cfg.MIN_SCORE}\n"
+                    f"📊 Фильтры: {diag}\n"
                     f"Следующий через 15 мин"
                 )
             return

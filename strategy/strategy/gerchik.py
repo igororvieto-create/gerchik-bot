@@ -4,6 +4,19 @@ import numpy as np
 
 log = logging.getLogger("strategy")
 
+# Scan rejection stats — reset before each scan, read after
+_stats: dict = {}
+
+def reset_stats():
+    global _stats
+    _stats = {}
+
+def get_stats() -> dict:
+    return dict(_stats)
+
+def _reject(reason: str):
+    _stats[reason] = _stats.get(reason, 0) + 1
+
 @dataclass
 class Signal:
     symbol:  str
@@ -217,15 +230,16 @@ def detect_pattern(candles, idx=-1):
 
 def analyze(symbol, d1, h4, h1, funding, cfg):
     if not d1 or not h4 or not h1:
+        _reject("нет данных")
         return None
     if len(d1["close"]) < cfg.TREND_EMA_D1:
-        log.debug(f"{symbol}: недостаточно D1 свечей ({len(d1['close'])} < {cfg.TREND_EMA_D1})")
+        _reject("мало D1 свечей")
         return None
     if len(h4["close"]) < cfg.TREND_EMA_H4 + 5:
-        log.debug(f"{symbol}: недостаточно H4 свечей")
+        _reject("мало H4 свечей")
         return None
     if len(h1["close"]) < 40:
-        log.debug(f"{symbol}: недостаточно H1 свечей")
+        _reject("мало H1 свечей")
         return None
 
     # ── D1 trend ──
@@ -241,17 +255,15 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     h4_aligned = (trend=="LONG" and h4_up) or (trend=="SHORT" and h4_dn)
     h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 2.0
     if not h4_aligned and not h4_near:
-        log.debug(f"{symbol}: H4 не выровнен с трендом {trend} и не рядом с EMA50")
+        _reject("H4 против тренда")
         return None
-    # When only h4_near (price near EMA50 but on wrong side), reject if EMA50
-    # slope is clearly opposing the trend direction — avoids counter-trend entries.
     if h4_near and not h4_aligned:
         h4_slope = (ema50[-1] - ema50[-5]) / ema50[-5] * 100 if ema50[-5] > 0 else 0
         if trend == "LONG"  and h4_slope < -0.1:
-            log.debug(f"{symbol}: H4 EMA50 наклон {h4_slope:.2f}% — против тренда LONG")
+            _reject("H4 против тренда")
             return None
         if trend == "SHORT" and h4_slope > 0.1:
-            log.debug(f"{symbol}: H4 EMA50 наклон {h4_slope:.2f}% — против тренда SHORT")
+            _reject("H4 против тренда")
             return None
 
     price = h1["close"][-1]
@@ -260,29 +272,27 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     h1_rsi  = rsi(h1["close"], 14)
     cur_rsi = h1_rsi[-1]
     if trend == "LONG"  and cur_rsi > 65:
-        log.debug(f"{symbol}: RSI перекуплен {cur_rsi:.1f} > 65 — плохая точка входа LONG")
+        _reject("RSI перекуплен")
         return None
     if trend == "SHORT" and cur_rsi < 35:
-        log.debug(f"{symbol}: RSI перепродан {cur_rsi:.1f} < 35 — плохая точка входа SHORT")
+        _reject("RSI перепродан")
         return None
 
     # ── S/R levels — LONG at support, SHORT at resistance ──
     lv4 = find_levels(h4["high"], h4["low"], lookback=120)
     lv1 = find_levels(h1["high"], h1["low"], lookback=80)
     if trend == "LONG":
-        primary   = lv4["support"]    + lv1["support"]
-        secondary = lv4["resistance"] + lv1["resistance"]
+        primary = lv4["support"] + lv1["support"]
     else:
-        primary   = lv4["resistance"] + lv1["resistance"]
-        secondary = lv4["support"]    + lv1["support"]
+        primary = lv4["resistance"] + lv1["resistance"]
     near, level = near_level(price, primary, tol=1.5)
     if not near:
-        log.debug(f"{symbol}: цена {price:.4f} не у уровня поддержки/сопротивления (primary={len(primary)})")
+        _reject("не у уровня S/R")
         return None
 
     touches = level_touches(level, h4["high"][-120:], h4["low"][-120:])
     if touches > 6:
-        log.debug(f"{symbol}: уровень {level:.4f} пробит ({touches} касаний)")
+        _reject("уровень пробит (>6 касаний)")
         return None
 
     # ── ATR-based SL ──
@@ -293,7 +303,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     h4_adx  = adx(h4["high"], h4["low"], h4["close"], 14)
     cur_adx = h4_adx[-1]
     if cur_adx < cfg.ADX_MIN:
-        log.debug(f"{symbol}: ADX {cur_adx:.1f} < {cfg.ADX_MIN} — рынок в боковике")
+        _reject("ADX низкий (боковик)")
         return None
 
     # ── MACD on H1 — momentum confirmation ──
@@ -301,83 +311,80 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     macd_aligned = (trend == "LONG"  and macd_hist[-1] > macd_hist[-2]) or \
                    (trend == "SHORT" and macd_hist[-1] < macd_hist[-2])
 
-    # ── Filter 1: ATR volatility — skip flat or explosive markets ──
+    # ── ATR volatility — skip flat or explosive markets ──
     atr_pct = cur_atr / price * 100
     if atr_pct < 0.2:
-        log.debug(f"{symbol}: ATR слишком мал {atr_pct:.2f}% < 0.2% — рынок флэт")
+        _reject("ATR слишком мал (флэт)")
         return None
     if atr_pct > 5.0:
-        log.debug(f"{symbol}: ATR слишком велик {atr_pct:.2f}% > 5.0% — рынок взрывной")
+        _reject("ATR слишком велик (взрыв)")
         return None
 
     # ── Candle pattern on H1: use index -2 (last COMPLETED candle) ──
-    # BingX returns the current forming candle as index -1 — its shape may change.
-    # Detecting on -2 ensures we use a fully closed candle.
     pname, pside = detect_pattern(h1, -2)
     if not pname:
-        log.debug(f"{symbol}: нет паттерна на H1 (завершённая свеча)")
+        _reject("нет паттерна H1")
         return None
     is_doji = pside == "DOJI"
     if is_doji:
         pside = trend
     if pside != trend:
-        log.debug(f"{symbol}: паттерн {pname} не совпадает с трендом {trend}")
+        _reject("паттерн против тренда")
         return None
 
-    # Pattern invalidation: price must not have broken through the pattern candle boundary
+    # Pattern invalidation
     pat_close = h1["close"][-2]
     pat_low   = h1["low"][-2]
     pat_high  = h1["high"][-2]
     if trend == "LONG"  and price < pat_low:
-        log.debug(f"{symbol}: цена {price:.4f} пробила low паттерна {pat_low:.4f} — паттерн недействителен")
+        _reject("паттерн недействителен")
         return None
     if trend == "SHORT" and price > pat_high:
-        log.debug(f"{symbol}: цена {price:.4f} пробила high паттерна {pat_high:.4f} — паттерн недействителен")
+        _reject("паттерн недействителен")
         return None
-    # Don't chase: skip if price already ran too far from pattern candle close
     if trend == "LONG"  and price > pat_close * 1.015:
-        log.debug(f"{symbol}: цена ушла на {(price/pat_close-1)*100:.1f}% от паттерна — не гонимся")
+        _reject("цена ушла от паттерна")
         return None
     if trend == "SHORT" and price < pat_close * 0.985:
-        log.debug(f"{symbol}: цена ушла на {(pat_close/price-1)*100:.1f}% от паттерна — не гонимся")
+        _reject("цена ушла от паттерна")
         return None
 
     h4p, h4s = detect_pattern(h4, -2)
     h4ok = h4p != "" and (h4s == trend or h4s == "DOJI")
-    # H4 pattern is bonus (+10 score), not mandatory — except for Doji on H1
     if is_doji and not h4ok:
-        log.debug(f"{symbol}: доджи без H4 подтверждения — слабый сигнал, пропуск")
+        _reject("доджи без H4 подтверждения")
         return None
 
-    # ── Volume: use completed pattern candle (-2) vs preceding MA ──
+    # ── Volume ──
     vm    = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
     vrat  = h1["volume"][-2] / vm[-3] if vm[-3] > 0 else 0
     if vrat < cfg.VOLUME_MULT:
-        log.debug(f"{symbol}: объём паттерн-свечи {vrat:.2f}× ниже порога {cfg.VOLUME_MULT}×")
+        _reject("объём низкий")
         return None
 
     # ── Funding rate ──
     if trend=="LONG"  and funding > cfg.FUNDING_MAX_LONG:
-        log.debug(f"{symbol}: фандинг {funding:.4f}% слишком высокий для LONG")
+        _reject("фандинг высокий")
         return None
     if trend=="SHORT" and funding < cfg.FUNDING_MAX_SHORT:
-        log.debug(f"{symbol}: фандинг {funding:.4f}% слишком низкий для SHORT")
+        _reject("фандинг низкий")
         return None
 
     buf     = price * cfg.SL_BUFFER_PCT / 100
     atr_sl  = cur_atr * 1.0
 
     if trend == "LONG":
-        sl_candle = h1["low"][-2]  - buf   # low of completed pattern candle
+        sl_candle = h1["low"][-2]  - buf
         sl_atr    = price - atr_sl
-        sl        = min(sl_candle, sl_atr)   # wider of two — noise tolerance
+        sl        = min(sl_candle, sl_atr)
     else:
-        sl_candle = h1["high"][-2] + buf   # high of completed pattern candle
+        sl_candle = h1["high"][-2] + buf
         sl_atr    = price + atr_sl
         sl        = max(sl_candle, sl_atr)
 
     sld = abs(price - sl)
-    if sld <= 0 or sld/price > 0.05:   # reject if SL > 5% away (too wide)
+    if sld <= 0 or sld/price > 0.05:
+        _reject("SL слишком широкий")
         return None
 
     # Round prices to match exchange precision

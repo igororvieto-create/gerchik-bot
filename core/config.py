@@ -26,7 +26,7 @@ class Config:
     FUNDING_MAX_SHORT: float = float(os.getenv("FUNDING_MAX_SHORT", "-0.05").strip())
     WHITELIST: List[str] = field(default_factory=lambda: [s.strip() for s in os.getenv("WHITELIST","").split(",") if s.strip()])
     BLACKLIST: List[str] = field(default_factory=lambda: [s.strip() for s in os.getenv("BLACKLIST","LUNA-USDT,FTT-USDT").split(",") if s.strip()])
-    TOP_N_PAIRS:      int   = int(os.getenv("TOP_N_PAIRS", "0").strip())
+    TOP_N_PAIRS:      int   = int(os.getenv("TOP_N_PAIRS", "100").strip())
     MAX_RISK_USDT:    float = float(os.getenv("MAX_RISK_USDT", "20.0").strip())
     TREND_TF:  str = "1d"
     H4_TF:     str = "4h"

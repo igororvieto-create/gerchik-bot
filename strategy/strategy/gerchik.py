@@ -275,7 +275,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     else:
         primary   = lv4["resistance"] + lv1["resistance"]
         secondary = lv4["support"]    + lv1["support"]
-    near, level = near_level(price, primary, tol=1.0)
+    near, level = near_level(price, primary, tol=1.5)
     if not near:
         log.debug(f"{symbol}: цена {price:.4f} не у уровня поддержки/сопротивления (primary={len(primary)})")
         return None

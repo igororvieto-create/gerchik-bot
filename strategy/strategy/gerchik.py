@@ -343,21 +343,6 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         log.debug(f"{symbol}: цена ушла на {(pat_close/price-1)*100:.1f}% от паттерна — не гонимся")
         return None
 
-    # ── Filter: current forming H1 candle (-1) opposing signal direction ──
-    # If price is now moving strongly against the pattern, skip — setup is being invalidated in real time.
-    cur_body = h1["close"][-1] - h1["open"][-1]  # positive = bullish, negative = bearish
-    if trend == "LONG"  and cur_body < -cur_atr * 0.6:
-        log.debug(f"{symbol}: текущая свеча H1 медвежья ({cur_body:.6f}) — против LONG")
-        return None
-    if trend == "SHORT" and cur_body >  cur_atr * 0.6:
-        log.debug(f"{symbol}: текущая свеча H1 бычья ({cur_body:.6f}) — против SHORT")
-        return None
-
-    # ── Filter 2: Pattern body size ≥ 0.3× ATR (no tiny/weak candles) ──
-    pat_body = abs(h1["close"][-2] - h1["open"][-2])
-    if pat_body < cur_atr * 0.3:
-        log.debug(f"{symbol}: тело паттерна {pat_body:.6f} < 0.3×ATR {cur_atr*0.3:.6f} — слабая свеча")
-        return None
     h4p, h4s = detect_pattern(h4, -2)
     h4ok = h4p != "" and (h4s == trend or h4s == "DOJI")
     # H4 pattern is bonus (+10 score), not mandatory

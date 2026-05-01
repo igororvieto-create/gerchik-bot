@@ -95,13 +95,20 @@ class Scanner:
 
     # ------------------------------------------------------------------ pairs
 
+    # Prefixes of synthetic/index instruments — not real crypto, skip them
+    _SYNTHETIC_PREFIXES = ("NCC", "NCSI", "NCCO")
+
     async def update_pairs(self):
         try:
             if cfg.WHITELIST:
                 state.pairs = list(cfg.WHITELIST)
             else:
                 symbols = await self.ex.get_top_symbols(cfg.TOP_N_PAIRS)
-                state.pairs = [s for s in symbols if s not in cfg.BLACKLIST]
+                state.pairs = [
+                    s for s in symbols
+                    if s not in cfg.BLACKLIST
+                    and not any(s.startswith(p) for p in self._SYNTHETIC_PREFIXES)
+                ]
             log.info(f"Пар: {len(state.pairs)} | топ-5: {state.pairs[:5]}")
         except Exception as e:
             log.error(f"update_pairs: {e}")

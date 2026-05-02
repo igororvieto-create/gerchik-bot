@@ -118,28 +118,43 @@ async def cmd_status(msg: Message):
         await msg.answer("📭 Нет открытых позиций", reply_markup=main_keyboard())
         return
 
+    # Build live map for PnL lookup
+    live_map = {p.get("symbol"): p for p in live if abs(float(p.get("positionAmt", 0))) > 0}
+
     text = "📊 <b>Открытые позиции:</b>\n\n"
-    if live:
-        for p in live:
-            sym   = p.get("symbol", "?")
-            side  = p.get("positionSide", "?")
-            amt   = abs(float(p.get("positionAmt", 0)))
-            ep    = float(p.get("avgPrice", 0))
-            upnl  = float(p.get("unrealizedProfit", 0))
-            sign  = "+" if upnl >= 0 else ""
-            emoji = "🟢" if upnl >= 0 else "🔴"
+    positions_to_show = state.positions if state.positions else {
+        p.get("symbol"): p for p in live if abs(float(p.get("positionAmt", 0))) > 0
+    }
+
+    for sym, pos in positions_to_show.items():
+        lp    = live_map.get(sym, {})
+        upnl  = float(lp.get("unrealizedProfit", 0))
+        cur   = float(lp.get("markPrice", 0))
+        sign  = "+" if upnl >= 0 else ""
+        emoji = "🟢" if upnl >= 0 else "🔴"
+
+        if hasattr(pos, "entry"):
+            age_h = int((datetime.utcnow() - pos.opened_at).total_seconds() / 3600)
+            sl_dist = f"{abs(cur - pos.sl) / pos.entry * 100:.1f}%" if cur > 0 and pos.sl > 0 else "?"
+            tp_dist = f"{abs(pos.tp2 - cur) / pos.entry * 100:.1f}%" if cur > 0 and pos.tp2 > 0 else "?"
+            be_tag  = " ✅BE" if pos.be_moved else ""
+            t1_tag  = " 🎯TP1" if pos.tp1_hit else ""
             text += (
-                f"<b>{sym}</b> {side}\n"
-                f"Кол-во: {amt}\n"
-                f"Вход: <code>{ep:.4f}</code>\n"
+                f"<b>{sym}</b> {pos.side}{be_tag}{t1_tag} | ⭐{pos.score} | {pos.pattern}\n"
+                f"Вход: <code>{pos.entry:.4f}</code> | {age_h}ч\n"
+                f"🔴 SL: <code>{pos.sl:.4f}</code> ({sl_dist} до стопа)\n"
+                f"🟡 TP2: <code>{pos.tp2:.4f}</code> ({tp_dist} до TP2)\n"
                 f"PnL: {emoji} <code>{sign}{upnl:.2f} USDT</code>\n\n"
             )
-    else:
-        for sym, p in state.positions.items():
+        else:
+            # Exchange-synced position without bot data
+            ep   = float(lp.get("avgPrice", 0))
+            amt  = abs(float(lp.get("positionAmt", 0)))
+            side = lp.get("positionSide", "?")
             text += (
-                f"<b>{sym}</b> {p.side} {'✅BE' if p.be_moved else '⏳'}\n"
-                f"Вход: <code>{p.entry:.4f}</code>  SL: <code>{p.sl:.4f}</code>\n"
-                f"TP3: <code>{p.tp3:.4f}</code>\n\n"
+                f"<b>{sym}</b> {side} (внешняя)\n"
+                f"Вход: <code>{ep:.4f}</code> | Кол-во: {amt}\n"
+                f"PnL: {emoji} <code>{sign}{upnl:.2f} USDT</code>\n\n"
             )
 
     await msg.answer(text, parse_mode="HTML", reply_markup=main_keyboard())

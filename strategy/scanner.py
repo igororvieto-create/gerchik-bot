@@ -36,7 +36,8 @@ class Scanner:
         self.ex          = exchange
         self.bot         = bot
         self._scan_count = 0
-        self._sl_cooldown: dict = {}  # symbol → datetime of last SL hit
+        self._sl_cooldown: dict = {}   # symbol → datetime of last SL hit
+        self._stale_alerted: set = {}  # symbols already alerted as stale
         _global_scanner = self
         self._restore_cooldowns()
 
@@ -568,7 +569,16 @@ class Scanner:
                     else:
                         state.day.losses += 1
                         state.day.loss_streak += 1
-                        state.day.paused_until = datetime.utcnow() + timedelta(minutes=cfg.PAUSE_AFTER_LOSS_MIN)
+                        if state.day.loss_streak >= 3:
+                            pause_min = 120
+                            await self._notify(
+                                f"⛔ <b>3 убытка подряд</b> — пауза 2 часа\n"
+                                f"Серия: {state.day.loss_streak} | "
+                                f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
+                            )
+                        else:
+                            pause_min = cfg.PAUSE_AFTER_LOSS_MIN
+                        state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
                     try:
                         from core import db
                         db.save_trade(pos, price, pnl, result)
@@ -592,6 +602,20 @@ class Scanner:
                     )
         except Exception as e:
             log.error(f"monitor sync: {e}")
+
+        # Alert on stale positions (open > 48h without hitting any TP)
+        for symbol, pos in state.positions.items():
+            if pos.sl == 0:
+                continue
+            age_h = (datetime.utcnow() - pos.opened_at).total_seconds() / 3600
+            if age_h > 48 and symbol not in self._stale_alerted:
+                self._stale_alerted.add(symbol)
+                await self._notify(
+                    f"⏰ <b>Позиция завязла</b> | {symbol} {pos.side}\n"
+                    f"Открыта {age_h:.0f}ч назад без движения к TP\n"
+                    f"Вход: <code>{pos.entry:.4f}</code> | TP2: <code>{pos.tp2:.4f}</code>\n"
+                    f"Рассмотри закрытие вручную: /close_{symbol.replace('-','_')}"
+                )
 
         # Clean up stale sl_cooldown entries (older than 2x cooldown window)
         cutoff = datetime.utcnow() - timedelta(minutes=SL_COOLDOWN_MIN * 2)
@@ -807,7 +831,16 @@ class Scanner:
         else:
             state.day.losses     += 1
             state.day.loss_streak += 1
-            state.day.paused_until = datetime.utcnow() + timedelta(minutes=cfg.PAUSE_AFTER_LOSS_MIN)
+            if state.day.loss_streak >= 3:
+                pause_min = 120
+                await self._notify(
+                    f"⛔ <b>3 убытка подряд</b> — пауза 2 часа\n"
+                    f"Серия: {state.day.loss_streak} | "
+                    f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
+                )
+            else:
+                pause_min = cfg.PAUSE_AFTER_LOSS_MIN
+            state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
 
         # Save to DB
         try:

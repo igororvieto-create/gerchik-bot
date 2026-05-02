@@ -22,8 +22,8 @@ class Config:
     TREND_EMA_D1:     int   = int(os.getenv("TREND_EMA_D1", "200").strip())
     TREND_EMA_H4:     int   = int(os.getenv("TREND_EMA_H4", "50").strip())
     TREND_EMA_H1:     int   = int(os.getenv("TREND_EMA_H1", "21").strip())
-    FUNDING_MAX_LONG:  float = float(os.getenv("FUNDING_MAX_LONG", "0.05").strip())
-    FUNDING_MAX_SHORT: float = float(os.getenv("FUNDING_MAX_SHORT", "-0.05").strip())
+    FUNDING_MAX_LONG:  float = float(os.getenv("FUNDING_MAX_LONG", "0.03").strip())
+    FUNDING_MAX_SHORT: float = float(os.getenv("FUNDING_MAX_SHORT", "-0.03").strip())
     WHITELIST: List[str] = field(default_factory=lambda: [s.strip() for s in os.getenv("WHITELIST","").split(",") if s.strip()])
     BLACKLIST: List[str] = field(default_factory=lambda: [s.strip() for s in os.getenv("BLACKLIST","LUNA-USDT,FTT-USDT").split(",") if s.strip()])
     TOP_N_PAIRS:      int   = int(os.getenv("TOP_N_PAIRS", "100").strip())
@@ -35,7 +35,7 @@ class Config:
     TP2_RR: float = 2.0
     TP3_RR: float = 3.0
     TP2_CLOSE_PCT:        float = 0.60
-    PAUSE_AFTER_LOSS_MIN: int   = 30
+    PAUSE_AFTER_LOSS_MIN: int   = 15
     CONFIRM_TIMEOUT_SEC:  int   = 300
     SCAN_H1_INTERVAL_MIN: int   = int(os.getenv("SCAN_H1_INTERVAL_MIN", "15").strip())
     SCAN_BATCH_SIZE:      int   = int(os.getenv("SCAN_BATCH_SIZE", "10").strip())
@@ -52,8 +52,8 @@ class Config:
     # Auto-leverage: adjust leverage based on balance tiers (True/False)
     AUTO_LEVERAGE:        bool  = os.getenv("AUTO_LEVERAGE", "true").strip().lower() == "true"
     # Time filter: skip scanning during low-liquidity hours (UTC)
-    QUIET_HOURS_START:    int   = int(os.getenv("QUIET_HOURS_START", "0").strip())
-    QUIET_HOURS_END:      int   = int(os.getenv("QUIET_HOURS_END", "7").strip())
+    QUIET_HOURS_START:    int   = int(os.getenv("QUIET_HOURS_START", "2").strip())
+    QUIET_HOURS_END:      int   = int(os.getenv("QUIET_HOURS_END", "6").strip())
     # BTC trend filter: skip LONG when BTC drops >2% in 3h, skip SHORT when BTC rises >2%
     BTC_FILTER:           bool  = os.getenv("BTC_FILTER", "true").strip().lower() == "true"
     BTC_FILTER_PCT:       float = float(os.getenv("BTC_FILTER_PCT", "2.0").strip())

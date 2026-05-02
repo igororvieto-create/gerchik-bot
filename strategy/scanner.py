@@ -576,6 +576,11 @@ class Scanner:
                         log.error(f"{symbol}: ошибка сохранения сделки в БД: {e}")
                     del state.positions[symbol]
                     db.delete_open_position(symbol)
+                    # Refresh balance so next position sizing uses real balance
+                    try:
+                        state.current_balance = await self.ex.get_balance()
+                    except Exception:
+                        pass
                     # Set cooldown if closed at a loss (likely SL hit)
                     if pnl <= 0:
                         self._set_cooldown(symbol)
@@ -615,7 +620,14 @@ class Scanner:
                     if be_triggered:
                         await self._move_be(pos)
 
-                # TP2 → partial close — skip if tp2 unknown (synced position)
+                # TP1 → partial close 20% (lock early profit)
+                if not pos.tp1_hit and pos.tp1 > 0:
+                    tp1_triggered = (pos.side == "LONG" and price >= pos.tp1) or \
+                                    (pos.side == "SHORT" and price <= pos.tp1)
+                    if tp1_triggered:
+                        await self._partial_close(pos, 0.20, "TP1")
+
+                # TP2 → partial close 60% of remaining — skip if tp2 unknown
                 if pos.be_moved and not pos.tp2_hit and pos.tp2 > 0:
                     tp2_hit = (pos.side == "LONG" and price >= pos.tp2) or \
                               (pos.side == "SHORT" and price <= pos.tp2)
@@ -713,8 +725,9 @@ class Scanner:
                 return
             await self.ex.close_position(pos.symbol, qty, pos.side)
 
-            # Record PnL for the closed portion (use tp2 as fallback if ticker fails)
-            close_price = pos.tp2
+            # Record PnL for the closed portion
+            fallback = pos.tp1 if label == "TP1" else pos.tp2
+            close_price = fallback if fallback > 0 else pos.entry
             try:
                 ticker = await self.ex.get_ticker(pos.symbol)
                 if ticker and float(ticker.get("lastPrice", 0)) > 0:
@@ -733,8 +746,11 @@ class Scanner:
             except Exception as pe:
                 log.error(f"partial_close db.save_trade {pos.symbol}: {pe}")
 
-            pos.qty    -= qty
-            pos.tp2_hit = True
+            pos.qty -= qty
+            if label == "TP1":
+                pos.tp1_hit = True
+            else:
+                pos.tp2_hit = True
             side = "BUY" if pos.side == "LONG" else "SELL"
             # Re-place SL for remaining qty
             if pos.sl_order_id:

@@ -616,6 +616,45 @@ async def cmd_closeall(msg: Message):
     await msg.answer(text, reply_markup=main_keyboard())
 
 
+# ------------------------------------------------------------------ /close_SYMBOL
+
+async def cmd_close_symbol(msg: Message):
+    if not _auth(msg):
+        return
+    # Accept /close_BTC_USDT or /close BTC-USDT
+    text = msg.text.strip()
+    if text.startswith("/close_"):
+        raw = text[len("/close_"):]
+    elif " " in text:
+        raw = text.split(None, 1)[1]
+    else:
+        await msg.answer("Укажи символ: /close_BTC_USDT", reply_markup=main_keyboard())
+        return
+    symbol = raw.replace("_", "-").upper()
+    pos = state.positions.get(symbol)
+    if not pos:
+        await msg.answer(f"Позиция {symbol} не найдена в памяти бота", reply_markup=main_keyboard())
+        return
+    from exchange.bingx import BingXClient
+    ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+    try:
+        for oid in (pos.sl_order_id, pos.tp_order_id):
+            if oid:
+                try:
+                    await ex.cancel_order(symbol, oid)
+                except Exception:
+                    pass
+        await ex.close_position(symbol, pos.qty, pos.side)
+        state.positions.pop(symbol, None)
+        from core import db as _db; _db.delete_open_position(symbol)
+        await msg.answer(f"✅ Позиция {symbol} закрыта", reply_markup=main_keyboard())
+    except Exception as e:
+        log.error(f"close_symbol {symbol}: {e}")
+        await msg.answer(f"❌ Ошибка закрытия {symbol}: {e}", reply_markup=main_keyboard())
+    finally:
+        await ex.close()
+
+
 # ------------------------------------------------------------------ inline callbacks (manual mode)
 
 async def handle_signal_callback(cb: CallbackQuery):
@@ -792,7 +831,8 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_setrisk,  Command("setrisk"))
     dp.message.register(cmd_setlev,   Command("setlev"))
     dp.message.register(cmd_scan,     Command("scan"))
-    dp.message.register(cmd_closeall, Command("closeall"))
+    dp.message.register(cmd_closeall,     Command("closeall"))
+    dp.message.register(cmd_close_symbol, Command("close"))
     dp.message.register(handle_misc)
     dp.callback_query.register(
         handle_signal_callback,

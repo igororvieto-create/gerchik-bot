@@ -234,18 +234,24 @@ def doji(o,h,l,c):
     body=abs(c-o); full=h-l
     return full>0 and body/full<=0.12
 
+def inside_bar(h, l, h_prev, l_prev):
+    """Current candle range is completely inside the previous candle — compression before move."""
+    return h < h_prev and l > l_prev and (h_prev - l_prev) > 0
+
 def detect_pattern(candles, idx=-1):
     i  = idx if idx >= 0 else len(candles["open"])+idx
     o  = candles["open"][i];  h = candles["high"][i]
     l  = candles["low"][i];   c = candles["close"][i]
     o1 = candles["open"][i-1];c1= candles["close"][i-1]
-    if hammer(o,h,l,c):        return "Молот","LONG"
-    if bull_pin(o,h,l,c):      return "Пин-бар (бычий)","LONG"
-    if bull_engulf(o1,c1,o,c): return "Бычье поглощение","LONG"
-    if shooting_star(o,h,l,c): return "Падающая звезда","SHORT"
-    if bear_pin(o,h,l,c):      return "Пин-бар (медвежий)","SHORT"
-    if bear_engulf(o1,c1,o,c): return "Медвежье поглощение","SHORT"
-    if doji(o,h,l,c):          return "Доджи","DOJI"
+    h1p= candles["high"][i-1];l1p= candles["low"][i-1]
+    if hammer(o,h,l,c):            return "Молот","LONG"
+    if bull_pin(o,h,l,c):          return "Пин-бар (бычий)","LONG"
+    if bull_engulf(o1,c1,o,c):     return "Бычье поглощение","LONG"
+    if shooting_star(o,h,l,c):     return "Падающая звезда","SHORT"
+    if bear_pin(o,h,l,c):          return "Пин-бар (медвежий)","SHORT"
+    if bear_engulf(o1,c1,o,c):     return "Медвежье поглощение","SHORT"
+    if inside_bar(h, l, h1p, l1p): return "Внутренний бар","DOJI"
+    if doji(o,h,l,c):              return "Доджи","DOJI"
     return "",""
 
 # ─────────────────────────────────────── main ──
@@ -479,6 +485,185 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         entry=price, sl=sl,
         tp1=tp1, tp2=tp2, tp3=tp3,
         rr=rr, pattern=pname, tf="H1+H4",
+        score=score, reason=reason,
+    )
+
+
+def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
+    """
+    Ложный пробой — сетап №1 по Герчику.
+
+    Цена тенью пробивает ключевой уровень, но закрывается обратно на
+    «правильной» стороне.  Это означает, что крупный игрок (лимитная
+    заявка) поглотил агрессоров и защитил уровень.  Чем больше объём
+    на ложном пробое — тем сильнее подтверждение.
+    SL ставится за экстремум ложного пробоя (хвост свечи).
+    """
+    if not d1 or not h4 or not h1:
+        return None
+    if len(d1["close"]) < cfg.TREND_EMA_D1 or len(h4["close"]) < 55 or len(h1["close"]) < 40:
+        return None
+
+    # ── D1 trend ──
+    ema200   = ema(d1["close"], cfg.TREND_EMA_D1)
+    d1_up    = d1["close"][-1] > ema200[-1]
+    trend    = "LONG" if d1_up else "SHORT"
+    d1_slope = trend_slope(d1["close"], 5)
+
+    price = h1["close"][-1]
+
+    # ── S/R levels ──
+    lv4 = find_levels(h4["high"], h4["low"], lookback=120)
+    lv1 = find_levels(h1["high"], h1["low"], lookback=80)
+    if trend == "LONG":
+        levels = lv4["support"] + lv1["support"]
+    else:
+        levels = lv4["resistance"] + lv1["resistance"]
+    if not levels:
+        _reject("ложный пробой: нет уровней")
+        return None
+
+    # ── Scan last 6 H1 candles for a false breakout ──
+    fb_candle = None
+    fb_level  = None
+    fb_vrat   = 1.0
+    vm = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
+
+    n = len(h1["close"])
+    for back in range(2, 8):          # candles [-7 .. -2], skip current (-1)
+        idx = n - back
+        if idx < 1:
+            break
+        h_ = h1["high"][idx]
+        l_ = h1["low"][idx]
+        c  = h1["close"][idx]
+        v_ref = vm[idx - 1] if vm[idx - 1] > 0 else 1.0
+        v_rat = h1["volume"][idx] / v_ref
+
+        for lvl in levels:
+            if trend == "LONG":
+                # Wick pierced below support but candle closed above
+                if l_ < lvl * 0.998 and c > lvl:
+                    fb_candle = {"h": h_, "l": l_, "c": c}
+                    fb_level  = lvl
+                    fb_vrat   = v_rat
+                    break
+            else:
+                # Wick pierced above resistance but candle closed below
+                if h_ > lvl * 1.002 and c < lvl:
+                    fb_candle = {"h": h_, "l": l_, "c": c}
+                    fb_level  = lvl
+                    fb_vrat   = v_rat
+                    break
+        if fb_candle:
+            break
+
+    if fb_candle is None:
+        _reject("ложный пробой: не найден")
+        return None
+
+    # Current price must still be on the correct side of the level (not deep)
+    dist_pct = abs(price - fb_level) / fb_level * 100
+    if trend == "LONG":
+        if price < fb_level * 0.993:
+            _reject("ложный пробой: цена ушла ниже уровня")
+            return None
+    else:
+        if price > fb_level * 1.007:
+            _reject("ложный пробой: цена ушла выше уровня")
+            return None
+    if dist_pct > 2.5:
+        _reject("ложный пробой: цена далеко от уровня")
+        return None
+
+    # ── RSI ──
+    h1_rsi  = rsi(h1["close"], 14)
+    cur_rsi = h1_rsi[-1]
+    if trend == "LONG"  and cur_rsi > 68:
+        _reject("ложный пробой: RSI перекуплен")
+        return None
+    if trend == "SHORT" and cur_rsi < 32:
+        _reject("ложный пробой: RSI перепродан")
+        return None
+
+    # ── ADX ──
+    h4_adx  = adx(h4["high"], h4["low"], h4["close"], 14)
+    cur_adx = h4_adx[-1]
+
+    # ── Funding ──
+    if trend == "LONG"  and funding > cfg.FUNDING_MAX_LONG:
+        return None
+    if trend == "SHORT" and funding < cfg.FUNDING_MAX_SHORT:
+        return None
+
+    # ── SL: beyond the false breakout wick extreme ──
+    buf = price * cfg.SL_BUFFER_PCT / 100
+    if trend == "LONG":
+        sl = fb_candle["l"] - buf
+    else:
+        sl = fb_candle["h"] + buf
+
+    sld = abs(price - sl)
+    if sld <= 0 or sld / price > 0.05:
+        _reject("ложный пробой: SL слишком широкий")
+        return None
+
+    def _px(p):
+        if p >= 10:   return round(p, 2)
+        if p >= 1:    return round(p, 4)
+        if p >= 0.01: return round(p, 5)
+        return round(p, 6)
+
+    sl  = _px(sl)
+    tp1 = _px(price + sld * cfg.TP1_RR if trend == "LONG" else price - sld * cfg.TP1_RR)
+    tp2 = _px(price + sld * cfg.TP2_RR if trend == "LONG" else price - sld * cfg.TP2_RR)
+    tp3 = _px(price + sld * cfg.TP3_RR if trend == "LONG" else price - sld * cfg.TP3_RR)
+    rr  = cfg.TP2_RR
+
+    touches = level_touches(fb_level, h4["high"][-120:], h4["low"][-120:])
+
+    # ── Score (base 58 — strong setup) ──
+    score = 58
+    if fb_vrat >= 2.5:   score += 12
+    elif fb_vrat >= 2.0: score += 8
+    elif fb_vrat >= 1.5: score += 5
+    if touches <= 2:     score += 10
+    elif touches <= 3:   score += 6
+    elif touches <= 4:   score += 3
+    if cur_adx >= 30:    score += 8
+    elif cur_adx >= 22:  score += 4
+    if (trend == "LONG"  and d1_slope > 0.1) or \
+       (trend == "SHORT" and d1_slope < -0.1):
+        score += 5
+    rsi_ok = (trend == "LONG"  and 35 <= cur_rsi <= 60) or \
+             (trend == "SHORT" and 40 <= cur_rsi <= 65)
+    if rsi_ok: score += 5
+    score = min(score, 100)
+
+    if score < cfg.MIN_SCORE:
+        _reject("ложный пробой: score ниже MIN_SCORE")
+        return None
+
+    if trend == "LONG":
+        wick_pct = (fb_level - fb_candle["l"]) / fb_level * 100
+    else:
+        wick_pct = (fb_candle["h"] - fb_level) / fb_level * 100
+
+    reason = (
+        f"🪤 <b>{symbol}</b> | {trend} ЛОЖНЫЙ ПРОБОЙ\n"
+        f"🎯 Уровень: <code>{fb_level:.4f}</code> ({touches} кас.)\n"
+        f"⚡ Тень пробила на {wick_pct:.2f}% | Объём: <code>{fb_vrat:.2f}×</code>\n"
+        f"📊 ADX: <code>{cur_adx:.1f}</code> | RSI: <code>{cur_rsi:.0f}</code>\n"
+        f"📈 D1: {'🟢' if d1_up else '🔴'} slope <code>{d1_slope:+.2f}%</code>\n"
+        f"🟡 Вход: <code>{price:.4f}</code> | 🔴 SL: <code>{sl:.4f}</code>\n"
+        f"🟢 TP2: <code>{tp2:.4f}</code> | TP3: <code>{tp3:.4f}</code>\n"
+        f"⚡ R/R: 1:{rr:.1f} | ⭐ Score: {score}/100"
+    )
+    return Signal(
+        symbol=symbol, side=trend,
+        entry=price, sl=sl,
+        tp1=tp1, tp2=tp2, tp3=tp3,
+        rr=rr, pattern=f"Ложный пробой {fb_level:.4f}", tf="H1+H4",
         score=score, reason=reason,
     )
 

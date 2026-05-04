@@ -10,7 +10,11 @@ from core.config import cfg
 from core.state import Position, state
 from core import db
 from exchange.bingx import BingXClient
-from strategy.strategy.gerchik import Signal, analyze, analyze_breakout, analyze_range_breakout, parse_klines, reset_stats, get_stats, nearest_weekly_levels
+from strategy.strategy.gerchik import (
+    Signal, analyze, analyze_false_breakout, analyze_breakout,
+    analyze_range_breakout, parse_klines, reset_stats, get_stats,
+    nearest_weekly_levels, near_level,
+)
 
 log = logging.getLogger("scanner")
 
@@ -239,20 +243,35 @@ class Scanner:
             d1      = parse_klines(await self.ex.get_klines(symbol, cfg.TREND_TF,  limit=250))
             h4      = parse_klines(await self.ex.get_klines(symbol, cfg.H4_TF,     limit=150))
             h1      = parse_klines(await self.ex.get_klines(symbol, cfg.SIGNAL_TF, limit=100))
+            w1      = parse_klines(await self.ex.get_klines(symbol, "1w",          limit=60))
             funding = await self.ex.get_funding_rate(symbol)
 
-            # Funding rate extreme alert
             if funding > 0.1 or funding < -0.1:
                 log.warning(f"⚠️ Экстремальный фандинг {symbol}: {funding:.4f}%")
 
-            # 1. Pullback to S/R (standard Gerchik entry)
+            # Priority order (Gerchik methodology):
+            # 1. Pullback to S/R (откат к уровню — базовый вход)
             sig = analyze(symbol, d1, h4, h1, funding, cfg)
-            # 2. Accumulation range breakout (Gerchik's core concept)
+            # 2. False breakout (ложный пробой — сетап №1 по Герчику)
+            if sig is None:
+                sig = analyze_false_breakout(symbol, d1, h4, h1, funding, cfg)
+            # 3. Accumulation range breakout (накопление — пробой диапазона)
             if sig is None:
                 sig = analyze_range_breakout(symbol, d1, h4, h1, funding, cfg)
-            # 3. Momentum breakout through a single level
+            # 4. Momentum breakout through a single level
             if sig is None:
                 sig = analyze_breakout(symbol, d1, h4, h1, funding, cfg)
+
+            # Weekly level bonus: +8 score if signal is near a W1 key level
+            if sig is not None and w1 and len(w1.get("close", [])) >= 10:
+                w1_lvls = nearest_weekly_levels(sig.entry, w1, count=5)
+                all_w1 = w1_lvls["support"] + w1_lvls["resistance"]
+                is_near_w1, w1_lvl = near_level(sig.entry, all_w1, tol=1.5)
+                if is_near_w1:
+                    sig.score = min(100, sig.score + 8)
+                    sig.reason += f"\n📅 <b>Недельный уровень</b> <code>{w1_lvl:.4f}</code> +8"
+                    log.info(f"{symbol}: вблизи W1 уровня {w1_lvl:.4f} → score +8")
+
             return sig
         except Exception as e:
             log.error(f"analyze {symbol}: {e}")

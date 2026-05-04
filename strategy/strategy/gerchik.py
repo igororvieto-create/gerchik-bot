@@ -459,3 +459,158 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         rr=rr, pattern=pname, tf="H1+H4",
         score=score, reason=reason,
     )
+
+
+def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
+    """
+    Breakout signal: price closes through a key S/R level with conviction.
+    Complements the pullback strategy — catches strong directional moves.
+    """
+    if not d1 or not h4 or not h1:
+        return None
+    if len(d1["close"]) < cfg.TREND_EMA_D1 or len(h4["close"]) < 55 or len(h1["close"]) < 40:
+        return None
+
+    # ── D1 trend ──
+    ema200 = ema(d1["close"], cfg.TREND_EMA_D1)
+    d1_up  = d1["close"][-1] > ema200[-1]
+    trend  = "LONG" if d1_up else "SHORT"
+    d1_slope = trend_slope(d1["close"], 5)
+
+    # Breakout requires D1 momentum aligned with direction
+    if trend == "LONG"  and d1_slope < 0.05:
+        return None
+    if trend == "SHORT" and d1_slope > -0.05:
+        return None
+
+    price = h1["close"][-1]
+    h1_atr = atr(h1["high"], h1["low"], h1["close"], 14)
+    cur_atr = h1_atr[-1]
+
+    # ── Breakout candle: must be strong (body > 55% of range) ──
+    o2, c2 = h1["open"][-2], h1["close"][-2]
+    h2, l2 = h1["high"][-2], h1["low"][-2]
+    body  = abs(c2 - o2)
+    rng   = h2 - l2
+    if rng <= 0 or body / rng < 0.55:
+        _reject("пробой: слабая свеча")
+        return None
+    # Candle must be in trend direction
+    if trend == "LONG"  and c2 <= o2:
+        _reject("пробой: медвежья свеча в LONG")
+        return None
+    if trend == "SHORT" and c2 >= o2:
+        _reject("пробой: бычья свеча в SHORT")
+        return None
+
+    # ── Price must have broken through a key level ──
+    lv4 = find_levels(h4["high"], h4["low"], lookback=120)
+    lv1 = find_levels(h1["high"], h1["low"], lookback=80)
+    if trend == "LONG":
+        levels = lv4["resistance"] + lv1["resistance"]
+    else:
+        levels = lv4["support"] + lv1["support"]
+
+    # Find a level the candle just broke through (level was between candle open and close)
+    broken_level = None
+    for lvl in levels:
+        if trend == "LONG"  and o2 <= lvl <= c2:
+            broken_level = lvl
+            break
+        if trend == "SHORT" and c2 <= lvl <= o2:
+            broken_level = lvl
+            break
+    if broken_level is None:
+        _reject("пробой: нет пробитого уровня")
+        return None
+
+    touches = level_touches(broken_level, h4["high"][-120:], h4["low"][-120:])
+    if touches < 2:
+        _reject("пробой: уровень не подтверждён (<2 касаний)")
+        return None
+
+    # ── Volume: breakout must have 2x+ volume ──
+    vm   = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
+    vrat = h1["volume"][-2] / vm[-3] if vm[-3] > 0 else 0
+    if vrat < 2.0:
+        _reject("пробой: объём < 2x")
+        return None
+
+    # ── ADX: must be trending ──
+    h4_adx  = adx(h4["high"], h4["low"], h4["close"], 14)
+    cur_adx = h4_adx[-1]
+    if cur_adx < 25:
+        _reject("пробой: ADX < 25 (нет тренда)")
+        return None
+
+    # ── RSI: not extreme ──
+    h1_rsi  = rsi(h1["close"], 14)
+    cur_rsi = h1_rsi[-1]
+    if trend == "LONG"  and cur_rsi > 75:
+        _reject("пробой: RSI > 75")
+        return None
+    if trend == "SHORT" and cur_rsi < 25:
+        _reject("пробой: RSI < 25")
+        return None
+
+    # ── Funding ──
+    if trend == "LONG"  and funding > cfg.FUNDING_MAX_LONG:
+        return None
+    if trend == "SHORT" and funding < cfg.FUNDING_MAX_SHORT:
+        return None
+
+    # ── SL: just below broken level ──
+    buf = price * cfg.SL_BUFFER_PCT / 100
+    if trend == "LONG":
+        sl = broken_level - cur_atr * 0.5 - buf
+    else:
+        sl = broken_level + cur_atr * 0.5 + buf
+
+    sld = abs(price - sl)
+    if sld <= 0 or sld / price > 0.05:
+        return None
+
+    def _px(p):
+        if p >= 10:   return round(p, 2)
+        if p >= 1:    return round(p, 4)
+        if p >= 0.01: return round(p, 5)
+        return round(p, 6)
+
+    sl  = _px(sl)
+    tp1 = _px(price + sld * cfg.TP1_RR if trend == "LONG" else price - sld * cfg.TP1_RR)
+    tp2 = _px(price + sld * cfg.TP2_RR if trend == "LONG" else price - sld * cfg.TP2_RR)
+    tp3 = _px(price + sld * cfg.TP3_RR if trend == "LONG" else price - sld * cfg.TP3_RR)
+    rr  = cfg.TP2_RR
+
+    # Score breakout signals
+    score = 55  # base higher than pullback (50) — breakout is higher conviction
+    if vrat >= 3.0:   score += 15
+    elif vrat >= 2.5: score += 10
+    else:             score += 6
+    if cur_adx >= 35: score += 10
+    elif cur_adx >= 30: score += 6
+    elif cur_adx >= 25: score += 3
+    if touches >= 3:  score += 8   # well-tested level = stronger breakout
+    if (trend == "LONG" and d1_slope > 0.3) or (trend == "SHORT" and d1_slope < -0.3):
+        score += 7
+    score = min(score, 100)
+
+    if score < cfg.MIN_SCORE:
+        return None
+
+    reason = (
+        f"💥 <b>{symbol}</b> | {trend} ПРОБОЙ\n"
+        f"🕯 Пробита зона: <code>{broken_level:.4f}</code> ({touches} кас.)\n"
+        f"📈 D1 slope: <code>{d1_slope:+.2f}%</code> | ADX: <code>{cur_adx:.1f}</code>\n"
+        f"📦 Объём: <code>{vrat:.2f}×</code> | RSI: <code>{cur_rsi:.0f}</code>\n"
+        f"🟡 Вход: <code>{price:.4f}</code> | 🔴 SL: <code>{sl:.4f}</code>\n"
+        f"🟢 TP2: <code>{tp2:.4f}</code> | TP3: <code>{tp3:.4f}</code>\n"
+        f"⚡ R/R: 1:{rr:.1f} | ⭐ Score: {score}/100"
+    )
+    return Signal(
+        symbol=symbol, side=trend,
+        entry=price, sl=sl,
+        tp1=tp1, tp2=tp2, tp3=tp3,
+        rr=rr, pattern=f"Пробой {broken_level:.4f}", tf="H1+H4",
+        score=score, reason=reason,
+    )

@@ -58,12 +58,13 @@ async def main():
     scanner  = Scanner(exchange, bot)
 
     # Scheduler jobs
-    scheduler.add_job(scanner.scan_all,         "cron",     minute="*/15")
-    scheduler.add_job(scanner.update_pairs,      "cron",     minute="0")
-    scheduler.add_job(scanner.monitor_positions, "interval", seconds=30)
-    scheduler.add_job(scanner.daily_report,      "cron",     hour="9",  minute="0")
-    scheduler.add_job(scanner.weekly_report,     "cron",     day_of_week="mon", hour="9", minute="5")
-    scheduler.add_job(scanner.monthly_report,    "cron",     day="1",   hour="9", minute="10")
+    scheduler.add_job(scanner.scan_all,          "cron",     minute=f"*/{cfg.SCAN_H1_INTERVAL_MIN}")
+    scheduler.add_job(scanner.update_pairs,       "cron",     minute="0")
+    scheduler.add_job(scanner.monitor_positions,  "interval", seconds=30)
+    scheduler.add_job(scanner.btc_weekly_alert,   "cron",     minute="30")  # every hour at :30
+    scheduler.add_job(scanner.daily_report,       "cron",     hour="9",  minute="0")
+    scheduler.add_job(scanner.weekly_report,      "cron",     day_of_week="mon", hour="9", minute="5")
+    scheduler.add_job(scanner.monthly_report,     "cron",     day="1",   hour="9", minute="10")
     scheduler.start()
 
     async def startup_tasks():

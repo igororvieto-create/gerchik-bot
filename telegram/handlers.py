@@ -45,6 +45,8 @@ def main_keyboard():
 # ------------------------------------------------------------------ /ping
 
 async def cmd_ping(msg: Message):
+    if not _auth(msg):
+        return
     await msg.answer("🟢 Бот работает", reply_markup=main_keyboard())
 
 
@@ -116,28 +118,43 @@ async def cmd_status(msg: Message):
         await msg.answer("📭 Нет открытых позиций", reply_markup=main_keyboard())
         return
 
+    # Build live map for PnL lookup
+    live_map = {p.get("symbol"): p for p in live if abs(float(p.get("positionAmt", 0))) > 0}
+
     text = "📊 <b>Открытые позиции:</b>\n\n"
-    if live:
-        for p in live:
-            sym   = p.get("symbol", "?")
-            side  = p.get("positionSide", "?")
-            amt   = abs(float(p.get("positionAmt", 0)))
-            ep    = float(p.get("avgPrice", 0))
-            upnl  = float(p.get("unrealizedProfit", 0))
-            sign  = "+" if upnl >= 0 else ""
-            emoji = "🟢" if upnl >= 0 else "🔴"
+    positions_to_show = state.positions if state.positions else {
+        p.get("symbol"): p for p in live if abs(float(p.get("positionAmt", 0))) > 0
+    }
+
+    for sym, pos in positions_to_show.items():
+        lp    = live_map.get(sym, {})
+        upnl  = float(lp.get("unrealizedProfit", 0))
+        cur   = float(lp.get("markPrice", 0))
+        sign  = "+" if upnl >= 0 else ""
+        emoji = "🟢" if upnl >= 0 else "🔴"
+
+        if hasattr(pos, "entry"):
+            age_h = int((datetime.utcnow() - pos.opened_at).total_seconds() / 3600)
+            sl_dist = f"{abs(cur - pos.sl) / pos.entry * 100:.1f}%" if cur > 0 and pos.sl > 0 else "?"
+            tp_dist = f"{abs(pos.tp2 - cur) / pos.entry * 100:.1f}%" if cur > 0 and pos.tp2 > 0 else "?"
+            be_tag  = " ✅BE" if pos.be_moved else ""
+            t1_tag  = " 🎯TP1" if pos.tp1_hit else ""
             text += (
-                f"<b>{sym}</b> {side}\n"
-                f"Кол-во: {amt}\n"
-                f"Вход: <code>{ep:.4f}</code>\n"
+                f"<b>{sym}</b> {pos.side}{be_tag}{t1_tag} | ⭐{pos.score} | {pos.pattern}\n"
+                f"Вход: <code>{pos.entry:.4f}</code> | {age_h}ч\n"
+                f"🔴 SL: <code>{pos.sl:.4f}</code> ({sl_dist} до стопа)\n"
+                f"🟡 TP2: <code>{pos.tp2:.4f}</code> ({tp_dist} до TP2)\n"
                 f"PnL: {emoji} <code>{sign}{upnl:.2f} USDT</code>\n\n"
             )
-    else:
-        for sym, p in state.positions.items():
+        else:
+            # Exchange-synced position without bot data
+            ep   = float(lp.get("avgPrice", 0))
+            amt  = abs(float(lp.get("positionAmt", 0)))
+            side = lp.get("positionSide", "?")
             text += (
-                f"<b>{sym}</b> {p.side} {'✅BE' if p.be_moved else '⏳'}\n"
-                f"Вход: <code>{p.entry:.4f}</code>  SL: <code>{p.sl:.4f}</code>\n"
-                f"TP3: <code>{p.tp3:.4f}</code>\n\n"
+                f"<b>{sym}</b> {side} (внешняя)\n"
+                f"Вход: <code>{ep:.4f}</code> | Кол-во: {amt}\n"
+                f"PnL: {emoji} <code>{sign}{upnl:.2f} USDT</code>\n\n"
             )
 
     await msg.answer(text, parse_mode="HTML", reply_markup=main_keyboard())
@@ -149,10 +166,16 @@ async def cmd_balance(msg: Message):
     if not _auth(msg):
         return
     from exchange.bingx import BingXClient
-    ex  = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-    bal = await ex.get_balance()
-    await ex.close()
-    state.current_balance = bal
+    ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+    try:
+        bal = await ex.get_balance()
+        state.current_balance = bal
+    except Exception as e:
+        log.error(f"cmd_balance: {e}")
+        await msg.answer("❌ Ошибка получения баланса", reply_markup=main_keyboard())
+        return
+    finally:
+        await ex.close()
     d  = state.day
     wr = round(d.wins / d.trades * 100) if d.trades else 0
     await msg.answer(
@@ -565,6 +588,15 @@ async def cmd_closeall(msg: Message):
         if amt == 0:
             continue
         try:
+            # Cancel SL/TP orders if tracked in state
+            tracked = state.positions.get(sym)
+            if tracked:
+                for oid in (tracked.sl_order_id, tracked.tp_order_id):
+                    if oid:
+                        try:
+                            await ex.cancel_order(sym, oid)
+                        except Exception:
+                            pass
             await ex.close_position(sym, amt, side)
             state.positions.pop(sym, None)
             from core import db as _db; _db.delete_open_position(sym)
@@ -575,6 +607,16 @@ async def cmd_closeall(msg: Message):
     if not live:
         for sym, p in list(state.positions.items()):
             try:
+                if p.sl_order_id:
+                    try:
+                        await ex.cancel_order(sym, p.sl_order_id)
+                    except Exception:
+                        pass
+                if p.tp_order_id:
+                    try:
+                        await ex.cancel_order(sym, p.tp_order_id)
+                    except Exception:
+                        pass
                 await ex.close_position(sym, p.qty, p.side)
                 del state.positions[sym]
                 from core import db as _db; _db.delete_open_position(sym)
@@ -589,19 +631,71 @@ async def cmd_closeall(msg: Message):
     await msg.answer(text, reply_markup=main_keyboard())
 
 
+# ------------------------------------------------------------------ /close_SYMBOL
+
+async def cmd_close_symbol(msg: Message):
+    if not _auth(msg):
+        return
+    # Accept /close_BTC_USDT or /close BTC-USDT
+    text = msg.text.strip()
+    if text.startswith("/close_"):
+        raw = text[len("/close_"):]
+    elif " " in text:
+        raw = text.split(None, 1)[1]
+    else:
+        await msg.answer("Укажи символ: /close_BTC_USDT", reply_markup=main_keyboard())
+        return
+    symbol = raw.replace("_", "-").upper()
+    pos = state.positions.get(symbol)
+    if not pos:
+        await msg.answer(f"Позиция {symbol} не найдена в памяти бота", reply_markup=main_keyboard())
+        return
+    from exchange.bingx import BingXClient
+    ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+    try:
+        for oid in (pos.sl_order_id, pos.tp_order_id):
+            if oid:
+                try:
+                    await ex.cancel_order(symbol, oid)
+                except Exception:
+                    pass
+        await ex.close_position(symbol, pos.qty, pos.side)
+        state.positions.pop(symbol, None)
+        from core import db as _db; _db.delete_open_position(symbol)
+        await msg.answer(f"✅ Позиция {symbol} закрыта", reply_markup=main_keyboard())
+    except Exception as e:
+        log.error(f"close_symbol {symbol}: {e}")
+        await msg.answer(f"❌ Ошибка закрытия {symbol}: {e}", reply_markup=main_keyboard())
+    finally:
+        await ex.close()
+
+
 # ------------------------------------------------------------------ inline callbacks (manual mode)
 
 async def handle_signal_callback(cb: CallbackQuery):
     if not _auth_cb(cb):
         await cb.answer("Нет доступа", show_alert=True)
         return
-    action, symbol = cb.data.split(":", 1)
+    parts = cb.data.split(":", 1)
+    if len(parts) != 2:
+        await cb.answer("Некорректные данные", show_alert=True)
+        return
+    action, symbol = parts
     if action == "skip":
         state.pending.pop(symbol, None)
-        await cb.message.edit_caption(
-            caption=(cb.message.caption or "") + "\n\n⏭ <b>Пропущено</b>",
-            parse_mode="HTML",
-        )
+        try:
+            if cb.message.photo:
+                await cb.message.edit_caption(
+                    caption=(cb.message.caption or "") + "\n\n⏭ <b>Пропущено</b>",
+                    parse_mode="HTML",
+                )
+            else:
+                await cb.message.edit_text(
+                    text=(cb.message.text or "") + "\n\n⏭ <b>Пропущено</b>",
+                    parse_mode="HTML",
+                )
+        except Exception:
+            pass
         await cb.answer("Пропущено")
         return
 
@@ -615,10 +709,19 @@ async def handle_signal_callback(cb: CallbackQuery):
         await cb.answer("⏰ Время истекло", show_alert=True)
         return
 
-    await cb.message.edit_caption(
-        caption=(cb.message.caption or "") + "\n\n⏳ <b>Входим...</b>",
-        parse_mode="HTML",
-    )
+    try:
+        if cb.message.photo:
+            await cb.message.edit_caption(
+                caption=(cb.message.caption or "") + "\n\n⏳ <b>Входим...</b>",
+                parse_mode="HTML",
+            )
+        else:
+            await cb.message.edit_text(
+                text=(cb.message.text or "") + "\n\n⏳ <b>Входим...</b>",
+                parse_mode="HTML",
+            )
+    except Exception:
+        pass
     await cb.answer("Входим...")
 
     try:
@@ -743,7 +846,8 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_setrisk,  Command("setrisk"))
     dp.message.register(cmd_setlev,   Command("setlev"))
     dp.message.register(cmd_scan,     Command("scan"))
-    dp.message.register(cmd_closeall, Command("closeall"))
+    dp.message.register(cmd_closeall,     Command("closeall"))
+    dp.message.register(cmd_close_symbol, Command("close"))
     dp.message.register(handle_misc)
     dp.callback_query.register(
         handle_signal_callback,

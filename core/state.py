@@ -17,6 +17,7 @@ class Position:
     sl_order_id: str      = ""
     tp_order_id: str      = ""
     be_moved:    bool     = False
+    tp1_hit:     bool     = False
     tp2_hit:     bool     = False
     trail_price: float    = 0.0   # peak price tracked for trailing stop
     opened_at:   datetime = field(default_factory=datetime.utcnow)

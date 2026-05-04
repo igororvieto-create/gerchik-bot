@@ -22,12 +22,19 @@ def init_db():
             qty         REAL,
             pnl         REAL,
             pattern     TEXT,
+            tf          TEXT,
             score       INTEGER,
             rr          REAL,
             opened_at   TEXT,
             closed_at   TEXT,
             result      TEXT
         )""")
+        # Add tf column to existing DBs that were created without it
+        try:
+            conn.execute("ALTER TABLE trades ADD COLUMN tf TEXT DEFAULT ''")
+            conn.commit()
+        except Exception:
+            pass  # column already exists
         conn.execute("""CREATE TABLE IF NOT EXISTS kv (
             key   TEXT PRIMARY KEY,
             value TEXT
@@ -41,11 +48,12 @@ def save_trade(pos, exit_price: float, pnl: float, result: str):
             conn.execute(
                 """INSERT INTO trades
                    (symbol,side,entry,exit_price,sl,tp3,qty,pnl,
-                    pattern,score,rr,opened_at,closed_at,result)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    pattern,tf,score,rr,opened_at,closed_at,result)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (pos.symbol, pos.side, pos.entry, exit_price,
                  pos.sl, pos.tp3, pos.qty, round(pnl, 4),
-                 pos.pattern, pos.score, pos.rr,
+                 pos.pattern, getattr(pos, "tf", ""),
+                 pos.score, pos.rr,
                  pos.opened_at.isoformat(),
                  datetime.utcnow().isoformat(),
                  result),
@@ -174,7 +182,7 @@ def save_open_position(pos) -> None:
         "qty": pos.qty, "risk_usdt": pos.risk_usdt,
         "order_id": pos.order_id, "sl_order_id": pos.sl_order_id,
         "tp_order_id": pos.tp_order_id,
-        "be_moved": pos.be_moved, "tp2_hit": pos.tp2_hit,
+        "be_moved": pos.be_moved, "tp1_hit": pos.tp1_hit, "tp2_hit": pos.tp2_hit,
         "trail_price": pos.trail_price,
         "opened_at": pos.opened_at.isoformat(),
         "pattern": pos.pattern, "tf": pos.tf,

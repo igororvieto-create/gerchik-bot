@@ -21,8 +21,14 @@ class BingXClient:
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def _sess(self):
-        if not self._session or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
+        if self._session and not self._session.closed:
+            return self._session
+        if self._session:
+            try:
+                await self._session.close()
+            except Exception:
+                pass
+        self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
         return self._session
 
     def _sign(self, params):
@@ -82,6 +88,7 @@ class BingXClient:
         if isinstance(tickers, dict):
             tickers = [tickers]
 
+        MIN_VOLUME_USDT = 5_000_000  # skip illiquid coins (< $5M/day)
         scored = []
         for t in tickers:
             sym = t.get("symbol", "")
@@ -89,6 +96,8 @@ class BingXClient:
                 continue
             try:
                 volume = float(t.get("quoteVolume", 0))
+                if volume < MIN_VOLUME_USDT:
+                    continue
                 change = abs(float(t.get("priceChangePercent", 0)))
                 # Momentum score: high volume + moving (0.5–12% in 24h)
                 # Exclude flat (<0.5%) and overextended (>15%) coins

@@ -10,7 +10,7 @@ from core.config import cfg
 from core.state import Position, state
 from core import db
 from exchange.bingx import BingXClient
-from strategy.strategy.gerchik import Signal, analyze, analyze_breakout, parse_klines, reset_stats, get_stats, nearest_weekly_levels
+from strategy.strategy.gerchik import Signal, analyze, analyze_breakout, analyze_range_breakout, parse_klines, reset_stats, get_stats, nearest_weekly_levels
 
 log = logging.getLogger("scanner")
 
@@ -245,8 +245,12 @@ class Scanner:
             if funding > 0.1 or funding < -0.1:
                 log.warning(f"⚠️ Экстремальный фандинг {symbol}: {funding:.4f}%")
 
-            # Try pullback signal first, then breakout
+            # 1. Pullback to S/R (standard Gerchik entry)
             sig = analyze(symbol, d1, h4, h1, funding, cfg)
+            # 2. Accumulation range breakout (Gerchik's core concept)
+            if sig is None:
+                sig = analyze_range_breakout(symbol, d1, h4, h1, funding, cfg)
+            # 3. Momentum breakout through a single level
             if sig is None:
                 sig = analyze_breakout(symbol, d1, h4, h1, funding, cfg)
             return sig

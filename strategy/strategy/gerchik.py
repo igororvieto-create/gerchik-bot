@@ -483,6 +483,203 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     )
 
 
+def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg):
+    """
+    Accumulation range breakout — Gerchik's core concept.
+
+    Smart money accumulates in a tight H4 range (3+ bounces off boundary).
+    When the institutional limit order is absorbed, price breaks out with
+    strong volume.  TP3 is set at 1.5× the normal distance because
+    these moves tend to travel much further than regular setups.
+    """
+    if not d1 or not h4 or not h1:
+        return None
+    n4 = len(h4["close"])
+    if len(d1["close"]) < cfg.TREND_EMA_D1 or n4 < 50 or len(h1["close"]) < 40:
+        return None
+
+    # ── D1 trend ──
+    ema200   = ema(d1["close"], cfg.TREND_EMA_D1)
+    d1_up    = d1["close"][-1] > ema200[-1]
+    trend    = "LONG" if d1_up else "SHORT"
+    d1_slope = trend_slope(d1["close"], 5)
+
+    price = h1["close"][-1]
+
+    # ── Consolidation range: H4[-47 : -3] — exclude breakout candles ──
+    rng_end   = n4 - 3
+    rng_start = max(0, n4 - 47)
+    rng_len   = rng_end - rng_start
+    if rng_len < 15:
+        return None
+
+    r_highs = h4["high"][rng_start:rng_end]
+    r_lows  = h4["low"][rng_start:rng_end]
+    r_high  = float(np.max(r_highs))
+    r_low   = float(np.min(r_lows))
+
+    if r_low <= 0:
+        return None
+    width_pct = (r_high - r_low) / r_low * 100
+
+    if width_pct > 9.0:
+        _reject("накопление: диапазон широкий")
+        return None
+    if width_pct < 1.5:
+        return None
+
+    # ≥65% of range candles must stay inside — confirms real consolidation
+    in_range = sum(
+        1 for h, l in zip(r_highs, r_lows)
+        if h <= r_high * 1.01 and l >= r_low * 0.99
+    )
+    if in_range < rng_len * 0.65:
+        _reject("накопление: не настоящий диапазон")
+        return None
+
+    # ── H4 breakout candle (last complete = -2) ──
+    h4_o    = h4["open"][-2]
+    h4_c    = h4["close"][-2]
+    h4_h_c  = h4["high"][-2]
+    h4_l_c  = h4["low"][-2]
+    h4_body = abs(h4_c - h4_o)
+    h4_full = h4_h_c - h4_l_c
+    if h4_full <= 0 or h4_body / h4_full < 0.50:
+        _reject("накопление: слабая свеча пробоя")
+        return None
+    if trend == "LONG"  and h4_c <= h4_o:
+        _reject("накопление: медвежья свеча в LONG")
+        return None
+    if trend == "SHORT" and h4_c >= h4_o:
+        _reject("накопление: бычья свеча в SHORT")
+        return None
+
+    boundary = r_high if trend == "LONG" else r_low
+    if trend == "LONG"  and h4_c < boundary:
+        _reject("накопление: свеча не пробила верхнюю границу")
+        return None
+    if trend == "SHORT" and h4_c > boundary:
+        _reject("накопление: свеча не пробила нижнюю границу")
+        return None
+
+    # H1 price must still be outside the range (not reversed)
+    if trend == "LONG"  and price < boundary * 0.995:
+        _reject("накопление: цена вернулась в диапазон")
+        return None
+    if trend == "SHORT" and price > boundary * 1.005:
+        _reject("накопление: цена вернулась в диапазон")
+        return None
+
+    # ── Count touches of the boundary (accumulation evidence) ──
+    tol_abs = r_high * 0.005
+    if trend == "LONG":
+        touches = sum(1 for h in r_highs if h >= r_high - tol_abs)
+    else:
+        touches = sum(1 for l in r_lows  if l <= r_low  + tol_abs)
+    if touches < 3:
+        _reject("накопление: мало касаний границы (<3)")
+        return None
+
+    # ── Volume on H4 breakout candle ──
+    h4_vm   = vol_ma(h4["volume"], cfg.VOLUME_MA_PERIOD)
+    h4_vrat = h4["volume"][-2] / h4_vm[-3] if h4_vm[-3] > 0 else 0
+    if h4_vrat < 2.0:
+        _reject("накопление: объём H4 < 2.0x")
+        return None
+
+    # ── ADX ──
+    h4_adx_v = adx(h4["high"], h4["low"], h4["close"], 14)
+    cur_adx  = h4_adx_v[-1]
+    adx_rising = len(h4_adx_v) >= 8 and cur_adx > h4_adx_v[-8]
+
+    # ── RSI ──
+    h1_rsi_v = rsi(h1["close"], 14)
+    cur_rsi  = h1_rsi_v[-1]
+    if trend == "LONG"  and cur_rsi > 80:
+        _reject("накопление: RSI > 80")
+        return None
+    if trend == "SHORT" and cur_rsi < 20:
+        _reject("накопление: RSI < 20")
+        return None
+
+    # ── Funding ──
+    if trend == "LONG"  and funding > cfg.FUNDING_MAX_LONG:
+        return None
+    if trend == "SHORT" and funding < cfg.FUNDING_MAX_SHORT:
+        return None
+
+    # ── SL: just inside the broken range boundary ──
+    h1_atr_v = atr(h1["high"], h1["low"], h1["close"], 14)
+    cur_atr  = h1_atr_v[-1]
+    buf = price * cfg.SL_BUFFER_PCT / 100
+    if trend == "LONG":
+        sl = boundary - cur_atr * 0.7 - buf
+    else:
+        sl = boundary + cur_atr * 0.7 + buf
+
+    sld = abs(price - sl)
+    if sld <= 0 or sld / price > 0.07:
+        _reject("накопление: SL слишком широкий")
+        return None
+
+    def _px(p):
+        if p >= 10:   return round(p, 2)
+        if p >= 1:    return round(p, 4)
+        if p >= 0.01: return round(p, 5)
+        return round(p, 6)
+
+    sl      = _px(sl)
+    tp1     = _px(price + sld * cfg.TP1_RR if trend == "LONG" else price - sld * cfg.TP1_RR)
+    tp2     = _px(price + sld * cfg.TP2_RR if trend == "LONG" else price - sld * cfg.TP2_RR)
+    tp3_rr  = cfg.TP3_RR * 1.5   # accumulation breakouts go further
+    tp3     = _px(price + sld * tp3_rr if trend == "LONG" else price - sld * tp3_rr)
+    rr      = cfg.TP2_RR
+
+    # ── Score ──
+    score = 60
+    if touches >= 6:     score += 15
+    elif touches >= 4:   score += 10
+    else:                score += 5   # 3 touches
+    if h4_vrat >= 4.0:   score += 15
+    elif h4_vrat >= 3.0: score += 10
+    elif h4_vrat >= 2.5: score += 6
+    else:                score += 3   # 2.0–2.5×
+    if width_pct < 4.0:  score += 8
+    elif width_pct < 6.0: score += 4
+    if adx_rising:       score += 7
+    if cur_adx >= 25:    score += 5
+    elif cur_adx >= 20:  score += 2
+    if (trend == "LONG"  and d1_slope > 0.1) or \
+       (trend == "SHORT" and d1_slope < -0.1):
+        score += 5
+    score = min(score, 100)
+
+    if score < cfg.MIN_SCORE:
+        _reject("накопление: score ниже MIN_SCORE")
+        return None
+
+    reason = (
+        f"🎯 <b>{symbol}</b> | {trend} НАКОПЛЕНИЕ\n"
+        f"📦 Диапазон H4: <code>{r_low:.4f}</code> — <code>{r_high:.4f}</code> "
+        f"({width_pct:.1f}%, {rng_len} свечей)\n"
+        f"🔄 Касаний уровня: <b>{touches}</b> | Объём пробоя: <code>{h4_vrat:.2f}×</code>\n"
+        f"📊 ADX: <code>{cur_adx:.1f}</code>"
+        + (" ↑" if adx_rising else "")
+        + f" | RSI: <code>{cur_rsi:.0f}</code>\n"
+        f"📈 D1: {'🟢' if d1_up else '🔴'} slope <code>{d1_slope:+.2f}%</code>\n"
+        f"🟡 Вход: <code>{price:.4f}</code> | 🔴 SL: <code>{sl:.4f}</code>\n"
+        f"🟢 TP2: <code>{tp2:.4f}</code> | TP3 (×{tp3_rr:.1f}R): <code>{tp3:.4f}</code>\n"
+        f"⚡ R/R: 1:{rr:.1f} | ⭐ Score: {score}/100"
+    )
+    return Signal(
+        symbol=symbol, side=trend,
+        entry=price, sl=sl,
+        tp1=tp1, tp2=tp2, tp3=tp3,
+        rr=rr, pattern=f"Накопление {width_pct:.1f}% ({touches} кас.)", tf="H4",
+        score=score, reason=reason,
+    )
+
+
 def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
     """
     Breakout signal: price closes through a key S/R level with conviction.

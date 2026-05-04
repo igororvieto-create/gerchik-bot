@@ -10,7 +10,7 @@ from core.config import cfg
 from core.state import Position, state
 from core import db
 from exchange.bingx import BingXClient
-from strategy.strategy.gerchik import Signal, analyze, analyze_breakout, parse_klines, reset_stats, get_stats
+from strategy.strategy.gerchik import Signal, analyze, analyze_breakout, parse_klines, reset_stats, get_stats, nearest_weekly_levels
 
 log = logging.getLogger("scanner")
 
@@ -903,3 +903,35 @@ class Scanner:
             f"Прибыльных: {s['wins']}  |  Убыточных: {s['total'] - s['wins']}\n"
             f"PnL за 30 дней: <code>{sign}{s['pnl']:.2f} USDT</code>"
         )
+
+    async def btc_weekly_alert(self):
+        """
+        Fetch BTC W1 data and report the nearest key weekly levels.
+        Runs every hour — gives Gerchik-style level awareness.
+        """
+        try:
+            w1_raw = parse_klines(await self.ex.get_klines("BTC-USDT", "1w", limit=60))
+            h1_raw = parse_klines(await self.ex.get_klines("BTC-USDT", cfg.SIGNAL_TF, limit=5))
+            if not w1_raw or not h1_raw:
+                return
+            price  = float(h1_raw["close"][-1])
+            lvls   = nearest_weekly_levels(price, w1_raw, count=3)
+            sups   = lvls["support"]
+            ress   = lvls["resistance"]
+            if not sups and not ress:
+                return
+
+            sup_lines = "\n".join(
+                f"  🟢 <code>{l:,.0f}</code>  (-{abs(price-l)/price*100:.1f}%)" for l in sups
+            )
+            res_lines = "\n".join(
+                f"  🔴 <code>{l:,.0f}</code>  (+{abs(l-price)/price*100:.1f}%)" for l in ress
+            )
+            await self._notify(
+                f"📐 <b>BTC недельные уровни</b>\n"
+                f"Текущая цена: <code>{price:,.0f}</code>\n\n"
+                f"Сопротивления (цель вверх):\n{res_lines or '  —'}\n\n"
+                f"Поддержки (цель вниз):\n{sup_lines or '  —'}"
+            )
+        except Exception as e:
+            log.warning(f"btc_weekly_alert: {e}")

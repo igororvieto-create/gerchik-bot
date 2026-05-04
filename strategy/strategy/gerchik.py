@@ -131,6 +131,28 @@ def find_levels(highs, lows, lookback=80):
             sup.append(float(rl[i]))
     return {"resistance": _merge_levels(res), "support": _merge_levels(sup)}
 
+
+def find_weekly_levels(w1):
+    """
+    Find key weekly levels from W1 candles — the 'Gerchik levels'.
+    These are the major pivots visible on weekly chart, same as what
+    Gerchik uses to predict significant price targets.
+    """
+    if not w1 or len(w1["close"]) < 10:
+        return {"resistance": [], "support": []}
+    return find_levels(w1["high"], w1["low"], lookback=min(52, len(w1["high"])))
+
+
+def nearest_weekly_levels(price, w1, count=3):
+    """
+    Return the nearest weekly support and resistance levels above/below price.
+    Used for target projection — 'where will price go next'.
+    """
+    lvls = find_weekly_levels(w1)
+    supports    = sorted([l for l in lvls["support"]    if l < price], reverse=True)[:count]
+    resistances = sorted([l for l in lvls["resistance"] if l > price])[:count]
+    return {"support": supports, "resistance": resistances}
+
 def near_level(price, levels, tol=0.8):
     if price <= 0:
         return False, 0.0

@@ -231,9 +231,10 @@ class Scanner:
             if btc_bias == "UP" and sig.side == "SHORT":
                 log.info(f"BTC растёт ({btc_bias}) — пропуск SHORT {sig.symbol}")
                 continue
-            # Correlation filter: max 2 bot-opened positions in same direction
-            same_dir = sum(1 for p in state.positions.values() if p.side == sig.side and p.sl > 0)
-            if same_dir >= 2:
+            # Correlation filter: max 1 bot-opened position in same direction
+            # Count ALL positions (including restored ones without SL)
+            same_dir = sum(1 for p in state.positions.values() if p.side == sig.side)
+            if same_dir >= 1:
                 log.info(f"Корреляция: пропуск {sig.symbol} {sig.side} (уже {same_dir} в том же направлении)")
                 continue
             await self._handle(sig)

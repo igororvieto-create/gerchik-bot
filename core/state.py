@@ -62,9 +62,7 @@ class BotState:
         self.reset_day()
         if self.is_paused:
             return False, "бот на паузе"
-        # Count only bot-opened positions (sl>0); manual synced positions don't block trading
-        bot_positions = sum(1 for p in self.positions.values() if p.sl > 0)
-        if bot_positions >= max_positions:
+        if len(self.positions) >= max_positions:
             return False, f"макс. позиций {max_positions}"
         if self.day.trades >= max_daily_trades:
             return False, f"макс. сделок {max_daily_trades}"

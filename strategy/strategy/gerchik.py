@@ -562,19 +562,25 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
         _reject("ложный пробой: не найден")
         return None
 
-    # Current price must still be on the correct side of the level (not deep)
-    dist_pct = abs(price - fb_level) / fb_level * 100
+    # Current price must still be on the correct side of the level
     if trend == "LONG":
-        if price < fb_level * 0.993:
+        # Price must be at or above support (allow 0.3% tolerance for retest)
+        if price < fb_level * 0.997:
             _reject("ложный пробой: цена ушла ниже уровня")
             return None
+        # Don't enter if price bounced more than 3% away (bad R/R)
+        if price > fb_level * 1.03:
+            _reject("ложный пробой: цена далеко от уровня")
+            return None
     else:
-        if price > fb_level * 1.007:
+        # Price must be at or below resistance (allow 0.3% tolerance for retest)
+        if price > fb_level * 1.003:
             _reject("ложный пробой: цена ушла выше уровня")
             return None
-    if dist_pct > 2.5:
-        _reject("ложный пробой: цена далеко от уровня")
-        return None
+        # Don't enter if price dropped more than 3% away (bad R/R)
+        if price < fb_level * 0.97:
+            _reject("ложный пробой: цена далеко от уровня")
+            return None
 
     # ── RSI ──
     h1_rsi  = rsi(h1["close"], 14)

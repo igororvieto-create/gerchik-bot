@@ -118,15 +118,21 @@ async def main():
                 log.info(f"Восстановлено {restored} позиций из БД с полными данными (SL/TP/BE)")
 
             # Any live exchange position not in DB → add with sl=0 (manual / unknown)
+            # Try multiple field names for entry price (BingX API inconsistency)
             for sym, lp in live_map.items():
                 if sym not in state.positions:
+                    raw_entry = (
+                        float(lp.get("entryPrice") or 0) or
+                        float(lp.get("avgPrice")   or 0) or
+                        float(lp.get("markPrice")  or 0)
+                    )
                     state.positions[sym] = Position(
                         symbol=sym, side=lp.get("positionSide", "LONG"),
-                        entry=float(lp.get("entryPrice", 0)), sl=0.0,
+                        entry=raw_entry, sl=0.0,
                         tp1=0.0, tp2=0.0, tp3=0.0,
                         qty=abs(float(lp.get("positionAmt", 0))), risk_usdt=0.0,
                     )
-                    log.info(f"Внешняя позиция {sym} добавлена без SL/TP")
+                    log.info(f"Внешняя позиция {sym} добавлена без SL/TP (вход={raw_entry})")
 
             await bot.send_message(
                 cfg.TELEGRAM_CHAT_ID,

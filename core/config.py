@@ -58,6 +58,6 @@ class Config:
     BTC_FILTER:           bool  = os.getenv("BTC_FILTER", "true").strip().lower() == "true"
     BTC_FILTER_PCT:       float = float(os.getenv("BTC_FILTER_PCT", "2.0").strip())
     # ADX minimum — below this value market is ranging, skip signal
-    ADX_MIN:              float = float(os.getenv("ADX_MIN", "22.0").strip())
+    ADX_MIN:              float = float(os.getenv("ADX_MIN", "25.0").strip())
 
 cfg = Config()

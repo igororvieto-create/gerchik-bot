@@ -276,21 +276,29 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     trend   = "LONG" if d1_up else "SHORT"
     d1_slope= trend_slope(d1["close"], 5)
 
-    # ── H4 filter ──
+    # D1 slope must confirm trend direction — price above EMA200 but falling = no LONG
+    if trend == "LONG"  and d1_slope < -0.1:
+        _reject("D1 разворот вниз")
+        return None
+    if trend == "SHORT" and d1_slope > 0.1:
+        _reject("D1 разворот вверх")
+        return None
+
+    # ── H4 filter — must be aligned with trend, not just "near" ──
     ema50   = ema(h4["close"], cfg.TREND_EMA_H4)
     h4_up   = h4["close"][-1] > ema50[-1]
     h4_dn   = h4["close"][-1] < ema50[-1]
     h4_aligned = (trend=="LONG" and h4_up) or (trend=="SHORT" and h4_dn)
-    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 2.0
+    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 1.0
     if not h4_aligned and not h4_near:
         _reject("H4 против тренда")
         return None
     if h4_near and not h4_aligned:
         h4_slope = (ema50[-1] - ema50[-5]) / ema50[-5] * 100 if ema50[-5] > 0 else 0
-        if trend == "LONG"  and h4_slope < -0.1:
+        if trend == "LONG"  and h4_slope < 0:
             _reject("H4 против тренда")
             return None
-        if trend == "SHORT" and h4_slope > 0.1:
+        if trend == "SHORT" and h4_slope > 0:
             _reject("H4 против тренда")
             return None
 
@@ -542,15 +550,15 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
 
         for lvl in levels:
             if trend == "LONG":
-                # Wick pierced below support but candle closed above
-                if l_ < lvl * 0.998 and c > lvl:
+                # Wick pierced below support (min 0.5%) but candle closed above
+                if l_ < lvl * 0.995 and c > lvl:
                     fb_candle = {"h": h_, "l": l_, "c": c}
                     fb_level  = lvl
                     fb_vrat   = v_rat
                     break
             else:
-                # Wick pierced above resistance but candle closed below
-                if h_ > lvl * 1.002 and c < lvl:
+                # Wick pierced above resistance (min 0.5%) but candle closed below
+                if h_ > lvl * 1.005 and c < lvl:
                     fb_candle = {"h": h_, "l": l_, "c": c}
                     fb_level  = lvl
                     fb_vrat   = v_rat

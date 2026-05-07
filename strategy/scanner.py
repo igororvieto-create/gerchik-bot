@@ -10,7 +10,7 @@ from core.config import cfg
 from core.state import Position, state
 from core import db
 from exchange.bingx import BingXClient
-from strategy.strategy.gerchik import Signal, analyze, analyze_breakout, analyze_range_breakout, parse_klines, reset_stats, get_stats, nearest_weekly_levels
+from strategy.strategy.gerchik import Signal, analyze, analyze_breakout, analyze_range_breakout, parse_klines, reset_stats, get_stats, nearest_weekly_levels, near_level
 
 log = logging.getLogger("scanner")
 
@@ -37,7 +37,7 @@ class Scanner:
         self.bot         = bot
         self._scan_count = 0
         self._sl_cooldown: dict = {}   # symbol → datetime of last SL hit
-        self._stale_alerted: set = {}  # symbols already alerted as stale
+        self._stale_alerted: set = set()  # symbols already alerted as stale
         _global_scanner = self
         self._restore_cooldowns()
 
@@ -239,6 +239,7 @@ class Scanner:
             d1      = parse_klines(await self.ex.get_klines(symbol, cfg.TREND_TF,  limit=250))
             h4      = parse_klines(await self.ex.get_klines(symbol, cfg.H4_TF,     limit=150))
             h1      = parse_klines(await self.ex.get_klines(symbol, cfg.SIGNAL_TF, limit=100))
+            w1      = parse_klines(await self.ex.get_klines(symbol, "1w",          limit=60))
             funding = await self.ex.get_funding_rate(symbol)
 
             # Funding rate extreme alert
@@ -253,6 +254,19 @@ class Scanner:
             # 3. Momentum breakout through a single level
             if sig is None:
                 sig = analyze_breakout(symbol, d1, h4, h1, funding, cfg)
+
+            # Weekly level bonus: +8 score if signal entry is near a key W1 level
+            if sig is not None and w1 and len(w1.get("close", [])) >= 10:
+                try:
+                    w1_lvls = nearest_weekly_levels(sig.entry, w1, count=5)
+                    all_w1  = w1_lvls["support"] + w1_lvls["resistance"]
+                    is_near_w1, _ = near_level(sig.entry, all_w1, tol=1.5)
+                    if is_near_w1:
+                        sig.score = min(100, sig.score + 8)
+                        log.info(f"{symbol}: +8 W1 уровень")
+                except Exception as we:
+                    log.debug(f"w1 bonus {symbol}: {we}")
+
             return sig
         except Exception as e:
             log.error(f"analyze {symbol}: {e}")

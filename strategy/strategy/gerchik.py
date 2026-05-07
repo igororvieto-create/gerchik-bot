@@ -270,6 +270,15 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     trend   = "LONG" if d1_up else "SHORT"
     d1_slope= trend_slope(d1["close"], 5)
 
+    # Mandatory slope filter: reject if D1 is strongly moving against trend direction
+    # Prevents LONG entries during D1 corrections even if price is above EMA200
+    if trend == "LONG"  and d1_slope < -0.2:
+        _reject("D1 разворот вниз")
+        return None
+    if trend == "SHORT" and d1_slope > 0.2:
+        _reject("D1 разворот вверх")
+        return None
+
     # ── H4 filter ──
     ema50   = ema(h4["close"], cfg.TREND_EMA_H4)
     h4_up   = h4["close"][-1] > ema50[-1]

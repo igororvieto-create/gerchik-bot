@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import json
 import logging
@@ -5,7 +6,24 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 log = logging.getLogger("db")
-DB_PATH = Path("data/gerchik.db")
+DB_PATH = Path(os.getenv("DB_PATH", "data/gerchik.db"))
+_BACKUP_PATH = DB_PATH.parent / "positions_backup.json"
+
+
+def _update_backup():
+    """Write current open positions from DB to JSON backup file (DB-only, no fallback)."""
+    try:
+        positions = []
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.execute("SELECT value FROM kv WHERE key LIKE 'pos:%'")
+            for (val,) in cur.fetchall():
+                try:
+                    positions.append(json.loads(val))
+                except Exception:
+                    pass
+        _BACKUP_PATH.write_text(json.dumps(positions, ensure_ascii=False, indent=2))
+    except Exception as e:
+        log.warning(f"_update_backup: {e}")
 
 
 def init_db():
@@ -189,6 +207,7 @@ def save_open_position(pos) -> None:
         "rr": pos.rr, "score": pos.score,
     }
     save_kv(f"pos:{pos.symbol}", json.dumps(data))
+    _update_backup()
 
 
 def delete_open_position(symbol: str) -> None:
@@ -197,6 +216,7 @@ def delete_open_position(symbol: str) -> None:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute("DELETE FROM kv WHERE key=?", (f"pos:{symbol}",))
             conn.commit()
+        _update_backup()
     except Exception as e:
         log.error(f"delete_open_position {symbol}: {e}")
 
@@ -214,4 +234,14 @@ def load_open_positions() -> list:
                     pass
     except Exception as e:
         log.error(f"load_open_positions: {e}")
+
+    # Fall back to JSON backup if DB has no positions (e.g. fresh DB after redeploy)
+    if not result and _BACKUP_PATH.exists():
+        try:
+            backup = json.loads(_BACKUP_PATH.read_text())
+            if backup:
+                log.warning(f"DB had no positions — restoring {len(backup)} from JSON backup")
+                result = backup
+        except Exception as e:
+            log.error(f"load_open_positions backup: {e}")
     return result

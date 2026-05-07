@@ -41,7 +41,7 @@ class Scanner:
         self.bot         = bot
         self._scan_count = 0
         self._sl_cooldown: dict = {}   # symbol → datetime of last SL hit
-        self._stale_alerted: set = {}  # symbols already alerted as stale
+        self._stale_alerted: set = set()  # symbols already alerted as stale
         _global_scanner = self
         self._restore_cooldowns()
 
@@ -263,15 +263,18 @@ class Scanner:
             if sig is None:
                 sig = analyze_breakout(symbol, d1, h4, h1, funding, cfg)
 
-            # Weekly level bonus: +8 score if signal is near a W1 key level
+            # Weekly level bonus: +8 score if signal entry is near a key W1 level
             if sig is not None and w1 and len(w1.get("close", [])) >= 10:
-                w1_lvls = nearest_weekly_levels(sig.entry, w1, count=5)
-                all_w1 = w1_lvls["support"] + w1_lvls["resistance"]
-                is_near_w1, w1_lvl = near_level(sig.entry, all_w1, tol=1.5)
-                if is_near_w1:
-                    sig.score = min(100, sig.score + 8)
-                    sig.reason += f"\n📅 <b>Недельный уровень</b> <code>{w1_lvl:.4f}</code> +8"
-                    log.info(f"{symbol}: вблизи W1 уровня {w1_lvl:.4f} → score +8")
+                try:
+                    w1_lvls = nearest_weekly_levels(sig.entry, w1, count=5)
+                    all_w1  = w1_lvls["support"] + w1_lvls["resistance"]
+                    is_near_w1, w1_lvl = near_level(sig.entry, all_w1, tol=1.5)
+                    if is_near_w1:
+                        sig.score = min(100, sig.score + 8)
+                        sig.reason += f"\n📅 <b>Недельный уровень</b> <code>{w1_lvl:.4f}</code> +8"
+                        log.info(f"{symbol}: +8 W1 уровень {w1_lvl:.4f}")
+                except Exception as we:
+                    log.debug(f"w1 bonus {symbol}: {we}")
 
             return sig
         except Exception as e:

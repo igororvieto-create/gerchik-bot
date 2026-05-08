@@ -58,6 +58,17 @@ class BotState:
             return True
         return False
 
+    def unrealized_pnl(self) -> float:
+        """Estimate unrealized PnL from open positions using last known prices."""
+        total = 0.0
+        for pos in self.positions.values():
+            if pos.sl > 0 and pos.entry > 0 and pos.sl > 0:
+                # Conservative estimate: assume worst case = SL hit
+                worst = (pos.sl - pos.entry) * pos.qty if pos.side == "LONG" \
+                        else (pos.entry - pos.sl) * pos.qty
+                total += worst
+        return total
+
     def can_trade(self, max_daily_loss, max_positions, max_daily_trades):
         self.reset_day()
         if self.is_paused:
@@ -67,7 +78,9 @@ class BotState:
         if self.day.trades >= max_daily_trades:
             return False, f"макс. сделок {max_daily_trades}"
         if self.current_balance > 0:
-            loss_pct = abs(min(self.day.pnl_usdt, 0)) / self.current_balance * 100
+            # Include worst-case unrealized loss (positions at SL) in daily loss check
+            total_loss = self.day.pnl_usdt + min(self.unrealized_pnl(), 0)
+            loss_pct = abs(min(total_loss, 0)) / self.current_balance * 100
             if loss_pct >= max_daily_loss:
                 return False, f"дневной лимит {max_daily_loss}%"
         return True, "ok"

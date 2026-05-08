@@ -10,9 +10,9 @@ class Config:
     BINGX_SECRET:     str   = os.getenv("BINGX_SECRET", "").strip()
     MODE:             str   = "auto"
     RISK_PER_TRADE:   float = float(os.getenv("RISK_PER_TRADE", "1.0").strip())
-    MAX_DAILY_LOSS:   float = float(os.getenv("MAX_DAILY_LOSS", "3.0").strip())
-    MAX_POSITIONS:    int   = int(os.getenv("MAX_POSITIONS", "3").strip())
-    MAX_DAILY_TRADES: int   = int(os.getenv("MAX_DAILY_TRADES", "10").strip())
+    MAX_DAILY_LOSS:   float = float(os.getenv("MAX_DAILY_LOSS", "5.0").strip())
+    MAX_POSITIONS:    int   = int(os.getenv("MAX_POSITIONS", "1").strip())
+    MAX_DAILY_TRADES: int   = int(os.getenv("MAX_DAILY_TRADES", "5").strip())
     LEVERAGE:         int   = int(os.getenv("LEVERAGE", "5").strip())
     MIN_RR:           float = float(os.getenv("MIN_RR", "2.0").strip())
     SL_BUFFER_PCT:    float = float(os.getenv("SL_BUFFER_PCT", "0.15").strip())

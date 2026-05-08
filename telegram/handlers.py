@@ -135,8 +135,8 @@ async def cmd_status(msg: Message):
 
         if hasattr(pos, "entry"):
             age_h = int((datetime.utcnow() - pos.opened_at).total_seconds() / 3600)
-            sl_dist = f"{abs(cur - pos.sl) / pos.entry * 100:.1f}%" if cur > 0 and pos.sl > 0 else "?"
-            tp_dist = f"{abs(pos.tp2 - cur) / pos.entry * 100:.1f}%" if cur > 0 and pos.tp2 > 0 else "?"
+            sl_dist = f"{abs(cur - pos.sl) / pos.entry * 100:.1f}%" if cur > 0 and pos.sl > 0 and pos.entry > 0 else "?"
+            tp_dist = f"{abs(pos.tp2 - cur) / pos.entry * 100:.1f}%" if cur > 0 and pos.tp2 > 0 and pos.entry > 0 else "?"
             be_tag  = " ✅BE" if pos.be_moved else ""
             t1_tag  = " 🎯TP1" if pos.tp1_hit else ""
             text += (

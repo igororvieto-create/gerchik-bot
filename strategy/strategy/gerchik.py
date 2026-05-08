@@ -623,10 +623,6 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
         _reject("ложный пробой: RSI перепродан")
         return None
 
-    # ── ADX ──
-    h4_adx  = adx(h4["high"], h4["low"], h4["close"], 14)
-    cur_adx = h4_adx[-1]
-
     # ── Funding ──
     if trend == "LONG"  and funding > cfg.FUNDING_MAX_LONG:
         return None

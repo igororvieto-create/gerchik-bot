@@ -62,7 +62,7 @@ class BotState:
         """Estimate unrealized PnL from open positions using last known prices."""
         total = 0.0
         for pos in self.positions.values():
-            if pos.sl > 0 and pos.entry > 0 and pos.sl > 0:
+            if pos.sl > 0 and pos.entry > 0 and pos.qty > 0:
                 # Conservative estimate: assume worst case = SL hit
                 worst = (pos.sl - pos.entry) * pos.qty if pos.side == "LONG" \
                         else (pos.entry - pos.sl) * pos.qty

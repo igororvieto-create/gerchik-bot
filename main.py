@@ -103,11 +103,12 @@ async def main():
                         sl_order_id=d.get("sl_order_id", ""),
                         tp_order_id=d.get("tp_order_id", ""),
                         be_moved=bool(d.get("be_moved", False)),
+                        tp1_hit=bool(d.get("tp1_hit", False)),
                         tp2_hit=bool(d.get("tp2_hit", False)),
                         trail_price=float(d.get("trail_price", 0.0)),
                         opened_at=datetime.fromisoformat(
-                            d.get("opened_at", datetime.utcnow().isoformat())
-                        ),
+                            d.get("opened_at") or datetime.utcnow().isoformat()
+                        ) if d.get("opened_at") else datetime.utcnow(),
                         pattern=d.get("pattern", ""),
                         tf=d.get("tf", "H1+H4"),
                         rr=float(d.get("rr", 0.0)),

@@ -518,6 +518,29 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
     trend    = "LONG" if d1_up else "SHORT"
     d1_slope = trend_slope(d1["close"], 5)
 
+    # Mandatory D1 slope filter — same as analyze()
+    if trend == "LONG"  and d1_slope < -0.1:
+        _reject("ложный пробой: D1 разворот вниз")
+        return None
+    if trend == "SHORT" and d1_slope > 0.1:
+        _reject("ложный пробой: D1 разворот вверх")
+        return None
+
+    # ── H4 filter — must be aligned with D1 trend ──
+    ema50_h4  = ema(h4["close"], cfg.TREND_EMA_H4)
+    h4_up     = h4["close"][-1] > ema50_h4[-1]
+    h4_aligned = (trend == "LONG" and h4_up) or (trend == "SHORT" and not h4_up)
+    if not h4_aligned:
+        _reject("ложный пробой: H4 против тренда")
+        return None
+
+    # ── ADX — must be trending ──
+    h4_adx_v = adx(h4["high"], h4["low"], h4["close"], 14)
+    cur_adx  = h4_adx_v[-1]
+    if cur_adx < cfg.ADX_MIN:
+        _reject("ложный пробой: ADX низкий (боковик)")
+        return None
+
     price = h1["close"][-1]
 
     # ── S/R levels ──
@@ -636,6 +659,11 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
 
     touches = level_touches(fb_level, h4["high"][-120:], h4["low"][-120:])
 
+    # Volume minimum for false breakout: must have at least 1.5x to even consider
+    if fb_vrat < 1.5:
+        _reject("ложный пробой: объём < 1.5x")
+        return None
+
     # ── Score (base 58 — strong setup) ──
     score = 58
     if fb_vrat >= 2.5:   score += 12
@@ -645,7 +673,7 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
     elif touches <= 3:   score += 6
     elif touches <= 4:   score += 3
     if cur_adx >= 30:    score += 8
-    elif cur_adx >= 22:  score += 4
+    elif cur_adx >= 25:  score += 4
     if (trend == "LONG"  and d1_slope > 0.1) or \
        (trend == "SHORT" and d1_slope < -0.1):
         score += 5

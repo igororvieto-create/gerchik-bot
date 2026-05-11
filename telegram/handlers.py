@@ -819,6 +819,10 @@ async def handle_misc(msg: Message):
         sym = text.replace("/skip_", "").replace("_", "-").upper()
         state.pending.pop(sym, None)
         await msg.answer(f"⏭ Пропущен: {sym}")
+        return
+
+    if text.startswith("/close_"):
+        await cmd_close_symbol(msg)
 
 
 # ------------------------------------------------------------------ register

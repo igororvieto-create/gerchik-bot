@@ -200,13 +200,12 @@ class Scanner:
                 )
             return
 
-        # Take only top 3 by score
+        # Take only top N by score
         qualified = qualified[:cfg.MAX_POSITIONS]
-        top = "\n".join(f"• {s.symbol} {s.side} ⭐{s.score}" for s in qualified)
-        await self._notify(f"🔍 Найдено <b>{len(qualified)}</b> сигналов (топ по score):\n{top}")
 
-        # BTC trend filter: fetch BTC once before handling signals
-        btc_bias = "NEUTRAL"
+        # BTC trend filter: fetch BTC BEFORE notification to show accurate signal count
+        btc_bias   = "NEUTRAL"
+        btc_change = 0.0
         if cfg.BTC_FILTER:
             try:
                 btc_h1 = parse_klines(await self.ex.get_klines("BTC-USDT", cfg.SIGNAL_TF, limit=10))
@@ -220,19 +219,33 @@ class Scanner:
             except Exception as e:
                 log.warning(f"BTC filter: {e}")
 
+        # Apply BTC filter before notifying user
+        if btc_bias != "NEUTRAL":
+            pre_count = len(qualified)
+            qualified = [s for s in qualified if not (
+                (btc_bias == "DOWN" and s.side == "LONG") or
+                (btc_bias == "UP"   and s.side == "SHORT")
+            )]
+            if len(qualified) < pre_count:
+                log.info(f"BTC filter (bias={btc_bias}): {pre_count - len(qualified)} сигналов убрано")
+            if not qualified:
+                log.info("BTC filter убрал все сигналы")
+                if self._scan_count % 4 == 1:
+                    bias_icon = "📉" if btc_bias == "DOWN" else "📈"
+                    await self._notify(
+                        f"🔍 Скан: {len(signals)} сигналов — все убраны BTC-фильтром {bias_icon}\n"
+                        f"BTC: {btc_change:+.2f}% за 3ч"
+                    )
+                return
+
+        top = "\n".join(f"• {s.symbol} {s.side} ⭐{s.score}" for s in qualified)
+        await self._notify(f"🔍 Найдено <b>{len(qualified)}</b> сигналов:\n{top}")
+
         for sig in qualified:
             can, _ = state.can_trade(cfg.MAX_DAILY_LOSS, cfg.MAX_POSITIONS, cfg.MAX_DAILY_TRADES)
             if not can:
                 break
-            # BTC filter: skip signals against BTC trend
-            if btc_bias == "DOWN" and sig.side == "LONG":
-                log.info(f"BTC падает ({btc_bias}) — пропуск LONG {sig.symbol}")
-                continue
-            if btc_bias == "UP" and sig.side == "SHORT":
-                log.info(f"BTC растёт ({btc_bias}) — пропуск SHORT {sig.symbol}")
-                continue
             # Correlation filter: max 1 bot-opened position in same direction
-            # Count ALL positions (including restored ones without SL)
             same_dir = sum(1 for p in state.positions.values() if p.side == sig.side)
             if same_dir >= 1:
                 log.info(f"Корреляция: пропуск {sig.symbol} {sig.side} (уже {same_dir} в том же направлении)")
@@ -389,14 +402,33 @@ class Scanner:
             if risk_usdt > cfg.MAX_RISK_USDT:
                 log.info(f"risk_usdt {risk_usdt:.2f} > MAX_RISK_USDT {cfg.MAX_RISK_USDT} — обрезаем")
                 risk_usdt = cfg.MAX_RISK_USDT
+
+            # Pre-check: projected daily loss must not exceed limit BEFORE entry
+            projected_loss = (
+                abs(min(state.day.pnl_usdt, 0)) +
+                abs(min(state.unrealized_pnl(), 0)) +
+                risk_usdt
+            )
+            if balance > 0 and projected_loss / balance * 100 >= cfg.MAX_DAILY_LOSS:
+                log.info(
+                    f"{sig.symbol}: пропуск — добавление {risk_usdt:.2f} USDT риска "
+                    f"превысит дневной лимит {cfg.MAX_DAILY_LOSS}%"
+                )
+                await self._notify(
+                    f"⚠️ <b>{sig.symbol}</b> пропущен\n"
+                    f"Добавление риска {risk_usdt:.2f} USDT превысит дневной лимит "
+                    f"{cfg.MAX_DAILY_LOSS}% (баланс {balance:.2f} USDT)"
+                )
+                return
+
             sl_pct = abs(sig.entry - sig.sl) / sig.entry
             if sl_pct == 0:
                 log.warning(f"{sig.symbol}: sl_pct=0, пропуск")
                 return
             qty = (risk_usdt / sl_pct) / sig.entry
             notional = qty * sig.entry
-            # MIN_POSITION_USDT is margin — notional minimum = margin * leverage
-            min_notional = cfg.MIN_POSITION_USDT * leverage
+            # MIN_POSITION_USDT is minimum notional exposure (not margin)
+            min_notional = cfg.MIN_POSITION_USDT
             max_notional = max(balance * 0.3 * leverage, min_notional)
             if notional > max_notional:
                 log.warning(f"Позиция {sig.symbol}: {notional:.2f} > {max_notional:.2f} — обрезаем")
@@ -405,7 +437,7 @@ class Scanner:
             min_qty = min_notional / sig.entry
             if qty < min_qty:
                 qty = min_qty
-                log.info(f"qty увеличен до минимума {min_notional:.2f} USDT (маржа {cfg.MIN_POSITION_USDT}×{leverage}) для {sig.symbol}")
+                log.info(f"qty увеличен до минимального нотионала {min_notional:.2f} USDT для {sig.symbol}")
             qty = round(qty, 3)
             # After rounding, notional may dip below minimum — correct with ceiling
             if qty * sig.entry < min_notional:
@@ -415,10 +447,11 @@ class Scanner:
                 return
 
             # Pre-check available margin to avoid "Insufficient margin" rejection
-            required_margin = min_notional / leverage
+            actual_notional  = qty * sig.entry
+            required_margin  = actual_notional / leverage
             try:
                 avail_margin = await self.ex.get_available_margin()
-                if avail_margin > 0 and avail_margin < required_margin * 1.05:
+                if avail_margin > 0 and avail_margin < required_margin * 1.1:
                     log.warning(
                         f"{sig.symbol}: недостаточно свободной маржи "
                         f"{avail_margin:.2f} < {required_margin:.2f} USDT — пропуск"
@@ -426,7 +459,7 @@ class Scanner:
                     await self._notify(
                         f"⚠️ <b>{sig.symbol}</b> пропущен\n"
                         f"Недостаточно маржи: {avail_margin:.2f} USDT\n"
-                        f"Требуется: {required_margin:.2f} USDT (мин. позиция)"
+                        f"Требуется: {required_margin:.2f} USDT"
                     )
                     return
             except Exception as e:
@@ -617,6 +650,7 @@ class Scanner:
                         log.error(f"{symbol}: ошибка сохранения сделки в БД: {e}")
                     del state.positions[symbol]
                     db.delete_open_position(symbol)
+                    self._stale_alerted.discard(symbol)
                     # Refresh balance so next position sizing uses real balance
                     try:
                         state.current_balance = await self.ex.get_balance()
@@ -881,6 +915,7 @@ class Scanner:
 
         del state.positions[pos.symbol]
         db.delete_open_position(pos.symbol)
+        self._stale_alerted.discard(pos.symbol)
 
         # Cooldown after SL hit — don't re-enter same symbol for 1 hour
         if sl_hit:

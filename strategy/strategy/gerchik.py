@@ -727,6 +727,24 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg):
     trend    = "LONG" if d1_up else "SHORT"
     d1_slope = trend_slope(d1["close"], 5)
 
+    # Mandatory D1 slope filter — same as analyze() and analyze_false_breakout()
+    if trend == "LONG"  and d1_slope < -0.1:
+        _reject("накопление: D1 разворот вниз")
+        return None
+    if trend == "SHORT" and d1_slope > 0.1:
+        _reject("накопление: D1 разворот вверх")
+        return None
+
+    # H4 EMA50 alignment — must be in trend direction
+    ema50_h4 = ema(h4["close"], cfg.TREND_EMA_H4)
+    h4_up    = h4["close"][-1] > ema50_h4[-1]
+    if trend == "LONG" and not h4_up:
+        _reject("накопление: H4 против тренда")
+        return None
+    if trend == "SHORT" and h4_up:
+        _reject("накопление: H4 против тренда")
+        return None
+
     price = h1["close"][-1]
 
     # ── Consolidation range: H4[-47 : -3] — exclude breakout candles ──

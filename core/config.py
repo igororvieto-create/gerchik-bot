@@ -9,7 +9,7 @@ class Config:
     BINGX_API_KEY:    str   = os.getenv("BINGX_API_KEY", "").strip()
     BINGX_SECRET:     str   = os.getenv("BINGX_SECRET", "").strip()
     MODE:             str   = "auto"
-    RISK_PER_TRADE:   float = float(os.getenv("RISK_PER_TRADE", "1.0").strip())
+    RISK_PER_TRADE:   float = float(os.getenv("RISK_PER_TRADE", "2.0").strip())
     MAX_DAILY_LOSS:   float = float(os.getenv("MAX_DAILY_LOSS", "5.0").strip())
     MAX_POSITIONS:    int   = int(os.getenv("MAX_POSITIONS", "1").strip())
     MAX_DAILY_TRADES: int   = int(os.getenv("MAX_DAILY_TRADES", "5").strip())
@@ -27,7 +27,7 @@ class Config:
     WHITELIST: List[str] = field(default_factory=lambda: [s.strip() for s in os.getenv("WHITELIST","").split(",") if s.strip()])
     BLACKLIST: List[str] = field(default_factory=lambda: [s.strip() for s in os.getenv("BLACKLIST","LUNA-USDT,FTT-USDT").split(",") if s.strip()])
     TOP_N_PAIRS:      int   = int(os.getenv("TOP_N_PAIRS", "100").strip())
-    MAX_RISK_USDT:    float = float(os.getenv("MAX_RISK_USDT", "5.0").strip())
+    MAX_RISK_USDT:    float = float(os.getenv("MAX_RISK_USDT", "20.0").strip())
     TREND_TF:  str = "1d"
     H4_TF:     str = "4h"
     SIGNAL_TF: str = "1h"
@@ -48,7 +48,7 @@ class Config:
     # Trailing stop: move SL this % behind the peak price (after breakeven)
     TRAIL_PCT:            float = float(os.getenv("TRAIL_PCT", "1.0").strip())
     # Minimum position notional value in USDT (bot won't open smaller positions)
-    MIN_POSITION_USDT:    float = float(os.getenv("MIN_POSITION_USDT", "5.0").strip())
+    MIN_POSITION_USDT:    float = float(os.getenv("MIN_POSITION_USDT", "20.0").strip())
     # Auto-leverage: adjust leverage based on balance tiers (True/False)
     AUTO_LEVERAGE:        bool  = os.getenv("AUTO_LEVERAGE", "true").strip().lower() == "true"
     # Time filter: skip scanning during low-liquidity hours (UTC)

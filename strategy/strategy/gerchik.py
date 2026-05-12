@@ -833,6 +833,15 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg):
     cur_adx  = h4_adx_v[-1]
     adx_rising = len(h4_adx_v) >= 8 and cur_adx > h4_adx_v[-8]
 
+    # Range breakout requires RISING ADX — confirms trend is starting from accumulation
+    if not adx_rising:
+        _reject("накопление: ADX не растёт")
+        return None
+    # Hard floor — avoid extremely flat markets
+    if cur_adx < 15:
+        _reject("накопление: ADX критически низкий")
+        return None
+
     # ── RSI ──
     h1_rsi_v = rsi(h1["close"], 14)
     cur_rsi  = h1_rsi_v[-1]

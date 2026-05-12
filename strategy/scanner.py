@@ -509,7 +509,7 @@ class Scanner:
                         if actual > 0:
                             qty = round(actual, 3)
                             actual_notional = qty * sig.entry
-                            min_notional_check = cfg.MIN_POSITION_USDT * leverage
+                            min_notional_check = cfg.MIN_POSITION_USDT
                             if actual_notional < min_notional_check:
                                 log.warning(
                                     f"{sig.symbol}: реальный объём {actual_notional:.2f} USDT "

@@ -533,6 +533,8 @@ class Scanner:
             # Pre-validate SL price vs current mark price (avoids error 110411)
             # For LONG: SL (SELL stop) must be below current price
             # For SHORT: SL (BUY stop) must be above current price
+            # Also check that SL is above the estimated liquidation price —
+            # if SL <= liq_price, position gets liquidated before SL fires.
             try:
                 mk = await self.ex.get_ticker(sig.symbol)
                 mark = float(mk.get("lastPrice", sig.entry))
@@ -549,6 +551,47 @@ class Scanner:
                         log.error(f"emergency close (pre-SL) {sig.symbol}: {ce}")
                     self._set_cooldown(sig.symbol)
                     return
+                # Liquidation check: SL must be inside the margin safety zone
+                # Approximate liq price (isolated margin, maintenance rate ~0.5%)
+                maint_rate = 0.005
+                if sig.side == "LONG":
+                    liq_price = sig.entry * (1 - 1.0 / leverage + maint_rate)
+                    if sig.sl <= liq_price:
+                        log.warning(
+                            f"{sig.symbol}: SL {sig.sl:.4f} ≤ цены ликвидации {liq_price:.4f} "
+                            f"(x{leverage}) — пропуск во избежание принудительного закрытия"
+                        )
+                        await self._notify(
+                            f"⚠️ <b>{sig.symbol}</b> пропущен\n"
+                            f"SL <code>{sig.sl:.4f}</code> ниже цены ликвидации "
+                            f"<code>{liq_price:.4f}</code> при плече x{leverage}\n"
+                            f"Снизь плечо или расширь SL"
+                        )
+                        try:
+                            await self.ex.close_position(sig.symbol, qty, sig.side)
+                        except Exception as ce:
+                            log.error(f"emergency close (liq check) {sig.symbol}: {ce}")
+                        self._set_cooldown(sig.symbol)
+                        return
+                else:
+                    liq_price = sig.entry * (1 + 1.0 / leverage - maint_rate)
+                    if sig.sl >= liq_price:
+                        log.warning(
+                            f"{sig.symbol}: SL {sig.sl:.4f} ≥ цены ликвидации {liq_price:.4f} "
+                            f"(x{leverage}) — пропуск"
+                        )
+                        await self._notify(
+                            f"⚠️ <b>{sig.symbol}</b> пропущен\n"
+                            f"SL <code>{sig.sl:.4f}</code> выше цены ликвидации "
+                            f"<code>{liq_price:.4f}</code> при плече x{leverage}\n"
+                            f"Снизь плечо или расширь SL"
+                        )
+                        try:
+                            await self.ex.close_position(sig.symbol, qty, sig.side)
+                        except Exception as ce:
+                            log.error(f"emergency close (liq check) {sig.symbol}: {ce}")
+                        self._set_cooldown(sig.symbol)
+                        return
             except Exception as e:
                 log.warning(f"{sig.symbol}: не удалось проверить mark price перед SL: {e}")
 

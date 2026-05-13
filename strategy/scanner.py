@@ -469,7 +469,9 @@ class Scanner:
             notional = qty * sig.entry
             # MIN_POSITION_USDT is minimum notional exposure (not margin)
             min_notional = cfg.MIN_POSITION_USDT
-            max_notional = max(balance * 0.3 * leverage, min_notional)
+            # Cap at 15% of balance as margin (not notional) — prevents over-sizing on small accounts
+            max_margin   = balance * 0.15
+            max_notional = max(max_margin * leverage, min_notional)
             if notional > max_notional:
                 log.warning(f"Позиция {sig.symbol}: {notional:.2f} > {max_notional:.2f} — обрезаем")
                 qty = max_notional / sig.entry

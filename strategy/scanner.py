@@ -409,6 +409,35 @@ class Scanner:
                     leverage = 3
                 log.info(f"Авто-плечо: баланс {balance:.2f} → x{leverage}")
 
+            # Safety cap: SL must not be below the liquidation price.
+            # maint_rate ≈ 0.5% for BingX isolated margin.
+            # max_sl_pct = 1/leverage - maint_rate  →  at 10x: 10% - 0.5% = 9.5%
+            # If signal SL is wider, reduce leverage until SL fits safely.
+            maint_rate = 0.005
+            sl_pct_check = abs(sig.entry - sig.sl) / sig.entry if sig.sl > 0 else 0
+            if sl_pct_check > 0:
+                while leverage > 1:
+                    max_safe_sl = 1.0 / leverage - maint_rate
+                    if sl_pct_check < max_safe_sl:
+                        break
+                    leverage -= 1
+                else:
+                    if sl_pct_check >= 1.0 / 1 - maint_rate:
+                        log.warning(f"{sig.symbol}: SL {sl_pct_check*100:.1f}% слишком широкий даже при x1 — пропуск")
+                        await self._notify(
+                            f"⚠️ <b>{sig.symbol}</b> пропущен\n"
+                            f"SL {sl_pct_check*100:.1f}% от входа — слишком широкий для любого плеча"
+                        )
+                        return
+                orig_lev = (10 if balance < 100 else 7 if balance < 500 else 5 if balance < 2000 else 3) \
+                           if cfg.AUTO_LEVERAGE else cfg.LEVERAGE
+                if leverage < orig_lev:
+                    log.info(
+                        f"{sig.symbol}: плечо снижено x{orig_lev}→x{leverage} "
+                        f"(SL {sl_pct_check*100:.1f}% — безопасный лимит x{orig_lev}: "
+                        f"{(1/orig_lev - maint_rate)*100:.1f}%)"
+                    )
+
             risk_usdt = balance * cfg.RISK_PER_TRADE / 100
             if risk_usdt > cfg.MAX_RISK_USDT:
                 log.info(f"risk_usdt {risk_usdt:.2f} > MAX_RISK_USDT {cfg.MAX_RISK_USDT} — обрезаем")

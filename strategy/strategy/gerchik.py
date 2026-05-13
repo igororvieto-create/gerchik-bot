@@ -948,8 +948,10 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
 
     # Breakout requires D1 momentum aligned with direction
     if trend == "LONG"  and d1_slope < 0.05:
+        _reject("пробой: D1 нет роста")
         return None
     if trend == "SHORT" and d1_slope > -0.05:
+        _reject("пробой: D1 нет падения")
         return None
 
     price = h1["close"][-1]
@@ -1008,8 +1010,8 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
     # ── ADX: must be trending ──
     h4_adx  = adx(h4["high"], h4["low"], h4["close"], 14)
     cur_adx = h4_adx[-1]
-    if cur_adx < 25:
-        _reject("пробой: ADX < 25 (нет тренда)")
+    if cur_adx < cfg.ADX_MIN:
+        _reject(f"пробой: ADX < {cfg.ADX_MIN} (нет тренда)")
         return None
 
     # ── RSI: not extreme ──
@@ -1037,6 +1039,7 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
 
     sld = abs(price - sl)
     if sld <= 0 or sld / price > 0.05:
+        _reject("пробой: SL слишком широкий")
         return None
 
     def _px(p):

@@ -304,17 +304,28 @@ class Scanner:
                 ticker = await self.ex.get_ticker(sig.symbol)
                 cur_price = float(ticker.get("lastPrice", sig.entry))
                 if cur_price > 0:
+                    orig_entry = sig.entry
                     against = (sig.side == "LONG"  and cur_price < sig.entry * 0.992) or \
                               (sig.side == "SHORT" and cur_price > sig.entry * 1.008)
                     if against:
-                        drift = abs(cur_price - sig.entry) / sig.entry * 100
+                        drift = abs(cur_price - orig_entry) / orig_entry * 100
                         log.info(f"{sig.symbol}: цена ушла против сигнала на {drift:.2f}% — тихий пропуск")
                         if drift > 3.0:
                             self._set_cooldown(sig.symbol)
                         return  # Silent — no notification to avoid confusion
+                    # Validate SL width with updated entry (price may have run far in our favor)
+                    sld = abs(cur_price - sig.sl)
+                    if sig.sl > 0 and sld / cur_price > 0.08:
+                        drift = abs(cur_price - orig_entry) / orig_entry * 100 if orig_entry > 0 else 0
+                        log.info(
+                            f"{sig.symbol}: SL стал {sld/cur_price*100:.1f}% от новой цены "
+                            f"(дрейф +{drift:.1f}%) — сигнал устарел, пропуск"
+                        )
+                        if drift > 3.0:
+                            self._set_cooldown(sig.symbol)
+                        return  # Silent — price ran too far before we could enter
                     sig.entry = cur_price  # Update to current price before notify
                     # Recalculate TP from new entry (SL is structural, stays fixed)
-                    sld = abs(sig.entry - sig.sl)
                     if sld > 0:
                         if sig.side == "LONG":
                             sig.tp1 = _px(sig.entry + sld * cfg.TP1_RR)

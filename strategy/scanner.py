@@ -442,6 +442,12 @@ class Scanner:
                     leverage = 3
                 log.info(f"Авто-плечо: баланс {balance:.2f} → x{leverage}")
 
+            # Orderbook module may suggest lower leverage (e.g. thin book)
+            ob_lev = getattr(sig, "_ob_suggested_leverage", None)
+            if ob_lev and ob_lev < leverage:
+                log.info(f"{sig.symbol}: стакан рекомендует x{ob_lev} (было x{leverage}) — применяем")
+                leverage = ob_lev
+
             # Safety cap: SL must not be below the liquidation price.
             # maint_rate ≈ 0.5% for BingX isolated margin.
             # max_sl_pct = 1/leverage - maint_rate  →  at 10x: 10% - 0.5% = 9.5%

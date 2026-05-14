@@ -266,6 +266,14 @@ class BingXClient:
             except Exception as e:
                 log.debug(f"set_margin_type {symbol} {side}: {e}")
 
+    async def get_orderbook(self, symbol: str, limit: int = 100) -> dict:
+        """Fetch order book snapshot. Public endpoint, no auth required."""
+        allowed = {5, 10, 20, 50, 100, 500, 1000}
+        if limit not in allowed:
+            limit = min((l for l in sorted(allowed) if l >= limit), default=100)
+        return await self._get("/openApi/swap/v2/quote/depth",
+                               {"symbol": symbol, "limit": limit})
+
     async def close(self):
         if self._session:
             await self._session.close()

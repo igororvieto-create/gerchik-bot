@@ -59,5 +59,11 @@ class Config:
     BTC_FILTER_PCT:       float = float(os.getenv("BTC_FILTER_PCT", "2.0").strip())
     # ADX minimum — below this value market is ranging, skip signal
     ADX_MIN:              float = float(os.getenv("ADX_MIN", "25.0").strip())
+    # Orderbook filter
+    ORDERBOOK_ENABLED:       bool  = os.getenv("ORDERBOOK_ENABLED",  "false").strip().lower() == "true"
+    ORDERBOOK_LOG_ONLY:      bool  = os.getenv("ORDERBOOK_LOG_ONLY", "true").strip().lower() == "true"
+    OB_IMBALANCE_THRESHOLD:  float = float(os.getenv("OB_IMBALANCE_THRESHOLD", "0.15").strip())
+    OB_THIN_THRESHOLD_USDT:  float = float(os.getenv("OB_THIN_THRESHOLD_USDT", "100000").strip())
+    OB_MAX_SPREAD_BPS:       float = float(os.getenv("OB_MAX_SPREAD_BPS", "15.0").strip())
 
 cfg = Config()

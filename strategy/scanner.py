@@ -276,6 +276,39 @@ class Scanner:
             if sig is None:
                 sig = analyze_breakout(symbol, d1, h4, h1, funding, cfg)
 
+            # Orderbook filter (optional, controlled by ORDERBOOK_ENABLED)
+            if sig is not None and cfg.ORDERBOOK_ENABLED:
+                try:
+                    from strategy.orderbook_analyzer import (
+                        validate_signal_with_orderbook, OrderbookConfig,
+                    )
+                    ob_cfg = OrderbookConfig(
+                        imbalance_threshold=cfg.OB_IMBALANCE_THRESHOLD,
+                        thin_book_threshold_usdt=cfg.OB_THIN_THRESHOLD_USDT,
+                        max_spread_bps=cfg.OB_MAX_SPREAD_BPS,
+                    )
+                    # Auto-leverage for orderbook validation (same tier logic)
+                    ob_lev = cfg.LEVERAGE
+                    if cfg.AUTO_LEVERAGE:
+                        try:
+                            bal = state.current_balance or await self.ex.get_balance()
+                            ob_lev = 10 if bal < 100 else 7 if bal < 500 else 5 if bal < 2000 else 3
+                        except Exception:
+                            pass
+                    ob_val = await validate_signal_with_orderbook(
+                        sig, self.ex, ob_lev, ob_cfg,
+                        log_only=cfg.ORDERBOOK_LOG_ONLY,
+                    )
+                    if not ob_val.passed:
+                        for r in ob_val.rejections:
+                            from strategy.strategy.gerchik import _reject as _rej
+                            _rej(f"OB:{r}")
+                        sig = None
+                    elif ob_val.suggested_leverage is not None:
+                        sig._ob_suggested_leverage = ob_val.suggested_leverage
+                except Exception as obe:
+                    log.warning(f"orderbook filter {symbol}: {obe}")
+
             # Weekly level bonus: +8 score if signal entry is near a key W1 level
             if sig is not None and w1 and len(w1.get("close", [])) >= 10:
                 try:

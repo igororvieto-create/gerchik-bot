@@ -1125,6 +1125,52 @@ class Scanner:
             f"Итого: <code>{total_sign}{state.total_pnl:.2f} USDT</code>"
         )
 
+    async def health_check(self):
+        """Каждые 15 минут: проверяет состояние бота и пишет в лог (+ Telegram при проблемах)."""
+        try:
+            issues = []
+
+            # Баланс
+            try:
+                balance = await self.ex.get_balance()
+                state.current_balance = balance
+                if balance <= 0:
+                    issues.append("⚠️ Баланс = 0 USDT")
+            except Exception as e:
+                issues.append(f"⚠️ Не удалось получить баланс: {e}")
+                balance = state.current_balance
+
+            # Открытые позиции
+            pos_count = len(state.positions)
+
+            # Сверка с биржей
+            try:
+                live = await self.ex.get_open_positions()
+                live_count = len(live)
+                if live_count != pos_count:
+                    issues.append(
+                        f"⚠️ Расхождение позиций: бот={pos_count}, биржа={live_count}"
+                    )
+            except Exception as e:
+                issues.append(f"⚠️ Не удалось получить позиции с биржи: {e}")
+
+            # Пауза без причины
+            if state.is_paused and pos_count == 0:
+                issues.append("ℹ️ Бот на паузе, открытых позиций нет")
+
+            log.info(
+                f"[healthcheck] баланс={balance:.2f} USDT | "
+                f"позиций={pos_count} | пауза={state.is_paused} | "
+                f"сканов={self._scan_count} | проблем={len(issues)}"
+            )
+
+            if issues:
+                text = "🔎 <b>Проверка бота</b>\n" + "\n".join(issues)
+                await self._notify(text)
+
+        except Exception as e:
+            log.error(f"health_check: {e}")
+
     # ------------------------------------------------------------------ reports
 
     async def daily_report(self):

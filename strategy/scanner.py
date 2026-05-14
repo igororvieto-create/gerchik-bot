@@ -844,6 +844,7 @@ class Scanner:
                     del state.positions[symbol]
                     db.delete_open_position(symbol)
                     self._stale_alerted.discard(symbol)
+                    self._funding_warned.discard(symbol)
                     # Refresh balance so next position sizing uses real balance
                     try:
                         state.current_balance = await self.ex.get_balance()
@@ -1109,6 +1110,7 @@ class Scanner:
         del state.positions[pos.symbol]
         db.delete_open_position(pos.symbol)
         self._stale_alerted.discard(pos.symbol)
+        self._funding_warned.discard(pos.symbol)
 
         # Cooldown after SL hit — don't re-enter same symbol for 1 hour
         if sl_hit:

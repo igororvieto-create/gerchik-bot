@@ -251,11 +251,18 @@ class BingXClient:
             raise RuntimeError(f"close_position failed: {result}")
         return result
 
-    async def set_leverage(self, symbol, leverage):
-        await self._post("/openApi/swap/v2/trade/leverage",
-                         {"symbol": symbol, "side": "LONG",  "leverage": leverage})
-        await self._post("/openApi/swap/v2/trade/leverage",
-                         {"symbol": symbol, "side": "SHORT", "leverage": leverage})
+    async def set_leverage(self, symbol, leverage) -> bool:
+        """Returns True if leverage was set successfully on both sides."""
+        ok = True
+        for side in ("LONG", "SHORT"):
+            r = await self._post("/openApi/swap/v2/trade/leverage",
+                                 {"symbol": symbol, "side": side, "leverage": leverage})
+            if r.get("code") != 0:
+                # Code 80012 = leverage already set to this value — not an error
+                if r.get("code") != 80012:
+                    log.warning(f"set_leverage {symbol} {side} x{leverage}: {r.get('msg','')}")
+                    ok = False
+        return ok
 
     async def set_margin_type(self, symbol):
         """Set isolated margin mode for both sides."""

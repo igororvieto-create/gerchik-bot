@@ -357,6 +357,11 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         return None
 
     # ── Candle pattern on H1: use index -2 (last COMPLETED candle) ──
+    # Reject micro-candles: range < 25% of ATR means it's noise, not a real pattern
+    pat_range = h1["high"][-2] - h1["low"][-2]
+    if cur_atr > 0 and pat_range < cur_atr * 0.25:
+        _reject("паттерн: свеча слишком мала (шум)")
+        return None
     pname, pside = detect_pattern(h1, -2)
     if not pname:
         _reject("нет паттерна H1")
@@ -419,7 +424,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         sl        = max(sl_candle, sl_atr)
 
     sld = abs(price - sl)
-    if sld <= 0 or sld/price > 0.05:
+    if sld <= 0 or sld / price < 0.004:
+        _reject("SL слишком узкий (шум)")
+        return None
+    if sld / price > 0.05:
         _reject("SL слишком широкий")
         return None
 
@@ -637,7 +645,10 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
         sl = fb_candle["h"] + buf
 
     sld = abs(price - sl)
-    if sld <= 0 or sld / price > 0.05:
+    if sld <= 0 or sld / price < 0.004:
+        _reject("ложный пробой: SL слишком узкий (шум)")
+        return None
+    if sld / price > 0.05:
         _reject("ложный пробой: SL слишком широкий")
         return None
 
@@ -870,7 +881,10 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg):
         sl = boundary + cur_atr * 0.7 + buf
 
     sld = abs(price - sl)
-    if sld <= 0 or sld / price > 0.07:
+    if sld <= 0 or sld / price < 0.004:
+        _reject("накопление: SL слишком узкий (шум)")
+        return None
+    if sld / price > 0.07:
         _reject("накопление: SL слишком широкий")
         return None
 
@@ -886,6 +900,10 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg):
     tp3_rr  = cfg.TP3_RR * 1.5   # accumulation breakouts go further
     tp3     = _px(price + sld * tp3_rr if trend == "LONG" else price - sld * tp3_rr)
     rr      = cfg.TP2_RR
+
+    # ── H1 candle pattern — optional confirmation bonus ──
+    h1_pname, h1_pside = detect_pattern(h1, -2)
+    h1_pat_ok = h1_pname != "" and (h1_pside == trend or h1_pside == "DOJI")
 
     # ── Score ──
     score = 60
@@ -904,6 +922,8 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg):
     if (trend == "LONG"  and d1_slope > 0.1) or \
        (trend == "SHORT" and d1_slope < -0.1):
         score += 5
+    if h1_pat_ok:
+        score += 8  # H1 candle confirms the breakout direction
     score = min(score, 100)
 
     if score < cfg.MIN_SCORE:
@@ -960,11 +980,14 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
     h1_atr = atr(h1["high"], h1["low"], h1["close"], 14)
     cur_atr = h1_atr[-1]
 
-    # ── Breakout candle: must be strong (body > 55% of range) ──
+    # ── Breakout candle: must be strong (body > 55% of range, min size 0.25× ATR) ──
     o2, c2 = h1["open"][-2], h1["close"][-2]
     h2, l2 = h1["high"][-2], h1["low"][-2]
     body  = abs(c2 - o2)
     rng   = h2 - l2
+    if cur_atr > 0 and rng < cur_atr * 0.25:
+        _reject("пробой: свеча слишком мала (шум)")
+        return None
     if rng <= 0 or body / rng < 0.55:
         _reject("пробой: слабая свеча")
         return None
@@ -1048,7 +1071,10 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
         sl = broken_level + cur_atr * 0.5 + buf
 
     sld = abs(price - sl)
-    if sld <= 0 or sld / price > 0.05:
+    if sld <= 0 or sld / price < 0.004:
+        _reject("пробой: SL слишком узкий (шум)")
+        return None
+    if sld / price > 0.05:
         _reject("пробой: SL слишком широкий")
         return None
 

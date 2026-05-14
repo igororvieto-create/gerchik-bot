@@ -571,7 +571,14 @@ class Scanner:
                     log.warning(f"{sig.symbol}: не удалось получить текущую цену перед входом — используется цена сигнала: {e}")
 
             await self.ex.set_margin_type(sig.symbol)
-            await self.ex.set_leverage(sig.symbol, leverage)
+            lev_ok = await self.ex.set_leverage(sig.symbol, leverage)
+            if not lev_ok:
+                log.warning(f"{sig.symbol}: не удалось выставить плечо x{leverage} — пропуск")
+                await self._notify(
+                    f"⚠️ <b>{sig.symbol}</b> пропущен\n"
+                    f"Не удалось выставить плечо x{leverage}"
+                )
+                return
             side  = "BUY" if sig.side == "LONG" else "SELL"
             order = await self.ex.place_order(sig.symbol, side, qty, position_side=sig.side)
             if order.get("code") != 0:

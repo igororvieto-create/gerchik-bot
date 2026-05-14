@@ -289,7 +289,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     h4_up   = h4["close"][-1] > ema50[-1]
     h4_dn   = h4["close"][-1] < ema50[-1]
     h4_aligned = (trend=="LONG" and h4_up) or (trend=="SHORT" and h4_dn)
-    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 1.0
+    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 2.0
     if not h4_aligned and not h4_near:
         _reject("H4 против тренда")
         return None
@@ -561,7 +561,7 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
     vm = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
 
     n = len(h1["close"])
-    for back in range(2, 8):          # candles [-7 .. -2], skip current (-1)
+    for back in range(2, 12):         # candles [-11 .. -2], skip current (-1)
         idx = n - back
         if idx < 1:
             break
@@ -676,6 +676,10 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
     rsi_ok = (trend == "LONG"  and 35 <= cur_rsi <= 60) or \
              (trend == "SHORT" and 40 <= cur_rsi <= 65)
     if rsi_ok: score += 5
+    # Wick depth bonus: deeper rejection = stronger institutional defense
+    if wick_pct >= 1.5:   score += 7
+    elif wick_pct >= 1.0: score += 5
+    elif wick_pct >= 0.5: score += 3
     score = min(score, 100)
 
     if score < cfg.MIN_SCORE:
@@ -778,32 +782,29 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg):
         _reject("накопление: не настоящий диапазон")
         return None
 
-    # ── H4 breakout candle (last complete = -2) ──
-    h4_o    = h4["open"][-2]
-    h4_c    = h4["close"][-2]
-    h4_h_c  = h4["high"][-2]
-    h4_l_c  = h4["low"][-2]
-    h4_body = abs(h4_c - h4_o)
-    h4_full = h4_h_c - h4_l_c
-    if h4_full <= 0 or h4_body / h4_full < 0.50:
-        _reject("накопление: слабая свеча пробоя")
-        return None
-    if trend == "LONG"  and h4_c <= h4_o:
-        _reject("накопление: медвежья свеча в LONG")
-        return None
-    if trend == "SHORT" and h4_c >= h4_o:
-        _reject("накопление: бычья свеча в SHORT")
-        return None
-
     boundary = r_high if trend == "LONG" else r_low
-    if trend == "LONG"  and h4_c < boundary:
-        _reject("накопление: свеча не пробила верхнюю границу")
-        return None
-    if trend == "SHORT" and h4_c > boundary:
-        _reject("накопление: свеча не пробила нижнюю границу")
+
+    # ── Find H4 breakout candle among last 2 complete candles ([-2] or [-3]) ──
+    # Checking [-3] catches pullback-to-breakout entries (best R/R for this setup)
+    brk_idx = None
+    for bi in (-2, -3):
+        b_o = h4["open"][bi];   b_c = h4["close"][bi]
+        b_h = h4["high"][bi];   b_l = h4["low"][bi]
+        b_body = abs(b_c - b_o); b_full = b_h - b_l
+        if b_full <= 0 or b_body / b_full < 0.50:
+            continue
+        if trend == "LONG"  and (b_c <= b_o or b_c < boundary):
+            continue
+        if trend == "SHORT" and (b_c >= b_o or b_c > boundary):
+            continue
+        brk_idx = bi
+        break
+
+    if brk_idx is None:
+        _reject("накопление: нет чёткой свечи пробоя")
         return None
 
-    # H1 price must still be outside the range (not reversed)
+    # H1 price must still be outside the range (not reversed deep inside)
     if trend == "LONG"  and price < boundary * 0.995:
         _reject("накопление: цена вернулась в диапазон")
         return None
@@ -823,7 +824,8 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg):
 
     # ── Volume on H4 breakout candle ──
     h4_vm   = vol_ma(h4["volume"], cfg.VOLUME_MA_PERIOD)
-    h4_vrat = h4["volume"][-2] / h4_vm[-3] if h4_vm[-3] > 0 else 0
+    vm_ref  = h4_vm[brk_idx - 1]
+    h4_vrat = h4["volume"][brk_idx] / vm_ref if vm_ref > 0 else 0
     if h4_vrat < 2.0:
         _reject("накопление: объём H4 < 2.0x")
         return None
@@ -993,6 +995,14 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
             break
     if broken_level is None:
         _reject("пробой: нет пробитого уровня")
+        return None
+
+    # Don't chase breakouts that already ran far from the broken level
+    if trend == "LONG"  and price > broken_level * 1.025:
+        _reject("пробой: цена ушла далеко от уровня (>2.5%)")
+        return None
+    if trend == "SHORT" and price < broken_level * 0.975:
+        _reject("пробой: цена ушла далеко от уровня (>2.5%)")
         return None
 
     touches = level_touches(broken_level, h4["high"][-120:], h4["low"][-120:])

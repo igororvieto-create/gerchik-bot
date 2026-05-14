@@ -42,7 +42,7 @@ class Config:
     SCAN_BATCH_DELAY:     float = float(os.getenv("SCAN_BATCH_DELAY", "1.0").strip())
     # Breakeven: move SL when price moves BE_TRIGGER_PCT% from entry in profit direction
     # 0 = use TP1 as trigger (original behaviour)
-    BE_TRIGGER_PCT:       float = float(os.getenv("BE_TRIGGER_PCT", "1.0").strip())
+    BE_TRIGGER_PCT:       float = float(os.getenv("BE_TRIGGER_PCT", "0").strip())
     # SL is placed at entry + this % buffer (locks in tiny profit above fees)
     BE_BUFFER_PCT:        float = float(os.getenv("BE_BUFFER_PCT", "0.05").strip())
     # Trailing stop: move SL this % behind the peak price (after breakeven)

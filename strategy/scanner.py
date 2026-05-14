@@ -42,6 +42,9 @@ class Scanner:
         self._scan_count = 0
         self._sl_cooldown: dict = {}   # symbol → datetime of last SL hit
         self._stale_alerted: set = set()  # symbols already alerted as stale
+        self._last_signal_time: datetime | None = None  # last time a qualifying signal was found
+        self._monitor_count: int = 0   # monitor cycles counter for periodic tasks
+        self._funding_warned: set = set()  # symbols already warned about adverse funding
         _global_scanner = self
         self._restore_cooldowns()
 
@@ -183,6 +186,16 @@ class Scanner:
                     f"📊 Фильтры: {diag}\n"
                     f"Следующий через 15 мин"
                 )
+            # 24h drought alert
+            if self._last_signal_time is not None:
+                drought_h = (datetime.utcnow() - self._last_signal_time).total_seconds() / 3600
+                if drought_h >= 24 and self._scan_count % 8 == 1:
+                    await self._notify(
+                        f"⏳ <b>Нет сигналов уже {drought_h:.0f}ч</b>\n"
+                        f"MIN_SCORE: {cfg.MIN_SCORE} | Пар: {len(state.pairs)}\n"
+                        f"📊 Топ причин отсева: {diag}\n"
+                        f"Рассмотри снижение MIN_SCORE или смену пар"
+                    )
             return
 
         signals.sort(key=lambda s: s.score, reverse=True)
@@ -198,7 +211,19 @@ class Scanner:
                     f"📊 Фильтры: {diag}\n"
                     f"Следующий через 15 мин"
                 )
+            # 24h drought alert (signals exist but all below MIN_SCORE)
+            if self._last_signal_time is not None:
+                drought_h = (datetime.utcnow() - self._last_signal_time).total_seconds() / 3600
+                if drought_h >= 24 and self._scan_count % 8 == 1:
+                    await self._notify(
+                        f"⏳ <b>Нет торговых сигналов уже {drought_h:.0f}ч</b>\n"
+                        f"MIN_SCORE: {cfg.MIN_SCORE} | Найдено: {len(signals)} ниже порога\n"
+                        f"Рассмотри снижение MIN_SCORE или смену пар"
+                    )
             return
+
+        # Qualified signals found — update last signal time
+        self._last_signal_time = datetime.utcnow()
 
         # Take only top N by score
         qualified = qualified[:cfg.MAX_POSITIONS]
@@ -733,7 +758,44 @@ class Scanner:
         finally:
             _MONITORING = False
 
+    async def _check_open_funding(self):
+        """Warn if open positions are facing adverse funding rates (> ±0.05% per 8h)."""
+        try:
+            for symbol, pos in list(state.positions.items()):
+                if pos.side not in ("LONG", "SHORT"):
+                    continue
+                funding = await self.ex.get_funding_rate(symbol)
+                if pos.side == "LONG" and funding > 0.05:
+                    if symbol not in self._funding_warned:
+                        self._funding_warned.add(symbol)
+                        await self._notify(
+                            f"⚠️ <b>Высокий фандинг</b> | {symbol} LONG\n"
+                            f"Фандинг: <code>{funding:.4f}%</code> каждые 8ч\n"
+                            f"Позиция медленно теряет деньги — рассмотри закрытие"
+                        )
+                elif pos.side == "SHORT" and funding < -0.05:
+                    if symbol not in self._funding_warned:
+                        self._funding_warned.add(symbol)
+                        await self._notify(
+                            f"⚠️ <b>Высокий фандинг</b> | {symbol} SHORT\n"
+                            f"Фандинг: <code>{funding:.4f}%</code> каждые 8ч\n"
+                            f"Позиция медленно теряет деньги — рассмотри закрытие"
+                        )
+                else:
+                    # Funding normalized — reset warning so it can fire again if it spikes
+                    if symbol in self._funding_warned:
+                        if (pos.side == "LONG"  and funding <= 0.03) or \
+                           (pos.side == "SHORT" and funding >= -0.03):
+                            self._funding_warned.discard(symbol)
+        except Exception as e:
+            log.warning(f"_check_open_funding: {e}")
+
     async def _monitor_inner(self):
+        self._monitor_count += 1
+        # Check funding on open positions every ~30 min (30s × 60 cycles)
+        if self._monitor_count % 60 == 0:
+            await self._check_open_funding()
+
         # Sync with BingX: detect positions closed externally (SL/TP hit on exchange)
         try:
             live = await self.ex.get_open_positions()

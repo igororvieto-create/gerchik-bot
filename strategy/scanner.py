@@ -944,7 +944,7 @@ class Scanner:
             try:
                 ticker = await self.ex.get_ticker(pos.symbol)
                 if ticker and float(ticker.get("lastPrice", 0)) > 0:
-                    close_price = float(ticker["lastPrice"])
+                    close_price = float(ticker.get("lastPrice", close_price))
             except Exception as pe:
                 log.warning(f"partial_close ticker {pos.symbol}: {pe}")
             partial_pnl = (close_price - pos.entry) * qty if pos.side == "LONG" \

@@ -9,8 +9,8 @@ class Config:
     BINGX_API_KEY:    str   = os.getenv("BINGX_API_KEY", "").strip()
     BINGX_SECRET:     str   = os.getenv("BINGX_SECRET", "").strip()
     MODE:             str   = "auto"
-    RISK_PER_TRADE:   float = float(os.getenv("RISK_PER_TRADE", "2.0").strip())
-    MAX_DAILY_LOSS:   float = float(os.getenv("MAX_DAILY_LOSS", "5.0").strip())
+    RISK_PER_TRADE:   float = float(os.getenv("RISK_PER_TRADE", "0.5").strip())
+    MAX_DAILY_LOSS:   float = float(os.getenv("MAX_DAILY_LOSS", "3.0").strip())
     MAX_POSITIONS:    int   = int(os.getenv("MAX_POSITIONS", "1").strip())
     MAX_DAILY_TRADES: int   = int(os.getenv("MAX_DAILY_TRADES", "5").strip())
     LEVERAGE:         int   = int(os.getenv("LEVERAGE", "5").strip())
@@ -18,7 +18,7 @@ class Config:
     SL_BUFFER_PCT:    float = float(os.getenv("SL_BUFFER_PCT", "0.15").strip())
     VOLUME_MULT:      float = float(os.getenv("VOLUME_MULT", "1.3").strip())
     VOLUME_MA_PERIOD: int   = int(os.getenv("VOLUME_MA_PERIOD", "20").strip())
-    MIN_SCORE:        int   = int(os.getenv("MIN_SCORE", "68").strip())
+    MIN_SCORE:        int   = int(os.getenv("MIN_SCORE", "72").strip())
     TREND_EMA_D1:     int   = int(os.getenv("TREND_EMA_D1", "200").strip())
     TREND_EMA_H4:     int   = int(os.getenv("TREND_EMA_H4", "50").strip())
     TREND_EMA_H1:     int   = int(os.getenv("TREND_EMA_H1", "21").strip())
@@ -27,7 +27,7 @@ class Config:
     WHITELIST: List[str] = field(default_factory=lambda: [s.strip() for s in os.getenv("WHITELIST","").split(",") if s.strip()])
     BLACKLIST: List[str] = field(default_factory=lambda: [s.strip() for s in os.getenv("BLACKLIST","LUNA-USDT,FTT-USDT").split(",") if s.strip()])
     TOP_N_PAIRS:      int   = int(os.getenv("TOP_N_PAIRS", "100").strip())
-    MAX_RISK_USDT:    float = float(os.getenv("MAX_RISK_USDT", "20.0").strip())
+    MAX_RISK_USDT:    float = float(os.getenv("MAX_RISK_USDT", "5.0").strip())
     TREND_TF:  str = "1d"
     H4_TF:     str = "4h"
     SIGNAL_TF: str = "1h"

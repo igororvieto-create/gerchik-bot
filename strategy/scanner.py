@@ -199,15 +199,20 @@ class Scanner:
             return
 
         signals.sort(key=lambda s: s.score, reverse=True)
-        qualified = [s for s in signals if s.score >= cfg.MIN_SCORE]
+        # Adaptive MIN_SCORE: raise bar on consecutive loss streak
+        streak = state.day.loss_streak
+        effective_min_score = cfg.MIN_SCORE + (10 if streak >= 3 else 0)
+        if effective_min_score != cfg.MIN_SCORE:
+            log.info(f"Адаптивный MIN_SCORE: streak={streak} → {effective_min_score}")
+        qualified = [s for s in signals if s.score >= effective_min_score]
         skipped   = len(signals) - len(qualified)
         if skipped:
-            log.info(f"Отфильтровано по MIN_SCORE ({cfg.MIN_SCORE}): {skipped} сигналов")
+            log.info(f"Отфильтровано по MIN_SCORE ({effective_min_score}): {skipped} сигналов")
         if not qualified:
             log.info(f"Нет сигналов с достаточным score. Причины отсева: {diag}")
             if self._scan_count % 4 == 1:
                 await self._notify(
-                    f"🔍 Скан: {len(state.pairs)} пар — {len(signals)} сигналов ниже MIN_SCORE {cfg.MIN_SCORE}\n"
+                    f"🔍 Скан: {len(state.pairs)} пар — {len(signals)} сигналов ниже MIN_SCORE {effective_min_score}\n"
                     f"📊 Фильтры: {diag}\n"
                     f"Следующий через 15 мин"
                 )
@@ -454,14 +459,10 @@ class Scanner:
                 return
             state.current_balance = balance
 
-            # Auto-leverage based on balance tiers
+            # Auto-leverage based on balance tiers (conservative: max x5)
             leverage = cfg.LEVERAGE
             if cfg.AUTO_LEVERAGE:
-                if balance < 100:
-                    leverage = 10
-                elif balance < 500:
-                    leverage = 7
-                elif balance < 2000:
+                if balance < 1000:
                     leverage = 5
                 else:
                     leverage = 3
@@ -493,8 +494,7 @@ class Scanner:
                             f"SL {sl_pct_check*100:.1f}% от входа — слишком широкий для любого плеча"
                         )
                         return
-                orig_lev = (10 if balance < 100 else 7 if balance < 500 else 5 if balance < 2000 else 3) \
-                           if cfg.AUTO_LEVERAGE else cfg.LEVERAGE
+                orig_lev = (5 if balance < 1000 else 3) if cfg.AUTO_LEVERAGE else cfg.LEVERAGE
                 if leverage < orig_lev:
                     log.info(
                         f"{sig.symbol}: плечо снижено x{orig_lev}→x{leverage} "
@@ -506,6 +506,15 @@ class Scanner:
             if risk_usdt > cfg.MAX_RISK_USDT:
                 log.info(f"risk_usdt {risk_usdt:.2f} > MAX_RISK_USDT {cfg.MAX_RISK_USDT} — обрезаем")
                 risk_usdt = cfg.MAX_RISK_USDT
+
+            # Adaptive risk: reduce on consecutive loss streak
+            streak = state.day.loss_streak
+            if streak >= 3:
+                risk_usdt *= 0.5
+                log.info(f"Адаптивный риск: streak={streak} → ×0.5 = {risk_usdt:.2f} USDT")
+            elif streak >= 2:
+                risk_usdt *= 0.75
+                log.info(f"Адаптивный риск: streak={streak} → ×0.75 = {risk_usdt:.2f} USDT")
 
             # Pre-check: projected daily loss must not exceed limit BEFORE entry
             projected_loss = (
@@ -717,7 +726,15 @@ class Scanner:
             tp_order = await self.ex.place_take_profit(sig.symbol, side, qty, sig.tp3)
             tp_id    = str(tp_order.get("data", {}).get("orderId", ""))
             if tp_order.get("code") != 0:
-                log.warning(f"TP не выставился {sig.symbol}: {tp_order} — позиция без TP")
+                await asyncio.sleep(1.5)
+                tp_order = await self.ex.place_take_profit(sig.symbol, side, qty, sig.tp3)
+                tp_id = str(tp_order.get("data", {}).get("orderId", ""))
+                if tp_order.get("code") != 0:
+                    log.error(f"TP не выставился {sig.symbol} после 2 попыток: {tp_order}")
+                    await self._notify(
+                        f"⚠️ <b>{sig.symbol}</b>: TP ордер не выставился после 2 попыток\n"
+                        f"При достижении TP3 <code>{sig.tp3:.4f}</code> закрой вручную"
+                    )
 
             pos = Position(
                 symbol=sig.symbol, side=sig.side,
@@ -862,18 +879,42 @@ class Scanner:
         except Exception as e:
             log.error(f"monitor sync: {e}")
 
-        # Alert on stale positions (open > 48h without hitting any TP)
-        for symbol, pos in state.positions.items():
+        # Alert on stale positions (open > 48h) and auto-close at MAX_POSITION_HOURS
+        for symbol, pos in list(state.positions.items()):
             if pos.sl == 0:
                 continue
             age_h = (datetime.utcnow() - pos.opened_at).total_seconds() / 3600
-            if age_h > 48 and symbol not in self._stale_alerted:
+            if cfg.MAX_POSITION_HOURS > 0 and age_h >= cfg.MAX_POSITION_HOURS:
+                log.warning(f"{symbol}: позиция открыта {age_h:.0f}ч — авто-закрытие")
+                try:
+                    ticker = await self.ex.get_ticker(symbol)
+                    price = float(ticker.get("lastPrice", pos.entry)) if ticker else pos.entry
+                    await self.ex.close_position(symbol, pos.qty, pos.side)
+                    pnl = (price - pos.entry) * pos.qty if pos.side == "LONG" \
+                          else (pos.entry - price) * pos.qty
+                    state.day.pnl_usdt += pnl
+                    state.total_pnl += pnl
+                    db.save_trade(pos, price, pnl, "WIN" if pnl > 0 else "LOSS")
+                    del state.positions[symbol]
+                    db.delete_open_position(symbol)
+                    self._stale_alerted.discard(symbol)
+                    self._funding_warned.discard(symbol)
+                    sign = "+" if pnl >= 0 else ""
+                    await self._notify(
+                        f"⏰ {'✅' if pnl > 0 else '❌'} Авто-закрытие | {symbol} {pos.side}\n"
+                        f"Открыта {age_h:.0f}ч (лимит {cfg.MAX_POSITION_HOURS}ч)\n"
+                        f"Цена: <code>{price:.4f}</code> | PnL: <code>{sign}{pnl:.2f} USDT</code>"
+                    )
+                except Exception as e:
+                    log.error(f"{symbol}: ошибка авто-закрытия: {e}")
+                    await self._notify(f"⚠️ Ошибка авто-закрытия {symbol}: {e}")
+            elif age_h > 48 and symbol not in self._stale_alerted:
                 self._stale_alerted.add(symbol)
                 await self._notify(
                     f"⏰ <b>Позиция завязла</b> | {symbol} {pos.side}\n"
                     f"Открыта {age_h:.0f}ч назад без движения к TP\n"
                     f"Вход: <code>{pos.entry:.4f}</code> | TP2: <code>{pos.tp2:.4f}</code>\n"
-                    f"Рассмотри закрытие вручную: /close_{symbol.replace('-','_')}"
+                    f"Авто-закрытие через {cfg.MAX_POSITION_HOURS - age_h:.0f}ч"
                 )
 
         # Clean up stale sl_cooldown entries (older than 2x cooldown window)

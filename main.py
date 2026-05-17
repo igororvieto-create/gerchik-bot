@@ -60,7 +60,7 @@ async def main():
     # Scheduler jobs
     scheduler.add_job(scanner.scan_all,          "cron",     minute=f"*/{cfg.SCAN_H1_INTERVAL_MIN}")
     scheduler.add_job(scanner.update_pairs,       "cron",     minute="0")
-    scheduler.add_job(scanner.monitor_positions,  "interval", seconds=30)
+    scheduler.add_job(scanner.monitor_positions,  "interval", seconds=60)
     scheduler.add_job(scanner.health_check,       "cron",     minute="*/15")
     scheduler.add_job(scanner.btc_weekly_alert,   "cron",     minute="30")  # every hour at :30
     scheduler.add_job(scanner.daily_report,       "cron",     hour="9",  minute="0")

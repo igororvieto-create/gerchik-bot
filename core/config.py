@@ -39,7 +39,7 @@ class Config:
     CONFIRM_TIMEOUT_SEC:  int   = 300
     SCAN_H1_INTERVAL_MIN: int   = int(os.getenv("SCAN_H1_INTERVAL_MIN", "15").strip())
     SCAN_BATCH_SIZE:      int   = int(os.getenv("SCAN_BATCH_SIZE", "10").strip())
-    SCAN_BATCH_DELAY:     float = float(os.getenv("SCAN_BATCH_DELAY", "1.0").strip())
+    SCAN_BATCH_DELAY:     float = float(os.getenv("SCAN_BATCH_DELAY", "0.5").strip())
     # Breakeven: move SL when price moves BE_TRIGGER_PCT% from entry in profit direction
     # 0 = use TP1 as trigger (original behaviour)
     BE_TRIGGER_PCT:       float = float(os.getenv("BE_TRIGGER_PCT", "0").strip())
@@ -59,8 +59,10 @@ class Config:
     BTC_FILTER_PCT:       float = float(os.getenv("BTC_FILTER_PCT", "2.0").strip())
     # ADX minimum — below this value market is ranging, skip signal
     ADX_MIN:              float = float(os.getenv("ADX_MIN", "25.0").strip())
+    # Auto-close positions older than this many hours (0 = disabled)
+    MAX_POSITION_HOURS:      int   = int(os.getenv("MAX_POSITION_HOURS", "72").strip())
     # Orderbook filter
-    ORDERBOOK_ENABLED:       bool  = os.getenv("ORDERBOOK_ENABLED",  "false").strip().lower() == "true"
+    ORDERBOOK_ENABLED:       bool  = os.getenv("ORDERBOOK_ENABLED",  "true").strip().lower() == "true"
     ORDERBOOK_LOG_ONLY:      bool  = os.getenv("ORDERBOOK_LOG_ONLY", "true").strip().lower() == "true"
     OB_IMBALANCE_THRESHOLD:  float = float(os.getenv("OB_IMBALANCE_THRESHOLD", "0.15").strip())
     OB_THIN_THRESHOLD_USDT:  float = float(os.getenv("OB_THIN_THRESHOLD_USDT", "100000").strip())

@@ -448,7 +448,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         sl        = max(sl_candle, sl_atr)
 
     sld = abs(price - sl)
-    if sld <= 0 or sld / price < 0.004:
+    if price <= 0 or sld <= 0 or sld / price < 0.004:
         _reject("SL слишком узкий (шум)")
         return None
     if sld / price > 0.05:
@@ -679,7 +679,7 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
         sl = fb_candle["h"] + buf
 
     sld = abs(price - sl)
-    if sld <= 0 or sld / price < 0.004:
+    if price <= 0 or sld <= 0 or sld / price < 0.004:
         _reject("ложный пробой: SL слишком узкий (шум)")
         return None
     if sld / price > 0.05:
@@ -926,7 +926,7 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg):
         sl = boundary + cur_atr * 0.7 + buf
 
     sld = abs(price - sl)
-    if sld <= 0 or sld / price < 0.004:
+    if price <= 0 or sld <= 0 or sld / price < 0.004:
         _reject("накопление: SL слишком узкий (шум)")
         return None
     if sld / price > 0.07:
@@ -1122,7 +1122,7 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
         sl = broken_level + cur_atr * 0.5 + buf
 
     sld = abs(price - sl)
-    if sld <= 0 or sld / price < 0.004:
+    if price <= 0 or sld <= 0 or sld / price < 0.004:
         _reject("пробой: SL слишком узкий (шум)")
         return None
     if sld / price > 0.05:

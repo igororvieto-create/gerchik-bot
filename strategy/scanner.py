@@ -1,4 +1,5 @@
 import asyncio
+import html as _html
 import logging
 import math
 from datetime import datetime, timedelta
@@ -617,7 +618,7 @@ class Scanner:
             order = await self.ex.place_order(sig.symbol, side, qty, position_side=sig.side)
             if order.get("code") != 0:
                 log.error(f"Ордер входа отклонён {sig.symbol}: {order}")
-                await self._notify(f"❌ Вход отклонён <b>{sig.symbol}</b>: {order.get('msg', '')}")
+                await self._notify(f"❌ Вход отклонён <b>{sig.symbol}</b>: {_html.escape(str(order.get('msg', '')))}")
                 return
             order_id = str(order.get("data", {}).get("orderId", ""))
 
@@ -761,7 +762,7 @@ class Scanner:
             )
         except Exception as e:
             log.error(f"enter {sig.symbol}: {e}")
-            await self._notify(f"❌ Ошибка входа {sig.symbol}: {e}")
+            await self._notify(f"❌ Ошибка входа {sig.symbol}: {_html.escape(str(e))}")
 
     # ------------------------------------------------------------------ monitor
 
@@ -907,7 +908,7 @@ class Scanner:
                     )
                 except Exception as e:
                     log.error(f"{symbol}: ошибка авто-закрытия: {e}")
-                    await self._notify(f"⚠️ Ошибка авто-закрытия {symbol}: {e}")
+                    await self._notify(f"⚠️ Ошибка авто-закрытия {symbol}: {_html.escape(str(e))}")
             elif age_h > 48 and symbol not in self._stale_alerted:
                 self._stale_alerted.add(symbol)
                 await self._notify(
@@ -1180,7 +1181,7 @@ class Scanner:
                 if balance <= 0:
                     issues.append("⚠️ Баланс = 0 USDT")
             except Exception as e:
-                issues.append(f"⚠️ Не удалось получить баланс: {e}")
+                issues.append(f"⚠️ Не удалось получить баланс: {_html.escape(str(e))}")
                 balance = state.current_balance
 
             # Открытые позиции
@@ -1195,7 +1196,7 @@ class Scanner:
                         f"⚠️ Расхождение позиций: бот={pos_count}, биржа={live_count}"
                     )
             except Exception as e:
-                issues.append(f"⚠️ Не удалось получить позиции с биржи: {e}")
+                issues.append(f"⚠️ Не удалось получить позиции с биржи: {_html.escape(str(e))}")
 
             # Пауза без причины
             if state.is_paused and pos_count == 0:

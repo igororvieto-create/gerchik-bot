@@ -1,4 +1,5 @@
 import asyncio
+import html as _html
 import logging
 from datetime import datetime
 
@@ -66,7 +67,7 @@ async def cmd_debug(msg: Message):
             f"<pre>{json.dumps(raw, ensure_ascii=False, indent=2)[:1000]}</pre>"
         )
     except Exception as e:
-        text = f"❌ Ошибка API: <code>{e}</code>"
+        text = f"❌ Ошибка API: <code>{_html.escape(str(e))}</code>"
     finally:
         await ex.close()
     await msg.answer(text, parse_mode="HTML")
@@ -665,7 +666,7 @@ async def cmd_close_symbol(msg: Message):
         await msg.answer(f"✅ Позиция {symbol} закрыта", reply_markup=main_keyboard())
     except Exception as e:
         log.error(f"close_symbol {symbol}: {e}")
-        await msg.answer(f"❌ Ошибка закрытия {symbol}: {e}", reply_markup=main_keyboard())
+        await msg.answer(f"❌ Ошибка закрытия {symbol}: {_html.escape(str(e))}", parse_mode="HTML", reply_markup=main_keyboard())
     finally:
         await ex.close()
 

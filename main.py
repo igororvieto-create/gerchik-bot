@@ -153,7 +153,7 @@ async def main():
         except Exception as e:
             log.error(f"startup scan: {e}")
 
-    asyncio.create_task(startup_tasks())
+    _startup_task = asyncio.create_task(startup_tasks())  # noqa: F841 — keep reference
 
     while True:
         try:

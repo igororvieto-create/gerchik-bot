@@ -34,7 +34,7 @@ class Config:
     TP1_RR: float = 1.0
     TP2_RR: float = 2.0
     TP3_RR: float = 3.0
-    TP2_CLOSE_PCT:        float = 0.50
+    TP2_CLOSE_PCT:        float = float(os.getenv("TP2_CLOSE_PCT", "0.50").strip())
     PAUSE_AFTER_LOSS_MIN: int   = 30
     CONFIRM_TIMEOUT_SEC:  int   = 300
     SCAN_H1_INTERVAL_MIN: int   = int(os.getenv("SCAN_H1_INTERVAL_MIN", "15").strip())

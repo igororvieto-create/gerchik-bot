@@ -18,6 +18,14 @@ from core.state import state
 log = logging.getLogger("handlers")
 
 
+def _smc_shadow() -> bool:
+    try:
+        from strategy.smc_filters import SHADOW_MODE
+        return SHADOW_MODE
+    except Exception:
+        return True
+
+
 def _auth(msg: Message) -> bool:
     return str(msg.chat.id) == str(cfg.TELEGRAM_CHAT_ID)
 
@@ -226,11 +234,13 @@ async def cmd_settings(msg: Message):
         f"Мин. позиция: <code>{cfg.MIN_POSITION_USDT} USDT</code>\n"
         f"Макс. риск USDT: <code>{cfg.MAX_RISK_USDT} USDT</code>\n"
         f"Авто-плечо: <code>{al}</code>\n"
-        f"  до 100$ → x10 | до 500$ → x7 | до 2000$ → x5 | от 2000$ → x3\n"
+        f"  до 1000$ → x5 | от 1000$ → x3\n"
         f"Безубыток: <code>{be_mode}</code> (буфер +{cfg.BE_BUFFER_PCT}%)\n"
         f"Трейлинг стоп: <code>{cfg.TRAIL_PCT}%</code>\n"
         f"Фандинг LONG макс: <code>{cfg.FUNDING_MAX_LONG}%</code>\n"
-        f"Фандинг SHORT макс: <code>{cfg.FUNDING_MAX_SHORT}%</code>\n\n"
+        f"Фандинг SHORT макс: <code>{cfg.FUNDING_MAX_SHORT}%</code>\n"
+        f"Макс. время позиции: <code>{cfg.MAX_POSITION_HOURS}ч</code>\n"
+        f"SMC фильтр: <code>{'тень (лог)' if _smc_shadow() else 'АКТИВЕН'}</code>\n\n"
         f"<i>/setrisk 1.0 | /setlev 5 | /setbe 0.5 | /settrail 1.0</i>"
     )
     await msg.answer(text, parse_mode="HTML", reply_markup=main_keyboard())

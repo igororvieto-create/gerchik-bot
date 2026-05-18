@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-SHADOW_MODE: bool = True
+import os as _os
+SHADOW_MODE: bool = _os.getenv("SMC_SHADOW_MODE", "true").strip().lower() != "false"
 
 SWEEP_LOOKBACK_CANDLES: int = 30
 SWEEP_CLUSTER_MIN_TOUCHES: int = 2

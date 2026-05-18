@@ -8,8 +8,10 @@ from urllib.parse import urlencode
 
 import aiohttp
 
+import os as _os
+
 log = logging.getLogger("bingx")
-BASE = "https://open-api.bingx.com"
+BASE = _os.getenv("BINGX_BASE_URL", "https://open-api.bingx.com").rstrip("/")
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
 _RETRIES = 3
 

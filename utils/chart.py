@@ -17,6 +17,7 @@ except Exception as e:
 def generate_chart(klines: dict, symbol: str, signal) -> bytes | None:
     if not _OK:
         return None
+    fig = None
     try:
         n = min(60, len(klines["close"]))
         opens  = klines["open"][-n:]
@@ -66,9 +67,11 @@ def generate_chart(klines: dict, symbol: str, signal) -> bytes | None:
         plt.tight_layout(pad=1.5)
         buf = io.BytesIO()
         plt.savefig(buf, format="png", dpi=100, facecolor=fig.get_facecolor())
-        plt.close(fig)
         buf.seek(0)
         return buf.read()
     except Exception as e:
         log.error(f"generate_chart {symbol}: {e}")
         return None
+    finally:
+        if fig is not None:
+            plt.close(fig)

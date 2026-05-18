@@ -21,7 +21,6 @@ class Config:
     MIN_SCORE:        int   = int(os.getenv("MIN_SCORE", "72").strip())
     TREND_EMA_D1:     int   = int(os.getenv("TREND_EMA_D1", "200").strip())
     TREND_EMA_H4:     int   = int(os.getenv("TREND_EMA_H4", "50").strip())
-    TREND_EMA_H1:     int   = int(os.getenv("TREND_EMA_H1", "21").strip())
     FUNDING_MAX_LONG:  float = float(os.getenv("FUNDING_MAX_LONG", "0.02").strip())
     FUNDING_MAX_SHORT: float = float(os.getenv("FUNDING_MAX_SHORT", "-0.02").strip())
     WHITELIST: List[str] = field(default_factory=lambda: [s.strip() for s in os.getenv("WHITELIST","").split(",") if s.strip()])

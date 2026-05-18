@@ -49,6 +49,12 @@ class BotState:
     def reset_day(self):
         if self.day.date != date.today():
             self.day = DayStats()
+            # clear persisted pause so restart on a new day doesn't inherit yesterday's pause
+            try:
+                from core import db as _db
+                _db.save_kv("paused_until", "")
+            except Exception:
+                pass
 
     @property
     def is_paused(self):

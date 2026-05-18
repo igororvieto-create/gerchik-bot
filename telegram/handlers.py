@@ -501,6 +501,7 @@ async def cmd_resume(msg: Message):
     state.paused           = False
     state.day.paused_until = None
     db.save_kv("paused", "0")
+    db.save_kv("paused_until", "")
     await msg.answer("▶️ Торговля возобновлена", reply_markup=main_keyboard())
 
 

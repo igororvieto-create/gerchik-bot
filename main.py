@@ -21,13 +21,35 @@ log = logging.getLogger("main")
 scheduler = AsyncIOScheduler(timezone="UTC")
 
 
+def _validate_config() -> bool:
+    errors = []
+    if not cfg.TELEGRAM_TOKEN:
+        errors.append("TELEGRAM_TOKEN не задан")
+    if not cfg.TELEGRAM_CHAT_ID:
+        errors.append("TELEGRAM_CHAT_ID не задан")
+    if not cfg.BINGX_API_KEY:
+        errors.append("BINGX_API_KEY не задан")
+    if not cfg.BINGX_SECRET:
+        errors.append("BINGX_SECRET не задан")
+    if cfg.MIN_RR < 1.0:
+        errors.append(f"MIN_RR={cfg.MIN_RR} должен быть ≥ 1.0")
+    if cfg.MAX_DAILY_LOSS <= 0:
+        errors.append(f"MAX_DAILY_LOSS={cfg.MAX_DAILY_LOSS} должен быть > 0")
+    if not (0 < cfg.RISK_PER_TRADE <= 5):
+        errors.append(f"RISK_PER_TRADE={cfg.RISK_PER_TRADE} должен быть в диапазоне 0–5%")
+    for msg in errors:
+        log.error(f"[config] {msg}")
+    critical = not cfg.TELEGRAM_TOKEN or not cfg.BINGX_API_KEY or not cfg.BINGX_SECRET
+    return not critical
+
+
 async def main():
     from aiogram import Bot, Dispatcher
 
     log.info(f"TOKEN: {'OK' if cfg.TELEGRAM_TOKEN else 'ПУСТО!'}")
     log.info(f"CHATID: {cfg.TELEGRAM_CHAT_ID!r}")
-    if not cfg.TELEGRAM_TOKEN:
-        log.error("TELEGRAM_TOKEN не задан — бот не запустится")
+    if not _validate_config():
+        log.error("Критические параметры не заданы — бот не запустится")
         return
 
     # Init SQLite and restore state
@@ -44,6 +66,15 @@ async def main():
     state.paused = db.get_kv("paused", "0") == "1"
     if state.paused:
         log.info("Бот восстановлен на паузе (из БД)")
+    _paused_until_str = db.get_kv("paused_until", "")
+    if _paused_until_str:
+        try:
+            _pu = datetime.fromisoformat(_paused_until_str)
+            if _pu > datetime.utcnow():
+                state.day.paused_until = _pu
+                log.info(f"Восстановлена авто-пауза до {_pu.strftime('%H:%M UTC')}")
+        except Exception:
+            pass
 
     bot = Bot(token=cfg.TELEGRAM_TOKEN)
     dp  = Dispatcher()

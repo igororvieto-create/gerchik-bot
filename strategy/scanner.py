@@ -32,7 +32,7 @@ def _px(p: float) -> float:
     return round(p, 6)
 
 
-SL_COOLDOWN_MIN = 60  # minutes to skip a symbol after SL hit
+SL_COOLDOWN_MIN = cfg.SL_COOLDOWN_MIN  # loaded from config / env
 
 
 class Scanner:
@@ -574,7 +574,7 @@ class Scanner:
             # MIN_POSITION_USDT is minimum notional exposure (not margin)
             min_notional = cfg.MIN_POSITION_USDT
             # Cap at 15% of balance as margin (not notional) — prevents over-sizing on small accounts
-            max_margin   = balance * 0.15
+            max_margin   = balance * cfg.MAX_MARGIN_PCT / 100
             max_notional = max(max_margin * leverage, min_notional)
             if notional > max_notional:
                 log.warning(f"Позиция {sig.symbol}: {notional:.2f} > {max_notional:.2f} — обрезаем")
@@ -875,15 +875,16 @@ class Scanner:
                         state.day.losses += 1
                         state.day.loss_streak += 1
                         if state.day.loss_streak >= 3:
-                            pause_min = 120
+                            pause_min = cfg.PAUSE_3X_LOSS_MIN
                             await self._notify(
-                                f"⛔ <b>3 убытка подряд</b> — пауза 2 часа\n"
+                                f"⛔ <b>3 убытка подряд</b> — пауза {pause_min} мин\n"
                                 f"Серия: {state.day.loss_streak} | "
                                 f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
                             )
                         else:
                             pause_min = cfg.PAUSE_AFTER_LOSS_MIN
                         state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
+                        db.save_kv("paused_until", state.day.paused_until.isoformat())
                     try:
                         from core import db
                         db.save_trade(pos, price, pnl, result)
@@ -1163,15 +1164,16 @@ class Scanner:
             state.day.losses     += 1
             state.day.loss_streak += 1
             if state.day.loss_streak >= 3:
-                pause_min = 120
+                pause_min = cfg.PAUSE_3X_LOSS_MIN
                 await self._notify(
-                    f"⛔ <b>3 убытка подряд</b> — пауза 2 часа\n"
+                    f"⛔ <b>3 убытка подряд</b> — пауза {pause_min} мин\n"
                     f"Серия: {state.day.loss_streak} | "
                     f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
                 )
             else:
                 pause_min = cfg.PAUSE_AFTER_LOSS_MIN
             state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
+            db.save_kv("paused_until", state.day.paused_until.isoformat())
 
         # Save to DB
         try:

@@ -35,6 +35,9 @@ class Config:
     TP3_RR: float = 3.0
     TP2_CLOSE_PCT:        float = float(os.getenv("TP2_CLOSE_PCT", "0.50").strip())
     PAUSE_AFTER_LOSS_MIN: int   = 30
+    PAUSE_3X_LOSS_MIN:    int   = int(os.getenv("PAUSE_3X_LOSS_MIN", "120").strip())
+    SL_COOLDOWN_MIN:      int   = int(os.getenv("SL_COOLDOWN_MIN", "60").strip())
+    MAX_MARGIN_PCT:       float = float(os.getenv("MAX_MARGIN_PCT", "15.0").strip())
     CONFIRM_TIMEOUT_SEC:  int   = 300
     SCAN_H1_INTERVAL_MIN: int   = int(os.getenv("SCAN_H1_INTERVAL_MIN", "15").strip())
     SCAN_BATCH_SIZE:      int   = int(os.getenv("SCAN_BATCH_SIZE", "10").strip())

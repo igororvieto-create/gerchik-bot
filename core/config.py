@@ -22,8 +22,8 @@ class Config:
     TREND_EMA_D1:     int   = int(os.getenv("TREND_EMA_D1", "200").strip())
     TREND_EMA_H4:     int   = int(os.getenv("TREND_EMA_H4", "50").strip())
     TREND_EMA_H1:     int   = int(os.getenv("TREND_EMA_H1", "21").strip())
-    FUNDING_MAX_LONG:  float = float(os.getenv("FUNDING_MAX_LONG", "0.03").strip())
-    FUNDING_MAX_SHORT: float = float(os.getenv("FUNDING_MAX_SHORT", "-0.03").strip())
+    FUNDING_MAX_LONG:  float = float(os.getenv("FUNDING_MAX_LONG", "0.02").strip())
+    FUNDING_MAX_SHORT: float = float(os.getenv("FUNDING_MAX_SHORT", "-0.02").strip())
     WHITELIST: List[str] = field(default_factory=lambda: [s.strip() for s in os.getenv("WHITELIST","").split(",") if s.strip()])
     BLACKLIST: List[str] = field(default_factory=lambda: [s.strip() for s in os.getenv("BLACKLIST","LUNA-USDT,FTT-USDT").split(",") if s.strip()])
     TOP_N_PAIRS:      int   = int(os.getenv("TOP_N_PAIRS", "100").strip())
@@ -34,8 +34,8 @@ class Config:
     TP1_RR: float = 1.0
     TP2_RR: float = 2.0
     TP3_RR: float = 3.0
-    TP2_CLOSE_PCT:        float = 0.60
-    PAUSE_AFTER_LOSS_MIN: int   = 15
+    TP2_CLOSE_PCT:        float = 0.50
+    PAUSE_AFTER_LOSS_MIN: int   = 30
     CONFIRM_TIMEOUT_SEC:  int   = 300
     SCAN_H1_INTERVAL_MIN: int   = int(os.getenv("SCAN_H1_INTERVAL_MIN", "15").strip())
     SCAN_BATCH_SIZE:      int   = int(os.getenv("SCAN_BATCH_SIZE", "10").strip())
@@ -46,7 +46,7 @@ class Config:
     # SL is placed at entry + this % buffer (locks in tiny profit above fees)
     BE_BUFFER_PCT:        float = float(os.getenv("BE_BUFFER_PCT", "0.05").strip())
     # Trailing stop: move SL this % behind the peak price (after breakeven)
-    TRAIL_PCT:            float = float(os.getenv("TRAIL_PCT", "1.0").strip())
+    TRAIL_PCT:            float = float(os.getenv("TRAIL_PCT", "0.8").strip())
     # Minimum position size in USDT of notional exposure (not margin)
     MIN_POSITION_USDT:    float = float(os.getenv("MIN_POSITION_USDT", "20.0").strip())
     # Auto-leverage: adjust leverage based on balance tiers (True/False)
@@ -56,7 +56,7 @@ class Config:
     QUIET_HOURS_END:      int   = int(os.getenv("QUIET_HOURS_END", "6").strip())
     # BTC trend filter: skip LONG when BTC drops >2% in 3h, skip SHORT when BTC rises >2%
     BTC_FILTER:           bool  = os.getenv("BTC_FILTER", "true").strip().lower() == "true"
-    BTC_FILTER_PCT:       float = float(os.getenv("BTC_FILTER_PCT", "2.0").strip())
+    BTC_FILTER_PCT:       float = float(os.getenv("BTC_FILTER_PCT", "3.0").strip())
     # ADX minimum — below this value market is ranging, skip signal
     ADX_MIN:              float = float(os.getenv("ADX_MIN", "25.0").strip())
     # Auto-close positions older than this many hours (0 = disabled)

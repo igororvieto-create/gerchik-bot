@@ -950,7 +950,7 @@ class Scanner:
                     tp1_triggered = (pos.side == "LONG" and price >= pos.tp1) or \
                                     (pos.side == "SHORT" and price <= pos.tp1)
                     if tp1_triggered:
-                        await self._partial_close(pos, 0.20, "TP1")
+                        await self._partial_close(pos, 0.25, "TP1")
 
                 # TP2 → partial close 60% of remaining — skip if tp2 unknown
                 if pos.be_moved and not pos.tp2_hit and pos.tp2 > 0:

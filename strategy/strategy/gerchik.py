@@ -485,13 +485,16 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     if h4ok:          score += 10
     if h4_aligned:    score += 5
     elif h4_near:     score += 3
-    # RSI positioning (ideal: 40-60 for LONG, 40-60 for SHORT)
-    rsi_ok = (trend=="LONG" and 35 <= cur_rsi <= 60) or \
-             (trend=="SHORT" and 40 <= cur_rsi <= 65)
-    if rsi_ok:        score += 8
+    # RSI positioning: good zone (+8), ideal zone adds extra +4
+    rsi_ok    = (trend=="LONG" and 35 <= cur_rsi <= 60) or \
+                (trend=="SHORT" and 40 <= cur_rsi <= 65)
+    rsi_ideal = (trend=="LONG" and 42 <= cur_rsi <= 55) or \
+                (trend=="SHORT" and 45 <= cur_rsi <= 58)
+    if rsi_ok:    score += 8
+    if rsi_ideal: score += 4   # perfect momentum window
     # Funding
     if abs(funding) < 0.01:   score += 8
-    elif abs(funding) < 0.03: score += 4
+    elif abs(funding) < 0.02: score += 4
     # D1 slope — aligned with trend direction
     if (trend == "LONG"  and d1_slope > 0.1) or \
        (trend == "SHORT" and d1_slope < -0.1):
@@ -500,18 +503,19 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     if macd_aligned:
         score += 8
     # ADX strength bonus
-    if cur_adx >= 30:   score += 5
+    if cur_adx >= 40:   score += 8   # very strong trend
+    elif cur_adx >= 30: score += 5
     elif cur_adx >= 25: score += 3
     # RSI divergence on H4: weakening momentum → penalty
     h4_rsi_v = rsi(h4["close"], 14)
     if detect_rsi_divergence(h4["close"], h4_rsi_v, trend):
-        score -= 8
+        score -= 12
     # D1 level proximity: entering near major daily obstacle → penalty
     d1_lv = find_levels(d1["high"], d1["low"], lookback=min(120, len(d1["high"])))
     d1_obstacles = d1_lv["resistance"] if trend == "LONG" else d1_lv["support"]
     is_near_d1, _ = near_level(price, d1_obstacles, tol=2.0)
     if is_near_d1:
-        score -= 8
+        score -= 10
     score = min(score, 100)
 
     rsi_str  = f"{cur_rsi:.0f}"
@@ -719,14 +723,18 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
     if touches <= 2:     score += 10
     elif touches <= 3:   score += 6
     elif touches <= 4:   score += 3
-    if cur_adx >= 30:    score += 8
+    if cur_adx >= 40:    score += 10  # very strong trend
+    elif cur_adx >= 30:  score += 8
     elif cur_adx >= 25:  score += 4
     if (trend == "LONG"  and d1_slope > 0.1) or \
        (trend == "SHORT" and d1_slope < -0.1):
         score += 5
-    rsi_ok = (trend == "LONG"  and 35 <= cur_rsi <= 60) or \
-             (trend == "SHORT" and 40 <= cur_rsi <= 65)
-    if rsi_ok: score += 5
+    rsi_ok    = (trend == "LONG"  and 35 <= cur_rsi <= 60) or \
+                (trend == "SHORT" and 40 <= cur_rsi <= 65)
+    rsi_ideal = (trend == "LONG"  and 42 <= cur_rsi <= 55) or \
+                (trend == "SHORT" and 45 <= cur_rsi <= 58)
+    if rsi_ok:    score += 5
+    if rsi_ideal: score += 3   # perfect momentum window
     # Wick depth bonus: deeper rejection = stronger institutional defense
     if wick_pct >= 1.5:   score += 7
     elif wick_pct >= 1.0: score += 5
@@ -734,13 +742,13 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
     # RSI divergence on H4: weakening momentum → penalty
     h4_rsi_fb = rsi(h4["close"], 14)
     if detect_rsi_divergence(h4["close"], h4_rsi_fb, trend):
-        score -= 8
+        score -= 12
     # D1 level proximity: entering near major daily obstacle → penalty
     d1_lv_fb = find_levels(d1["high"], d1["low"], lookback=min(120, len(d1["high"])))
     d1_obs_fb = d1_lv_fb["resistance"] if trend == "LONG" else d1_lv_fb["support"]
     is_near_d1_fb, _ = near_level(price, d1_obs_fb, tol=2.0)
     if is_near_d1_fb:
-        score -= 8
+        score -= 10
     score = min(score, 100)
 
     if score < cfg.MIN_SCORE:
@@ -974,7 +982,7 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg):
     d1_obs_rb = d1_lv_rb["resistance"] if trend == "LONG" else d1_lv_rb["support"]
     is_near_d1_rb, _ = near_level(price, d1_obs_rb, tol=2.0)
     if is_near_d1_rb:
-        score -= 8
+        score -= 10
     score = min(score, 100)
 
     if score < cfg.MIN_SCORE:
@@ -1157,7 +1165,7 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
     d1_obs_br = d1_lv_br["resistance"] if trend == "LONG" else d1_lv_br["support"]
     is_near_d1_br, _ = near_level(price, d1_obs_br, tol=2.0)
     if is_near_d1_br:
-        score -= 8
+        score -= 10
     score = min(score, 100)
 
     if score < cfg.MIN_SCORE:

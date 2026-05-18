@@ -323,7 +323,7 @@ class Scanner:
                     if cfg.AUTO_LEVERAGE:
                         try:
                             bal = state.current_balance or await self.ex.get_balance()
-                            ob_lev = 10 if bal < 100 else 7 if bal < 500 else 5 if bal < 2000 else 3
+                            ob_lev = 5 if bal < 1000 else 3
                         except Exception:
                             pass
                     ob_val = await validate_signal_with_orderbook(
@@ -352,6 +352,36 @@ class Scanner:
                         log.info(f"{symbol}: +8 W1 уровень {w1_lvl:.4f}")
                 except Exception as we:
                     log.debug(f"w1 bonus {symbol}: {we}")
+
+            # SMC/ICT filter — shadow mode by default (logs, doesn't block)
+            if sig is not None:
+                try:
+                    from strategy.smc_filters import (
+                        evaluate_smc, klines_to_candles, Direction as SMCDir,
+                    )
+                    smc = evaluate_smc(
+                        direction=SMCDir.LONG if sig.side == "LONG" else SMCDir.SHORT,
+                        current_price=sig.entry,
+                        h1_candles=klines_to_candles(h1),
+                        h4_candles=klines_to_candles(h4),
+                        d1_candles=klines_to_candles(d1),
+                    )
+                    if not smc.allowed:
+                        log.info(f"SMC block {symbol}: {'; '.join(smc.reasons)}")
+                        sig = None
+                    else:
+                        if smc.score_bonus:
+                            sig.score = min(100, sig.score + smc.score_bonus)
+                        if smc.hard_blocked:
+                            # Shadow mode: signal passes but log the would-be block
+                            sig.reason += (
+                                f"\n🔮 SMC shadow: {', '.join(smc.reasons)} "
+                                f"(P/D несовпадение — включи SHADOW_MODE=False)"
+                            )
+                        elif smc.score_bonus:
+                            sig.reason += f"\n🔮 SMC: {', '.join(smc.reasons)} {smc.score_bonus:+d}"
+                except Exception as sme:
+                    log.debug(f"smc_filter {symbol}: {sme}")
 
             return sig
         except Exception as e:

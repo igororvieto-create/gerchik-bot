@@ -1340,3 +1340,53 @@ class Scanner:
             )
         except Exception as e:
             log.warning(f"btc_weekly_alert: {e}")
+
+    async def funding_scan(self) -> list[tuple[str, float]]:
+        """
+        Сканирует фандинг по всем парам. Возвращает список (symbol, rate).
+        Также отправляет алерт в Telegram если есть экстремальные значения.
+        Запускается планировщиком каждые 8 часов.
+        """
+        ALERT_THRESHOLD = 0.05   # % — алерт при |funding| > 0.05%
+        TOP_N = 15               # сколько пар показывать в сводке
+
+        pairs = state.pairs if state.pairs else []
+        if not pairs:
+            return []
+
+        results = []
+        for symbol in pairs:
+            try:
+                rate = await self.ex.get_funding_rate(symbol)
+                results.append((symbol, rate))
+            except Exception:
+                pass
+
+        results.sort(key=lambda x: abs(x[1]), reverse=True)
+
+        extremes_long  = [(s, r) for s, r in results if r < -ALERT_THRESHOLD]   # SHORT платит → хорошо для LONG
+        extremes_short = [(s, r) for s, r in results if r >  ALERT_THRESHOLD]   # LONG платит → хорошо для SHORT
+
+        lines = []
+        if extremes_short:
+            lines.append("📈 <b>Высокий фандинг (LONG переплачивает → SHORT выгоден):</b>")
+            for s, r in extremes_short[:10]:
+                lines.append(f"  {s}: <code>{r:+.4f}%</code>")
+        if extremes_long:
+            lines.append("📉 <b>Отрицательный фандинг (SHORT переплачивает → LONG выгоден):</b>")
+            for s, r in extremes_long[:10]:
+                lines.append(f"  {s}: <code>{r:+.4f}%</code>")
+
+        top_str = "\n".join(
+            f"  {s}: <code>{r:+.4f}%</code>"
+            for s, r in results[:TOP_N]
+        )
+
+        text = (
+            f"💸 <b>Фандинг-сводка</b> ({len(results)} пар)\n\n"
+            + ("\n".join(lines) + "\n\n" if lines else "Экстремальных значений нет\n\n")
+            + f"<b>Топ-{TOP_N} по абс. значению:</b>\n{top_str}"
+        )
+        await self._notify(text)
+        log.info(f"funding_scan: {len(results)} пар, экстремов: {len(extremes_short)+len(extremes_long)}")
+        return results

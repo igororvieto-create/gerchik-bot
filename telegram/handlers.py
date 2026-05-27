@@ -837,6 +837,22 @@ async def handle_misc(msg: Message):
         await cmd_close_symbol(msg)
 
 
+# ------------------------------------------------------------------ /funding
+
+async def cmd_funding(msg: Message):
+    if not _auth(msg):
+        return
+    from strategy.scanner import _global_scanner
+    if _global_scanner is None:
+        await msg.answer("⚠️ Сканер не запущен", reply_markup=main_keyboard())
+        return
+    await msg.answer("⏳ Сканирую фандинг по всем парам...", reply_markup=main_keyboard())
+    try:
+        await _global_scanner.funding_scan()
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка: {_html.escape(str(e))}", parse_mode="HTML")
+
+
 # ------------------------------------------------------------------ register
 
 def register_handlers(dp: Dispatcher):
@@ -850,6 +866,7 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_report,   Command("report"))
     dp.message.register(cmd_history,  Command("history"))
     dp.message.register(cmd_top,      Command("top"))
+    dp.message.register(cmd_funding,  Command("funding"))
     dp.message.register(cmd_setminpos,  Command("setminpos"))
     dp.message.register(cmd_setmaxpos,  Command("setmaxpos"))
     dp.message.register(cmd_setmaxrisk, Command("setmaxrisk"))

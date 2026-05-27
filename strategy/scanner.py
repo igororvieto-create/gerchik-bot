@@ -107,6 +107,27 @@ class Scanner:
     # Prefixes of synthetic/index instruments — not real crypto, skip them
     _SYNTHETIC_PREFIXES = ("NCC", "NCSI", "NCCO")
 
+    async def _get_binance_symbols(self) -> set:
+        """Fetch USDT perpetual futures symbols from Binance public API."""
+        import aiohttp
+        url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+                async with s.get(url) as r:
+                    data = await r.json()
+            result = set()
+            for sym in data.get("symbols", []):
+                if sym.get("quoteAsset") == "USDT" and sym.get("status") == "TRADING":
+                    # Binance: "BTCUSDT" → BingX: "BTC-USDT"
+                    base = sym.get("baseAsset", "")
+                    if base:
+                        result.add(f"{base}-USDT")
+            log.info(f"Binance Futures: {len(result)} USDT пар получено")
+            return result
+        except Exception as e:
+            log.warning(f"Не удалось получить пары Binance: {e}")
+            return set()
+
     async def update_pairs(self):
         try:
             if cfg.WHITELIST:
@@ -118,6 +139,13 @@ class Scanner:
                     if s not in cfg.BLACKLIST
                     and not any(s.startswith(p) for p in self._SYNTHETIC_PREFIXES)
                 ]
+                # Optional: keep only pairs that also exist on Binance Futures
+                if cfg.BINANCE_FILTER:
+                    binance_syms = await self._get_binance_symbols()
+                    if binance_syms:
+                        before = len(state.pairs)
+                        state.pairs = [s for s in state.pairs if s in binance_syms]
+                        log.info(f"Binance фильтр: {before} → {len(state.pairs)} пар")
             log.info(f"Пар: {len(state.pairs)} | топ-5: {state.pairs[:5]}")
         except Exception as e:
             log.error(f"update_pairs: {e}")

@@ -43,12 +43,12 @@ class Config:
     SCAN_BATCH_SIZE:      int   = int(os.getenv("SCAN_BATCH_SIZE", "10").strip())
     SCAN_BATCH_DELAY:     float = float(os.getenv("SCAN_BATCH_DELAY", "0.5").strip())
     # Breakeven: move SL when price moves BE_TRIGGER_PCT% from entry in profit direction
-    # 0 = use TP1 as trigger (original behaviour)
-    BE_TRIGGER_PCT:       float = float(os.getenv("BE_TRIGGER_PCT", "0").strip())
+    # 0 = use TP1 as trigger (original behaviour); 0.3 = after +0.3% profit
+    BE_TRIGGER_PCT:       float = float(os.getenv("BE_TRIGGER_PCT", "0.3").strip())
     # SL is placed at entry + this % buffer (locks in tiny profit above fees)
     BE_BUFFER_PCT:        float = float(os.getenv("BE_BUFFER_PCT", "0.05").strip())
     # Trailing stop: move SL this % behind the peak price (after breakeven)
-    TRAIL_PCT:            float = float(os.getenv("TRAIL_PCT", "0.8").strip())
+    TRAIL_PCT:            float = float(os.getenv("TRAIL_PCT", "1.0").strip())
     # Minimum position size in USDT of notional exposure (not margin)
     MIN_POSITION_USDT:    float = float(os.getenv("MIN_POSITION_USDT", "20.0").strip())
     # Auto-leverage: adjust leverage based on balance tiers (True/False)

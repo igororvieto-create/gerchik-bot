@@ -994,6 +994,9 @@ class Scanner:
 
         for symbol, pos in list(state.positions.items()):
             try:
+                # Guard: position may have been removed by exchange sync earlier in this cycle
+                if symbol not in state.positions:
+                    continue
                 ticker = await self.ex.get_ticker(symbol)
                 if not ticker:
                     continue
@@ -1173,6 +1176,9 @@ class Scanner:
             log.error(f"partial_close {pos.symbol}: {e}")
 
     async def _check_closed(self, pos: Position, price: float):
+        # Guard: exchange sync may have already removed this position in the same monitor cycle
+        if pos.symbol not in state.positions:
+            return
         # Skip check for exchange-synced positions without SL/TP info
         if pos.sl == 0 or pos.tp3 == 0:
             return

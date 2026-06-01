@@ -1349,23 +1349,31 @@ class Scanner:
         """
         ALERT_THRESHOLD = 0.05   # % — алерт при |funding| > 0.05%
         TOP_N = 15               # сколько пар показывать в сводке
+        BATCH = 20               # параллельных запросов за раз
 
         pairs = state.pairs if state.pairs else []
         if not pairs:
             return []
 
-        results = []
-        for symbol in pairs:
+        async def _fetch(symbol):
             try:
                 rate = await self.ex.get_funding_rate(symbol)
-                results.append((symbol, rate))
+                return (symbol, rate)
             except Exception:
-                pass
+                return None
+
+        results = []
+        for i in range(0, len(pairs), BATCH):
+            batch = pairs[i:i + BATCH]
+            fetched = await asyncio.gather(*[_fetch(s) for s in batch])
+            results.extend(r for r in fetched if r is not None)
+            if i + BATCH < len(pairs):
+                await asyncio.sleep(0.3)
 
         results.sort(key=lambda x: abs(x[1]), reverse=True)
 
-        extremes_long  = [(s, r) for s, r in results if r < -ALERT_THRESHOLD]   # SHORT платит → хорошо для LONG
-        extremes_short = [(s, r) for s, r in results if r >  ALERT_THRESHOLD]   # LONG платит → хорошо для SHORT
+        extremes_long  = [(s, r) for s, r in results if r < -ALERT_THRESHOLD]
+        extremes_short = [(s, r) for s, r in results if r >  ALERT_THRESHOLD]
 
         lines = []
         if extremes_short:
@@ -1381,7 +1389,6 @@ class Scanner:
             f"  {s}: <code>{r:+.4f}%</code>"
             for s, r in results[:TOP_N]
         )
-
         text = (
             f"💸 <b>Фандинг-сводка</b> ({len(results)} пар)\n\n"
             + ("\n".join(lines) + "\n\n" if lines else "Экстремальных значений нет\n\n")

@@ -536,6 +536,36 @@ async def cmd_setmaxdaily(msg: Message):
         await msg.answer("Введи число от 1 до 50 (например: /setmaxdaily 5)")
 
 
+async def cmd_setmaxsl(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        current = f"{cfg.MAX_SL_PCT}%" if cfg.MAX_SL_PCT > 0 else "выкл"
+        await msg.answer(
+            f"🛑 <b>Макс. ширина SL от входа:</b> <code>{current}</code>\n\n"
+            f"Сигналы с SL шире этого порога игнорируются.\n"
+            f"Изменить: <code>/setmaxsl 10</code>\n"
+            f"Отключить: <code>/setmaxsl 0</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        v = float(args[1])
+        if v < 0 or v > 100:
+            raise ValueError
+        cfg.MAX_SL_PCT = v
+        from core import db; db.save_cfg_value("MAX_SL_PCT", v)
+        label = f"{v}%" if v > 0 else "выкл"
+        await msg.answer(
+            f"✅ Макс. SL: <code>{label}</code> от входа",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
+    except Exception:
+        await msg.answer("Введи число от 0 до 100 (например: /setmaxsl 10)")
+
+
 async def cmd_setpairs(msg: Message):
     if not _auth(msg):
         return
@@ -972,6 +1002,7 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_setminscore, Command("setminscore"))
     dp.message.register(cmd_setmaxloss,  Command("setmaxloss"))
     dp.message.register(cmd_setmaxdaily, Command("setmaxdaily"))
+    dp.message.register(cmd_setmaxsl,    Command("setmaxsl"))
     dp.message.register(cmd_setpairs, Command("setpairs"))
     dp.message.register(cmd_pause,    Command("pause"))
     dp.message.register(cmd_resume,   Command("resume"))

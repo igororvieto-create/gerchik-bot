@@ -71,5 +71,7 @@ class Config:
     OB_MAX_SPREAD_BPS:       float = float(os.getenv("OB_MAX_SPREAD_BPS", "15.0").strip())
     # Binance cross-filter: only scan pairs that also exist on Binance Futures
     BINANCE_FILTER:          bool  = os.getenv("BINANCE_FILTER", "false").strip().lower() == "true"
+    # Maximum SL distance from entry in % (0 = disabled). Signals with wider SL are discarded.
+    MAX_SL_PCT:              float = float(os.getenv("MAX_SL_PCT", "10.0").strip())
 
 cfg = Config()

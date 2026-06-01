@@ -237,6 +237,16 @@ class Scanner:
         skipped   = len(signals) - len(qualified)
         if skipped:
             log.info(f"Отфильтровано по MIN_SCORE ({effective_min_score}): {skipped} сигналов")
+
+        # Filter out signals where SL is too far from entry (hard limit on SL width)
+        if cfg.MAX_SL_PCT > 0:
+            wide_sl = [s for s in qualified
+                       if s.sl > 0 and abs(s.entry - s.sl) / s.entry * 100 > cfg.MAX_SL_PCT]
+            if wide_sl:
+                for ws in wide_sl:
+                    sl_pct = abs(ws.entry - ws.sl) / ws.entry * 100
+                    log.info(f"{ws.symbol}: SL {sl_pct:.1f}% > MAX_SL_PCT {cfg.MAX_SL_PCT}% — отброшен")
+                qualified = [s for s in qualified if s not in wide_sl]
         if not qualified:
             log.info(f"Нет сигналов с достаточным score. Причины отсева: {diag}")
             if self._scan_count % 4 == 1:
@@ -437,7 +447,8 @@ class Scanner:
                         return  # Silent — no notification to avoid confusion
                     # Validate SL width with updated entry (price may have run far in our favor)
                     sld = abs(cur_price - sig.sl)
-                    if sig.sl > 0 and sld / cur_price > 0.08:
+                    sl_limit = cfg.MAX_SL_PCT / 100 if cfg.MAX_SL_PCT > 0 else 0.08
+                    if sig.sl > 0 and sld / cur_price > sl_limit:
                         drift = abs(cur_price - orig_entry) / orig_entry * 100 if orig_entry > 0 else 0
                         log.info(
                             f"{sig.symbol}: SL стал {sld/cur_price*100:.1f}% от новой цены "

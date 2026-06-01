@@ -221,6 +221,24 @@ def delete_open_position(symbol: str) -> None:
         log.error(f"delete_open_position {symbol}: {e}")
 
 
+def save_cfg_value(key: str, value) -> None:
+    """Persist a runtime-changed config value so it survives restarts."""
+    save_kv(f"cfg:{key}", str(value))
+
+
+def load_cfg_values() -> dict:
+    """Load all previously saved config overrides (keys without 'cfg:' prefix)."""
+    result = {}
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.execute("SELECT key, value FROM kv WHERE key LIKE 'cfg:%'")
+            for k, v in cur.fetchall():
+                result[k[4:]] = v
+    except Exception as e:
+        log.error(f"load_cfg_values: {e}")
+    return result
+
+
 def load_open_positions() -> list:
     """Load all persisted open positions at startup."""
     result = []

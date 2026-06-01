@@ -54,6 +54,27 @@ async def main():
 
     # Init SQLite and restore state
     db.init_db()
+
+    # Restore runtime-changed config values (setrisk, setlev, etc.)
+    _saved_cfg = db.load_cfg_values()
+    for _k, _v in _saved_cfg.items():
+        if hasattr(cfg, _k):
+            try:
+                _cur = getattr(cfg, _k)
+                if isinstance(_cur, bool):
+                    setattr(cfg, _k, _v.lower() == "true")
+                elif isinstance(_cur, int):
+                    setattr(cfg, _k, int(float(_v)))
+                elif isinstance(_cur, float):
+                    setattr(cfg, _k, float(_v))
+                elif isinstance(_cur, list):
+                    setattr(cfg, _k, [s.strip() for s in _v.split(",") if s.strip()])
+                else:
+                    setattr(cfg, _k, _v)
+                log.info(f"Восстановлена настройка {_k}={_v}")
+            except Exception as _e:
+                log.warning(f"Не удалось восстановить настройку {_k}: {_e}")
+
     state.total_pnl = db.load_total_pnl()
     log.info(f"Восстановлен total_pnl из БД: {state.total_pnl:.2f} USDT")
     # Restore today's stats so daily limits and /report are correct after restart

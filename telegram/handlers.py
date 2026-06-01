@@ -102,7 +102,12 @@ async def cmd_help(msg: Message):
         "/setmode auto|manual — режим\n"
         "/setrisk 1.0 — риск %\n"
         "/setlev 5 — плечо\n"
-        "/closeall — закрыть все позиции",
+        "/closeall — закрыть все позиции\n"
+        "/close_BTC_USDT — закрыть конкретную позицию\n\n"
+        "<b>Настройки риска:</b>\n"
+        "/setmaxloss 3.0 — макс. дневной убыток %\n"
+        "/setmaxdaily 5 — макс. сделок в день\n"
+        "/setminscore 70 — мин. оценка сигнала",
         parse_mode="HTML",
         reply_markup=main_keyboard(),
     )
@@ -241,7 +246,8 @@ async def cmd_settings(msg: Message):
         f"Фандинг SHORT макс: <code>{cfg.FUNDING_MAX_SHORT}%</code>\n"
         f"Макс. время позиции: <code>{cfg.MAX_POSITION_HOURS}ч</code>\n"
         f"SMC фильтр: <code>{'тень (лог)' if _smc_shadow() else 'АКТИВЕН'}</code>\n\n"
-        f"<i>/setrisk 1.0 | /setlev 5 | /setbe 0.5 | /settrail 1.0</i>"
+        f"<i>/setrisk | /setlev | /setbe | /settrail</i>\n"
+        f"<i>/setmaxloss | /setmaxdaily | /setminscore</i>"
     )
     await msg.answer(text, parse_mode="HTML", reply_markup=main_keyboard())
 
@@ -328,6 +334,7 @@ async def cmd_setminpos(msg: Message):
         if v < 1 or v > 10000:
             raise ValueError
         cfg.MIN_POSITION_USDT = v
+        from core import db; db.save_cfg_value("MIN_POSITION_USDT", v)
         await msg.answer(
             f"✅ Мин. позиция: <code>{v} USDT</code>",
             parse_mode="HTML",
@@ -353,6 +360,7 @@ async def cmd_setmaxpos(msg: Message):
         if v < 1 or v > 20:
             raise ValueError
         cfg.MAX_POSITIONS = v
+        from core import db; db.save_cfg_value("MAX_POSITIONS", v)
         await msg.answer(
             f"✅ Макс. позиций: <code>{v}</code>",
             parse_mode="HTML",
@@ -379,6 +387,7 @@ async def cmd_settrail(msg: Message):
         if v < 0.1 or v > 10:
             raise ValueError
         cfg.TRAIL_PCT = v
+        from core import db; db.save_cfg_value("TRAIL_PCT", v)
         await msg.answer(
             f"✅ Трейлинг стоп: <code>{v}%</code>",
             parse_mode="HTML",
@@ -410,6 +419,7 @@ async def cmd_setbe(msg: Message):
         if v < 0 or v > 10:
             raise ValueError
         cfg.BE_TRIGGER_PCT = v
+        from core import db; db.save_cfg_value("BE_TRIGGER_PCT", v)
         mode = f"+{v}% от входа" if v > 0 else "TP1"
         await msg.answer(
             f"✅ Безубыток теперь переставляется при {mode}",
@@ -436,6 +446,7 @@ async def cmd_setmaxrisk(msg: Message):
         if v < 1 or v > 10000:
             raise ValueError
         cfg.MAX_RISK_USDT = v
+        from core import db; db.save_cfg_value("MAX_RISK_USDT", v)
         await msg.answer(
             f"✅ Макс. риск: <code>{v} USDT</code> на сделку",
             parse_mode="HTML",
@@ -443,6 +454,86 @@ async def cmd_setmaxrisk(msg: Message):
         )
     except Exception:
         await msg.answer("Введи число от 1 до 10000 (например: /setmaxrisk 20)")
+
+
+async def cmd_setminscore(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        await msg.answer(
+            f"⭐ <b>Мин. оценка сигнала:</b> <code>{cfg.MIN_SCORE}</code>\n\n"
+            f"Сигналы ниже этого порога игнорируются.\n"
+            f"Изменить: <code>/setminscore 70</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        v = int(args[1])
+        if v < 40 or v > 95:
+            raise ValueError
+        cfg.MIN_SCORE = v
+        from core import db; db.save_cfg_value("MIN_SCORE", v)
+        await msg.answer(
+            f"✅ Мин. оценка: <code>{v}</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
+    except Exception:
+        await msg.answer("Введи число от 40 до 95 (например: /setminscore 70)")
+
+
+async def cmd_setmaxloss(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        await msg.answer(
+            f"🛑 <b>Макс. дневной убыток:</b> <code>{cfg.MAX_DAILY_LOSS}%</code>\n\n"
+            f"При достижении торговля останавливается до следующего дня.\n"
+            f"Изменить: <code>/setmaxloss 3.0</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        v = float(args[1])
+        if v < 0.5 or v > 20:
+            raise ValueError
+        cfg.MAX_DAILY_LOSS = v
+        from core import db; db.save_cfg_value("MAX_DAILY_LOSS", v)
+        await msg.answer(
+            f"✅ Макс. дневной убыток: <code>{v}%</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
+    except Exception:
+        await msg.answer("Введи число от 0.5 до 20 (например: /setmaxloss 3.0)")
+
+
+async def cmd_setmaxdaily(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        await msg.answer(
+            f"📅 <b>Макс. сделок в день:</b> <code>{cfg.MAX_DAILY_TRADES}</code>\n\n"
+            f"Изменить: <code>/setmaxdaily 5</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        v = int(args[1])
+        if v < 1 or v > 50:
+            raise ValueError
+        cfg.MAX_DAILY_TRADES = v
+        from core import db; db.save_cfg_value("MAX_DAILY_TRADES", v)
+        await msg.answer(
+            f"✅ Макс. сделок/день: <code>{v}</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
+    except Exception:
+        await msg.answer("Введи число от 1 до 50 (например: /setmaxdaily 5)")
 
 
 async def cmd_setpairs(msg: Message):
@@ -513,6 +604,7 @@ async def cmd_setmode(msg: Message):
         await msg.answer("/setmode auto | /setmode manual")
         return
     cfg.MODE = args[1]
+    from core import db; db.save_cfg_value("MODE", cfg.MODE)
     await msg.answer(f"✅ Режим: <code>{cfg.MODE}</code>", parse_mode="HTML",
                      reply_markup=main_keyboard())
 
@@ -529,6 +621,7 @@ async def cmd_setrisk(msg: Message):
         if not 0.1 <= v <= 3.0:
             raise ValueError
         cfg.RISK_PER_TRADE = v
+        from core import db; db.save_cfg_value("RISK_PER_TRADE", v)
         await msg.answer(f"✅ Риск: <code>{v}%</code>", parse_mode="HTML",
                          reply_markup=main_keyboard())
     except Exception:
@@ -547,6 +640,7 @@ async def cmd_setlev(msg: Message):
         if not 1 <= v <= 50:
             raise ValueError
         cfg.LEVERAGE = v
+        from core import db; db.save_cfg_value("LEVERAGE", v)
         await msg.answer(f"✅ Плечо: <code>x{v}</code>", parse_mode="HTML",
                          reply_markup=main_keyboard())
     except Exception:
@@ -798,11 +892,13 @@ async def handle_misc(msg: Message):
 
     if text == "🤖 Авто":
         cfg.MODE = "auto"
+        from core import db as _db; _db.save_cfg_value("MODE", "auto")
         await msg.answer("✅ Режим: <code>auto</code>", parse_mode="HTML",
                          reply_markup=main_keyboard())
         return
     if text == "✋ Ручной":
         cfg.MODE = "manual"
+        from core import db as _db; _db.save_cfg_value("MODE", "manual")
         await msg.answer("✅ Режим: <code>manual</code>", parse_mode="HTML",
                          reply_markup=main_keyboard())
         return
@@ -871,8 +967,11 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_setminpos,  Command("setminpos"))
     dp.message.register(cmd_setmaxpos,  Command("setmaxpos"))
     dp.message.register(cmd_setmaxrisk, Command("setmaxrisk"))
-    dp.message.register(cmd_setbe,      Command("setbe"))
-    dp.message.register(cmd_settrail, Command("settrail"))
+    dp.message.register(cmd_setbe,       Command("setbe"))
+    dp.message.register(cmd_settrail,   Command("settrail"))
+    dp.message.register(cmd_setminscore, Command("setminscore"))
+    dp.message.register(cmd_setmaxloss,  Command("setmaxloss"))
+    dp.message.register(cmd_setmaxdaily, Command("setmaxdaily"))
     dp.message.register(cmd_setpairs, Command("setpairs"))
     dp.message.register(cmd_pause,    Command("pause"))
     dp.message.register(cmd_resume,   Command("resume"))

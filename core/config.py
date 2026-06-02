@@ -18,7 +18,7 @@ class Config:
     SL_BUFFER_PCT:    float = float(os.getenv("SL_BUFFER_PCT", "0.15").strip())
     VOLUME_MULT:      float = float(os.getenv("VOLUME_MULT", "1.3").strip())
     VOLUME_MA_PERIOD: int   = int(os.getenv("VOLUME_MA_PERIOD", "20").strip())
-    MIN_SCORE:        int   = int(os.getenv("MIN_SCORE", "72").strip())
+    MIN_SCORE:        int   = int(os.getenv("MIN_SCORE", "68").strip())
     TREND_EMA_D1:     int   = int(os.getenv("TREND_EMA_D1", "200").strip())
     TREND_EMA_H4:     int   = int(os.getenv("TREND_EMA_H4", "50").strip())
     FUNDING_MAX_LONG:  float = float(os.getenv("FUNDING_MAX_LONG", "0.02").strip())
@@ -26,7 +26,7 @@ class Config:
     WHITELIST: List[str] = field(default_factory=lambda: [s.strip() for s in os.getenv("WHITELIST","").split(",") if s.strip()])
     BLACKLIST: List[str] = field(default_factory=lambda: [s.strip() for s in os.getenv("BLACKLIST","LUNA-USDT,FTT-USDT").split(",") if s.strip()])
     TOP_N_PAIRS:      int   = int(os.getenv("TOP_N_PAIRS", "100").strip())
-    MAX_RISK_USDT:    float = float(os.getenv("MAX_RISK_USDT", "5.0").strip())
+    MAX_RISK_USDT:    float = float(os.getenv("MAX_RISK_USDT", "10.0").strip())
     TREND_TF:  str = "1d"
     H4_TF:     str = "4h"
     SIGNAL_TF: str = "1h"
@@ -43,8 +43,8 @@ class Config:
     SCAN_BATCH_SIZE:      int   = int(os.getenv("SCAN_BATCH_SIZE", "10").strip())
     SCAN_BATCH_DELAY:     float = float(os.getenv("SCAN_BATCH_DELAY", "0.5").strip())
     # Breakeven: move SL when price moves BE_TRIGGER_PCT% from entry in profit direction
-    # 0 = use TP1 as trigger (original behaviour); 0.3 = after +0.3% profit
-    BE_TRIGGER_PCT:       float = float(os.getenv("BE_TRIGGER_PCT", "0.3").strip())
+    # 0 = use TP1 as trigger (original behaviour); 0.5 = after +0.5% profit
+    BE_TRIGGER_PCT:       float = float(os.getenv("BE_TRIGGER_PCT", "0.5").strip())
     # SL is placed at entry + this % buffer (locks in tiny profit above fees)
     BE_BUFFER_PCT:        float = float(os.getenv("BE_BUFFER_PCT", "0.05").strip())
     # Trailing stop: move SL this % behind the peak price (after breakeven)
@@ -56,7 +56,7 @@ class Config:
     # Time filter: skip scanning during low-liquidity hours (UTC)
     QUIET_HOURS_START:    int   = int(os.getenv("QUIET_HOURS_START", "2").strip())
     QUIET_HOURS_END:      int   = int(os.getenv("QUIET_HOURS_END", "6").strip())
-    # BTC trend filter: skip LONG when BTC drops >2% in 3h, skip SHORT when BTC rises >2%
+    # BTC trend filter: skip LONG when BTC drops >3% in 3h, skip SHORT when BTC rises >3%
     BTC_FILTER:           bool  = os.getenv("BTC_FILTER", "true").strip().lower() == "true"
     BTC_FILTER_PCT:       float = float(os.getenv("BTC_FILTER_PCT", "3.0").strip())
     # ADX minimum — below this value market is ranging, skip signal

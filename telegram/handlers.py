@@ -107,7 +107,8 @@ async def cmd_help(msg: Message):
         "<b>Настройки риска:</b>\n"
         "/setmaxloss 3.0 — макс. дневной убыток %\n"
         "/setmaxdaily 5 — макс. сделок в день\n"
-        "/setminscore 70 — мин. оценка сигнала",
+        "/setminscore 70 — мин. оценка сигнала\n"
+        "/setautolev on|off — авто-плечо по балансу",
         parse_mode="HTML",
         reply_markup=main_keyboard(),
     )
@@ -246,7 +247,7 @@ async def cmd_settings(msg: Message):
         f"Фандинг SHORT макс: <code>{cfg.FUNDING_MAX_SHORT}%</code>\n"
         f"Макс. время позиции: <code>{cfg.MAX_POSITION_HOURS}ч</code>\n"
         f"SMC фильтр: <code>{'тень (лог)' if _smc_shadow() else 'АКТИВЕН'}</code>\n\n"
-        f"<i>/setrisk | /setlev | /setbe | /settrail</i>\n"
+        f"<i>/setrisk | /setlev | /setbe | /settrail | /setautolev</i>\n"
         f"<i>/setmaxloss | /setmaxdaily | /setminscore</i>"
     )
     await msg.answer(text, parse_mode="HTML", reply_markup=main_keyboard())
@@ -564,6 +565,42 @@ async def cmd_setmaxsl(msg: Message):
         )
     except Exception:
         await msg.answer("Введи число от 0 до 100 (например: /setmaxsl 10)")
+
+
+async def cmd_setautolev(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        status = "✅ вкл" if cfg.AUTO_LEVERAGE else "❌ выкл"
+        await msg.answer(
+            f"⚡ <b>Авто-плечо:</b> {status}\n\n"
+            f"При включении плечо выбирается по балансу:\n"
+            f"• &lt; $100 → x10\n"
+            f"• &lt; $500 → x7\n"
+            f"• &lt; $2000 → x5\n"
+            f"• ≥ $2000 → x3\n\n"
+            f"Включить: <code>/setautolev on</code>\n"
+            f"Выключить: <code>/setautolev off</code>",
+            parse_mode="HTML",
+        )
+        return
+    v = args[1].lower()
+    if v in ("on", "1", "true", "вкл"):
+        cfg.AUTO_LEVERAGE = True
+        from core import db; db.save_cfg_value("AUTO_LEVERAGE", "true")
+        await msg.answer("✅ Авто-плечо включено", reply_markup=main_keyboard())
+    elif v in ("off", "0", "false", "выкл"):
+        cfg.AUTO_LEVERAGE = False
+        from core import db; db.save_cfg_value("AUTO_LEVERAGE", "false")
+        await msg.answer(
+            f"❌ Авто-плечо выключено. Используется фиксированное плечо x{cfg.LEVERAGE}.\n"
+            f"Изменить: <code>/setlev 5</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
+    else:
+        await msg.answer("Используй: /setautolev on или /setautolev off")
 
 
 async def cmd_setpairs(msg: Message):
@@ -1003,6 +1040,7 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_setmaxloss,  Command("setmaxloss"))
     dp.message.register(cmd_setmaxdaily, Command("setmaxdaily"))
     dp.message.register(cmd_setmaxsl,    Command("setmaxsl"))
+    dp.message.register(cmd_setautolev,  Command("setautolev"))
     dp.message.register(cmd_setpairs, Command("setpairs"))
     dp.message.register(cmd_pause,    Command("pause"))
     dp.message.register(cmd_resume,   Command("resume"))

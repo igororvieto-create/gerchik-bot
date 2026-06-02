@@ -1122,6 +1122,7 @@ class Scanner:
             qty = round(pos.qty * pct, 3)
             if qty <= 0:
                 return
+            qty = min(qty, pos.qty)  # safety: never close more than held
             await self.ex.close_position(pos.symbol, qty, pos.side)
 
             # Record PnL for the closed portion

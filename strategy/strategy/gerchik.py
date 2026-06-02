@@ -468,6 +468,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     tp3 = _px(price + sld*cfg.TP3_RR if trend=="LONG" else price - sld*cfg.TP3_RR)
     rr  = cfg.TP2_RR
     if rr < cfg.MIN_RR:
+        _reject(f"R/R слишком мал ({rr:.1f} < {cfg.MIN_RR})")
         return None
 
     # ── Score ──
@@ -1169,6 +1170,7 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
     score = min(score, 100)
 
     if score < cfg.MIN_SCORE:
+        _reject(f"пробой: score {score} < MIN_SCORE {cfg.MIN_SCORE}")
         return None
 
     reason = (

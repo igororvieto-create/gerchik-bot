@@ -1086,12 +1086,12 @@ class Scanner:
             if pos.side == "LONG":
                 if price <= pos.trail_price:
                     return
-                pos.trail_price = price
+                new_trail = price
                 new_sl = _px(price * (1 - cfg.TRAIL_PCT / 100))
             else:
                 if price >= pos.trail_price and pos.trail_price != 0:
                     return
-                pos.trail_price = price
+                new_trail = price
                 new_sl = _px(price * (1 + cfg.TRAIL_PCT / 100))
 
             # Only move if improvement is meaningful (≥0.1%)
@@ -1111,6 +1111,7 @@ class Scanner:
                 return
             pos.sl_order_id = new_id
             pos.sl = new_sl
+            pos.trail_price = new_trail  # update only after exchange confirms
             log.info(f"Trail SL {pos.symbol} → {new_sl:.4f}")
             db.save_open_position(pos)
         except Exception as e:

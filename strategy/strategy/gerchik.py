@@ -153,62 +153,13 @@ def nearest_weekly_levels(price, w1, count=3):
     resistances = sorted([l for l in lvls["resistance"] if l > price])[:count]
     return {"support": supports, "resistance": resistances}
 
-def find_liquidity_pools(highs, lows, lookback=60, tol=0.003):
-    """
-    Detect equal highs (sell-side liquidity) and equal lows (buy-side liquidity).
-
-    Equal highs = clusters of candle highs within tol% of each other.
-    Shorts accumulate stop-losses just above them → price gets pulled there.
-
-    Equal lows = clusters of candle lows within tol% of each other.
-    Longs accumulate stop-losses just below them → price gets pulled there.
-
-    Returns:
-        sell_side: [(price, count)] sorted by count — stops above, price targets LONG
-        buy_side:  [(price, count)] sorted by count — stops below, price targets SHORT
-    """
-    rh = list(highs[-lookback:])
-    rl = list(lows[-lookback:])
-    n  = len(rh)
-
-    def cluster(values):
-        used, pools = set(), []
-        for i in range(n):
-            if i in used or values[i] <= 0:
-                continue
-            grp = [values[i]]
-            idxs = [i]
-            for j in range(i + 1, n):
-                if j not in used and values[j] > 0:
-                    if abs(values[j] - values[i]) / values[i] <= tol:
-                        grp.append(values[j])
-                        idxs.append(j)
-            if len(grp) >= 2:
-                for k in idxs:
-                    used.add(k)
-                pools.append((float(np.mean(grp)), len(grp)))
-        pools.sort(key=lambda x: x[1], reverse=True)
-        return pools
-
-    return {"sell_side": cluster(rh), "buy_side": cluster(rl)}
-
-
-def nearest_liquidity_target(price, pools, direction):
-    """
-    Return (pool_price, strength) of the nearest liquidity target in trade direction.
-    LONG → nearest sell-side pool above price.
-    SHORT → nearest buy-side pool below price.
-    Returns (None, 0) if nothing found.
-    """
-    key = "sell_side" if direction == "LONG" else "buy_side"
-    candidates = [
-        (lvl, cnt) for lvl, cnt in pools.get(key, [])
-        if (direction == "LONG" and lvl > price) or (direction == "SHORT" and lvl < price)
-    ]
-    if not candidates:
-        return None, 0
-    candidates.sort(key=lambda x: abs(x[0] - price))
-    return candidates[0]
+def level_last_touch_age(level, highs, lows, tol=0.3):
+    """Returns candles since the level was last touched. Large = stale level."""
+    t = level * tol / 100
+    for i in range(len(highs) - 1, -1, -1):
+        if abs(highs[i] - level) <= t or abs(lows[i] - level) <= t:
+            return len(highs) - 1 - i
+    return len(highs)
 
 
 def near_level(price, levels, tol=0.8):
@@ -427,7 +378,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         primary = lv4["support"] + lv1["support"]
     else:
         primary = lv4["resistance"] + lv1["resistance"]
-    near, level = near_level(price, primary, tol=1.5)
+    near, level = near_level(price, primary, tol=1.0)
     if not near:
         _reject("не у уровня S/R")
         return None
@@ -564,10 +515,17 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     elif vrat >= 2.0: score += 10
     elif vrat >= 1.5: score += 6
     else:             score += 3
-    # Level quality
-    if touches <= 2:  score += 12
-    elif touches <= 3: score += 7
-    elif touches <= 4: score += 3
+    # Level quality — Gerchik: 2–3 touches optimal, 1 = unconfirmed, 5+ = exhausted
+    if touches == 2:    score += 12
+    elif touches == 3:  score += 10
+    elif touches == 1:  score += 2   # fresh but unconfirmed
+    elif touches == 4:  score += 5
+    # 5+ touches: no bonus (level near exhaustion)
+    # Level freshness — recently touched level is still respected by market
+    touch_age = level_last_touch_age(level, h1["high"][-60:], h1["low"][-60:])
+    if touch_age <= 5:    score += 8
+    elif touch_age <= 15: score += 5
+    elif touch_age <= 30: score += 2
     # H4 confirmation
     if h4ok:          score += 10
     if h4_aligned:    score += 5
@@ -605,30 +563,6 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         score -= 10
     score = min(score, 100)
 
-    # ── Liquidity pool analysis ──
-    h4_liq = find_liquidity_pools(h4["high"], h4["low"], lookback=60)
-    liq_target, liq_strength = nearest_liquidity_target(price, h4_liq, trend)
-    liq_line = ""
-    if liq_target:
-        dist_pct = abs(liq_target - price) / price * 100
-        tp2_dist = abs(tp2 - price) / price * 100 if price > 0 else 0
-        # Bonus: TP2 aligns with liquidity pool (price naturally pulled there)
-        if dist_pct > 0 and abs(dist_pct - tp2_dist) / dist_pct < 0.3:
-            score = min(100, score + 8)
-            liq_line = f"💧 Ликвидность: <code>{liq_target:.4f}</code> ({liq_strength} свечей) ✅ совпадает с TP\n"
-        else:
-            liq_line = f"💧 Ликвидность: <code>{liq_target:.4f}</code> ({liq_strength} свечей, {dist_pct:.1f}%)\n"
-        # Penalty: entry is very close to opposite-side liquidity pool (danger zone)
-        opp_key = "buy_side" if trend == "LONG" else "sell_side"
-        opp_pools = h4_liq.get(opp_key, [])
-        for opp_lvl, opp_cnt in opp_pools:
-            opp_dist = abs(opp_lvl - price) / price * 100
-            if opp_dist < 0.5 and opp_cnt >= 2:
-                # Entering right next to opposite-side pool — likely to get swept first
-                score = max(0, score - 8)
-                liq_line += f"⚠️ Встречная ликвидность: <code>{opp_lvl:.4f}</code> ({opp_cnt} свечей)\n"
-                break
-
     rsi_str  = f"{cur_rsi:.0f}"
     atr_str  = f"{cur_atr:.4f}"
     macd_str = "🟢" if macd_aligned else "⚪"
@@ -637,11 +571,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         f"🕯 H1: {pname} | H4: {h4p if h4ok else '—'}\n"
         f"📈 D1: {'🟢' if d1_up else '🔴'} EMA200 slope {d1_slope:+.2f}%\n"
         f"H4: {'🟢' if h4_up else '🔴'} EMA50 | ADX: <code>{cur_adx:.1f}</code>\n"
-        f"🎯 Уровень: <code>{level:.4f}</code> ({touches} кас.)\n"
+        f"🎯 Уровень: <code>{level:.4f}</code> ({touches} кас., свежесть: {touch_age} св.)\n"
         f"📦 Объём: <code>{vrat:.2f}×</code> | RSI: <code>{rsi_str}</code> | "
         f"MACD: {macd_str} | ATR: <code>{atr_str}</code>\n"
         f"💱 Funding: <code>{funding:.4f}%</code>\n"
-        + liq_line +
         f"🟡 Вход: <code>{price:.4f}</code> | 🔴 SL: <code>{sl:.4f}</code>\n"
         f"🟢 TP2: <code>{tp2:.4f}</code> | TP3: <code>{tp3:.4f}</code>\n"
         f"⚡ R/R: 1:{rr:.1f} | ⭐ Score: {score}/100"
@@ -722,7 +655,11 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
         _reject("ложный пробой: нет уровней")
         return None
 
-    # ── Scan last 6 H1 candles for a false breakout ──
+    # ── ATR for wick quality check ──
+    h1_atr_v = atr(h1["high"], h1["low"], h1["close"], 14)
+    cur_atr  = h1_atr_v[-1]
+
+    # ── Scan last 11 H1 candles for a false breakout ──
     fb_candle = None
     fb_level  = None
     fb_vrat   = 1.0
@@ -741,15 +678,21 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
 
         for lvl in levels:
             if trend == "LONG":
-                # Wick pierced below support (min 0.5%) but candle closed above
-                if l_ < lvl * 0.995 and c > lvl:
+                wick_depth = lvl - l_
+                # Wick pierced below support (min 0.5%) + close CLEARLY back above (≥0.3%)
+                # + wick depth ≥ 0.3× ATR (meaningful rejection, not noise)
+                if (l_ < lvl * 0.995 and c > lvl * 1.003
+                        and (cur_atr <= 0 or wick_depth >= cur_atr * 0.3)):
                     fb_candle = {"h": h_, "l": l_, "c": c}
                     fb_level  = lvl
                     fb_vrat   = v_rat
                     break
             else:
-                # Wick pierced above resistance (min 0.5%) but candle closed below
-                if h_ > lvl * 1.005 and c < lvl:
+                wick_depth = h_ - lvl
+                # Wick pierced above resistance (min 0.5%) + close CLEARLY back below (≥0.3%)
+                # + wick depth ≥ 0.3× ATR
+                if (h_ > lvl * 1.005 and c < lvl * 0.997
+                        and (cur_atr <= 0 or wick_depth >= cur_atr * 0.3)):
                     fb_candle = {"h": h_, "l": l_, "c": c}
                     fb_level  = lvl
                     fb_vrat   = v_rat
@@ -824,8 +767,6 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
     tp3 = _px(price + sld * cfg.TP3_RR if trend == "LONG" else price - sld * cfg.TP3_RR)
     rr  = cfg.TP2_RR
 
-    touches = level_touches(fb_level, h4["high"][-120:], h4["low"][-120:])
-
     # Volume minimum for false breakout: must have at least 1.5x to even consider
     if fb_vrat < 1.5:
         _reject("ложный пробой: объём < 1.5x")
@@ -837,14 +778,24 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
     else:
         wick_pct = (fb_candle["h"] - fb_level) / fb_level * 100
 
+    touches = level_touches(fb_level, h4["high"][-120:], h4["low"][-120:])
+
     # ── Score (base 58 — strong setup) ──
     score = 58
     if fb_vrat >= 2.5:   score += 12
     elif fb_vrat >= 2.0: score += 8
     elif fb_vrat >= 1.5: score += 5
-    if touches <= 2:     score += 10
-    elif touches <= 3:   score += 6
-    elif touches <= 4:   score += 3
+    # Level quality — Gerchik: 2–3 touches optimal
+    if touches == 2:    score += 10
+    elif touches == 3:  score += 8
+    elif touches == 1:  score += 2
+    elif touches == 4:  score += 4
+    # 5+ touches: no bonus
+    # Level freshness — recently defended = strong
+    fb_touch_age = level_last_touch_age(fb_level, h1["high"][-60:], h1["low"][-60:])
+    if fb_touch_age <= 5:    score += 8
+    elif fb_touch_age <= 15: score += 5
+    elif fb_touch_age <= 30: score += 2
     if cur_adx >= 40:    score += 10  # very strong trend
     elif cur_adx >= 30:  score += 8
     elif cur_adx >= 25:  score += 4
@@ -877,26 +828,12 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
         _reject("ложный пробой: score ниже MIN_SCORE")
         return None
 
-    # Liquidity pool analysis for false breakout
-    h4_liq_fb = find_liquidity_pools(h4["high"], h4["low"], lookback=60)
-    liq_tgt_fb, liq_str_fb = nearest_liquidity_target(price, h4_liq_fb, trend)
-    liq_line_fb = ""
-    if liq_tgt_fb:
-        dist_pct = abs(liq_tgt_fb - price) / price * 100
-        tp2_dist = abs(tp2 - price) / price * 100 if price > 0 else 0
-        if dist_pct > 0 and abs(dist_pct - tp2_dist) / dist_pct < 0.3:
-            score = min(100, score + 8)
-            liq_line_fb = f"💧 Ликвидность: <code>{liq_tgt_fb:.4f}</code> ({liq_str_fb} св.) ✅ TP\n"
-        else:
-            liq_line_fb = f"💧 Ликвидность: <code>{liq_tgt_fb:.4f}</code> ({liq_str_fb} св., {dist_pct:.1f}%)\n"
-
     reason = (
         f"🪤 <b>{symbol}</b> | {trend} ЛОЖНЫЙ ПРОБОЙ\n"
-        f"🎯 Уровень: <code>{fb_level:.4f}</code> ({touches} кас.)\n"
+        f"🎯 Уровень: <code>{fb_level:.4f}</code> ({touches} кас., свежесть: {fb_touch_age} св.)\n"
         f"⚡ Тень пробила на {wick_pct:.2f}% | Объём: <code>{fb_vrat:.2f}×</code>\n"
         f"📊 ADX: <code>{cur_adx:.1f}</code> | RSI: <code>{cur_rsi:.0f}</code>\n"
         f"📈 D1: {'🟢' if d1_up else '🔴'} slope <code>{d1_slope:+.2f}%</code>\n"
-        + liq_line_fb +
         f"🟡 Вход: <code>{price:.4f}</code> | 🔴 SL: <code>{sl:.4f}</code>\n"
         f"🟢 TP2: <code>{tp2:.4f}</code> | TP3: <code>{tp3:.4f}</code>\n"
         f"⚡ R/R: 1:{rr:.1f} | ⭐ Score: {score}/100"
@@ -1339,25 +1276,11 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
         _reject(f"пробой: score {score} < MIN_SCORE {cfg.MIN_SCORE}")
         return None
 
-    # Liquidity pool — momentum breakout targets
-    h4_liq_br = find_liquidity_pools(h4["high"], h4["low"], lookback=60)
-    liq_tgt_br, liq_str_br = nearest_liquidity_target(price, h4_liq_br, trend)
-    liq_line_br = ""
-    if liq_tgt_br:
-        dist_pct = abs(liq_tgt_br - price) / price * 100
-        tp2_dist = abs(tp2 - price) / price * 100 if price > 0 else 0
-        if dist_pct > 0 and abs(dist_pct - tp2_dist) / dist_pct < 0.3:
-            score = min(100, score + 8)
-            liq_line_br = f"💧 Ликвидность: <code>{liq_tgt_br:.4f}</code> ({liq_str_br} св.) ✅ TP\n"
-        else:
-            liq_line_br = f"💧 Ликвидность: <code>{liq_tgt_br:.4f}</code> ({liq_str_br} св., {dist_pct:.1f}%)\n"
-
     reason = (
         f"💥 <b>{symbol}</b> | {trend} ПРОБОЙ\n"
         f"🕯 Пробита зона: <code>{broken_level:.4f}</code> ({touches} кас.)\n"
         f"📈 D1 slope: <code>{d1_slope:+.2f}%</code> | ADX: <code>{cur_adx:.1f}</code>\n"
         f"📦 Объём: <code>{vrat:.2f}×</code> | RSI: <code>{cur_rsi:.0f}</code>\n"
-        + liq_line_br +
         f"🟡 Вход: <code>{price:.4f}</code> | 🔴 SL: <code>{sl:.4f}</code>\n"
         f"🟢 TP2: <code>{tp2:.4f}</code> | TP3: <code>{tp3:.4f}</code>\n"
         f"⚡ R/R: 1:{rr:.1f} | ⭐ Score: {score}/100"

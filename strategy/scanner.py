@@ -529,10 +529,14 @@ class Scanner:
                 return
             state.current_balance = balance
 
-            # Auto-leverage based on balance tiers (conservative: max x5)
+            # Auto-leverage based on balance tiers (conservative, max x5)
             leverage = cfg.LEVERAGE
             if cfg.AUTO_LEVERAGE:
-                if balance < 1000:
+                if balance < 100:
+                    leverage = 3   # very small account — protect capital
+                elif balance < 500:
+                    leverage = 5
+                elif balance < 2000:
                     leverage = 5
                 else:
                     leverage = 3
@@ -564,7 +568,7 @@ class Scanner:
                             f"SL {sl_pct_check*100:.1f}% от входа — слишком широкий для любого плеча"
                         )
                         return
-                orig_lev = (5 if balance < 1000 else 3) if cfg.AUTO_LEVERAGE else cfg.LEVERAGE
+                orig_lev = (3 if balance < 100 else 5 if balance < 2000 else 3) if cfg.AUTO_LEVERAGE else cfg.LEVERAGE
                 if leverage < orig_lev:
                     log.info(
                         f"{sig.symbol}: плечо снижено x{orig_lev}→x{leverage} "
@@ -622,6 +626,22 @@ class Scanner:
             min_qty = min_notional / sig.entry
             if qty < min_qty:
                 qty = min_qty
+                # Guard: bumping to min size must not create excessive actual risk
+                actual_risk = min_notional * sl_pct
+                if balance > 0 and actual_risk / balance * 100 > cfg.RISK_PER_TRADE * 3:
+                    log.warning(
+                        f"{sig.symbol}: мин. позиция {min_notional:.0f} USDT "
+                        f"создаёт риск {actual_risk:.2f} USDT "
+                        f"({actual_risk/balance*100:.1f}% > {cfg.RISK_PER_TRADE*3:.1f}%) "
+                        f"при балансе {balance:.2f} — пропуск"
+                    )
+                    await self._notify(
+                        f"⚠️ <b>{sig.symbol}</b> пропущен\n"
+                        f"Баланс слишком мал: мин. позиция {min_notional:.0f} USDT "
+                        f"создаёт риск {actual_risk:.2f} USDT "
+                        f"({actual_risk/balance*100:.1f}% от баланса)"
+                    )
+                    return
                 log.info(f"qty увеличен до минимального нотионала {min_notional:.2f} USDT для {sig.symbol}")
             qty = round(qty, 3)
             # After rounding, notional may dip below minimum — correct with ceiling

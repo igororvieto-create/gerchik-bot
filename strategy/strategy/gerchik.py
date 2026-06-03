@@ -325,6 +325,30 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         if trend == "SHORT" and h4_slope > 0:
             _reject("H4 против тренда")
             return None
+        # Reject: price approaching EMA50 from the WRONG side (bounce into resistance).
+        # For LONG: price below EMA50 must have been ABOVE it recently (pullback from above).
+        # For SHORT: price above EMA50 must have been BELOW it recently (bounce from below).
+        lookback = min(8, len(h4["close"]) - 1)
+        if trend == "LONG":
+            was_above = any(h4["close"][-lookback-1:-1] > ema50[-lookback-1:-1])
+            if not was_above:
+                _reject("H4 у EMA снизу (не откат — сопротивление)")
+                return None
+        else:
+            was_below = any(h4["close"][-lookback-1:-1] < ema50[-lookback-1:-1])
+            if not was_below:
+                _reject("H4 у EMA сверху (не откат — поддержка)")
+                return None
+
+    # H4 bearish/bullish impulse guard: if 3+ of last 4 H4 candles go against trend, skip.
+    h4_bear_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] < h4["open"][i])
+    h4_bull_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] > h4["open"][i])
+    if trend == "LONG"  and h4_bear_cnt >= 3:
+        _reject("H4 медвежий импульс")
+        return None
+    if trend == "SHORT" and h4_bull_cnt >= 3:
+        _reject("H4 бычий импульс")
+        return None
 
     price = h1["close"][-1]
 
@@ -419,6 +443,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     if is_doji and not h4ok:
         _reject("доджи без H4 подтверждения")
         return None
+    # When price is near EMA50 but not aligned (borderline zone), require H4 pattern.
+    if h4_near and not h4_aligned and not h4ok:
+        _reject("H4 зона: нет подтверждения H4 паттерна")
+        return None
 
     # ── Volume ──
     vm    = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
@@ -436,7 +464,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         return None
 
     buf     = price * cfg.SL_BUFFER_PCT / 100
-    atr_sl  = cur_atr * 1.0
+    atr_sl  = cur_atr * 1.5  # 1.5× ATR gives trade room to breathe vs noise
 
     if trend == "LONG":
         sl_candle = h1["low"][-2]  - buf

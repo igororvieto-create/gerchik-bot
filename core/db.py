@@ -128,6 +128,31 @@ def load_total_pnl() -> float:
     return get_stats()["pnl"]
 
 
+def get_stats_by_pattern(days: int = None) -> list:
+    """Returns list of (pattern, total, wins, pnl) sorted by total trades."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            if days:
+                since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+                cur = conn.execute(
+                    """SELECT pattern, COUNT(*), SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END), SUM(pnl)
+                       FROM trades WHERE closed_at >= ? AND pattern != ''
+                       GROUP BY pattern ORDER BY COUNT(*) DESC""",
+                    (since,),
+                )
+            else:
+                cur = conn.execute(
+                    """SELECT pattern, COUNT(*), SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END), SUM(pnl)
+                       FROM trades WHERE pattern != ''
+                       GROUP BY pattern ORDER BY COUNT(*) DESC"""
+                )
+            rows = cur.fetchall()
+        return [(r[0], r[1], r[2] or 0, round(r[3] or 0, 2)) for r in rows]
+    except Exception as e:
+        log.error(f"get_stats_by_pattern: {e}")
+        return []
+
+
 def get_today_stats() -> dict:
     """Stats for today (UTC) — used to restore state.day after restart."""
     try:

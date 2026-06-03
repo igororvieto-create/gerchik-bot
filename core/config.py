@@ -75,5 +75,10 @@ class Config:
     MAX_SL_PCT:              float = float(os.getenv("MAX_SL_PCT", "10.0").strip())
     # Max price drift from signal entry before skipping (%). 0.8% = skip if price moved >0.8% against signal.
     PRICE_DRIFT_PCT:         float = float(os.getenv("PRICE_DRIFT_PCT", "0.8").strip())
+    # Drawdown protection: auto-pause if balance drops this % from the session peak (0 = disabled)
+    MAX_DRAWDOWN_PCT:        float = float(os.getenv("MAX_DRAWDOWN_PCT", "20.0").strip())
+    # Extended symbol cooldown: after this many consecutive SL hits on the same symbol, cooldown × multiplier
+    SYMBOL_LOSS_STREAK_LIMIT: int  = int(os.getenv("SYMBOL_LOSS_STREAK_LIMIT", "2").strip())
+    SYMBOL_LOSS_COOLDOWN_MIN: int  = int(os.getenv("SYMBOL_LOSS_COOLDOWN_MIN", "720").strip())
 
 cfg = Config()

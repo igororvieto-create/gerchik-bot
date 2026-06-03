@@ -283,6 +283,19 @@ class BingXClient:
         return await self._get("/openApi/swap/v2/quote/depth",
                                {"symbol": symbol, "limit": limit})
 
+    async def get_open_orders(self, symbol: str) -> list:
+        """Returns list of open orders for a symbol (pending SL/TP on exchange)."""
+        data = await self._get("/openApi/swap/v2/trade/openOrders",
+                               {"symbol": symbol}, signed=True)
+        try:
+            orders = data.get("data", {})
+            if isinstance(orders, dict):
+                orders = orders.get("orders", [])
+            return orders if isinstance(orders, list) else []
+        except Exception as e:
+            log.error(f"get_open_orders {symbol}: {e}")
+            return []
+
     async def close(self):
         if self._session:
             await self._session.close()

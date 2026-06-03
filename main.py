@@ -77,6 +77,13 @@ async def main():
 
     state.total_pnl = db.load_total_pnl()
     log.info(f"Восстановлен total_pnl из БД: {state.total_pnl:.2f} USDT")
+    _peak_str = db.get_kv("peak_balance", "0")
+    try:
+        state.peak_balance = float(_peak_str)
+        if state.peak_balance > 0:
+            log.info(f"Восстановлен peak_balance: {state.peak_balance:.2f} USDT")
+    except Exception:
+        pass
     # Restore today's stats so daily limits and /report are correct after restart
     today = db.get_today_stats()
     state.day.trades    = today["total"]

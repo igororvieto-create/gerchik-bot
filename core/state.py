@@ -45,6 +45,7 @@ class BotState:
     paused:    bool                = False
     total_pnl: float               = 0.0
     current_balance: float         = 0.0
+    peak_balance:    float         = 0.0
 
     def reset_day(self):
         if self.day.date != date.today():

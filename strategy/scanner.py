@@ -41,17 +41,27 @@ class Scanner:
         self.ex          = exchange
         self.bot         = bot
         self._scan_count = 0
-        self._sl_cooldown: dict = {}   # symbol → datetime of last SL hit
-        self._stale_alerted: set = set()  # symbols already alerted as stale
-        self._last_signal_time: datetime | None = None  # last time a qualifying signal was found
-        self._monitor_count: int = 0   # monitor cycles counter for periodic tasks
-        self._funding_warned: set = set()  # symbols already warned about adverse funding
+        self._sl_cooldown: dict = {}        # symbol → datetime of last SL hit
+        self._symbol_loss_streak: dict = {} # symbol → consecutive SL hits count
+        self._stale_alerted: set = set()
+        self._last_signal_time: datetime | None = None
+        self._monitor_count: int = 0
+        self._funding_warned: set = set()
         _global_scanner = self
         self._restore_cooldowns()
 
-    def _set_cooldown(self, symbol: str):
-        """Set cooldown in memory and persist to DB for restart survival."""
+    def _set_cooldown(self, symbol: str, is_loss: bool = False):
+        """Set cooldown in memory and persist to DB.
+        After SYMBOL_LOSS_STREAK_LIMIT consecutive SL hits, uses extended cooldown."""
         now = datetime.utcnow()
+        if is_loss:
+            self._symbol_loss_streak[symbol] = self._symbol_loss_streak.get(symbol, 0) + 1
+            streak = self._symbol_loss_streak[symbol]
+            if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT:
+                cooldown_min = cfg.SYMBOL_LOSS_COOLDOWN_MIN
+                log.warning(
+                    f"{symbol}: {streak} убытков подряд — расширенный кулдаун {cooldown_min} мин"
+                )
         self._sl_cooldown[symbol] = now
         try:
             db.save_kv(f"sl_cd:{symbol}", now.isoformat())
@@ -59,10 +69,16 @@ class Scanner:
             log.warning(f"cooldown save {symbol}: {e}")
 
     def _in_cooldown(self, symbol: str) -> bool:
-        """Check in-memory cooldown only (DB loaded once at startup)."""
+        """Check in-memory cooldown. Uses extended duration on loss streak."""
         if symbol not in self._sl_cooldown:
             return False
-        return (datetime.utcnow() - self._sl_cooldown[symbol]).total_seconds() < SL_COOLDOWN_MIN * 60
+        streak = self._symbol_loss_streak.get(symbol, 0)
+        minutes = (
+            cfg.SYMBOL_LOSS_COOLDOWN_MIN
+            if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT
+            else SL_COOLDOWN_MIN
+        )
+        return (datetime.utcnow() - self._sl_cooldown[symbol]).total_seconds() < minutes * 60
 
     def _restore_cooldowns(self):
         """Load all cooldowns from DB in one query at startup."""
@@ -960,9 +976,11 @@ class Scanner:
                         state.current_balance = await self.ex.get_balance()
                     except Exception:
                         pass
-                    # Set cooldown if closed at a loss (likely SL hit)
+                    # Set cooldown if closed at a loss
                     if pnl <= 0:
-                        self._set_cooldown(symbol)
+                        self._set_cooldown(symbol, is_loss=True)
+                    else:
+                        self._symbol_loss_streak.pop(symbol, None)
                     sign = "+" if pnl >= 0 else ""
                     await self._notify(
                         f"{'✅ WIN' if pnl > 0 else '❌ LOSS'} | {symbol} {pos.side}\n"
@@ -1171,8 +1189,22 @@ class Scanner:
             pos.qty -= qty
             if label == "TP1":
                 pos.tp1_hit = True
+                sign = "+" if partial_pnl >= 0 else ""
+                await self._notify(
+                    f"🎯 <b>TP1</b> | {pos.symbol} {pos.side}\n"
+                    f"Закрыто 25% позиции по <code>{close_price:.4f}</code>\n"
+                    f"PnL частичный: <code>{sign}{partial_pnl:.2f} USDT</code>\n"
+                    f"Остаток: <code>{pos.qty:.3f}</code> | SL → безубыток"
+                )
             else:
                 pos.tp2_hit = True
+                sign = "+" if partial_pnl >= 0 else ""
+                await self._notify(
+                    f"🎯 <b>TP2</b> | {pos.symbol} {pos.side}\n"
+                    f"Закрыто {int(cfg.TP2_CLOSE_PCT*100)}% позиции по <code>{close_price:.4f}</code>\n"
+                    f"PnL частичный: <code>{sign}{partial_pnl:.2f} USDT</code>\n"
+                    f"Остаток: <code>{pos.qty:.3f}</code> | Трейлинг активен"
+                )
             side = "BUY" if pos.side == "LONG" else "SELL"
             # Re-place SL for remaining qty
             if pos.sl_order_id:
@@ -1255,9 +1287,17 @@ class Scanner:
         self._stale_alerted.discard(pos.symbol)
         self._funding_warned.discard(pos.symbol)
 
-        # Cooldown after SL hit — don't re-enter same symbol for 1 hour
+        # Cooldown after SL hit — extended if consecutive losses on same symbol
         if sl_hit:
-            self._set_cooldown(pos.symbol)
+            self._set_cooldown(pos.symbol, is_loss=True)
+            streak = self._symbol_loss_streak.get(pos.symbol, 0)
+            if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT:
+                await self._notify(
+                    f"🚫 <b>{pos.symbol}</b>: {streak} стопа подряд\n"
+                    f"Кулдаун {cfg.SYMBOL_LOSS_COOLDOWN_MIN // 60}ч — не входим в эту монету"
+                )
+        elif tp3_hit:
+            self._symbol_loss_streak.pop(pos.symbol, None)
 
         trade_sign = "+" if pnl >= 0 else ""
         total_sign = "+" if state.total_pnl >= 0 else ""
@@ -1275,12 +1315,30 @@ class Scanner:
         try:
             issues = []
 
-            # Баланс
+            # Баланс + drawdown protection
             try:
                 balance = await self.ex.get_balance()
                 state.current_balance = balance
                 if balance <= 0:
                     issues.append("⚠️ Баланс = 0 USDT")
+                else:
+                    # Track peak balance (persist to DB)
+                    if balance > state.peak_balance:
+                        state.peak_balance = balance
+                        db.save_kv("peak_balance", str(balance))
+                    # Check drawdown from peak
+                    if cfg.MAX_DRAWDOWN_PCT > 0 and state.peak_balance > 0:
+                        drawdown = (state.peak_balance - balance) / state.peak_balance * 100
+                        if drawdown >= cfg.MAX_DRAWDOWN_PCT and not state.paused:
+                            state.paused = True
+                            db.save_kv("paused", "1")
+                            await self._notify(
+                                f"🚨 <b>Drawdown protection</b>\n"
+                                f"Баланс упал на <code>{drawdown:.1f}%</code> от пика\n"
+                                f"Пик: <code>{state.peak_balance:.2f} USDT</code> → "
+                                f"Сейчас: <code>{balance:.2f} USDT</code>\n"
+                                f"Бот на паузе. Возобновить: /resume"
+                            )
             except Exception as e:
                 issues.append(f"⚠️ Не удалось получить баланс: {_html.escape(str(e))}")
                 balance = state.current_balance
@@ -1302,6 +1360,50 @@ class Scanner:
             # Пауза без причины
             if state.is_paused and pos_count == 0:
                 issues.append("ℹ️ Бот на паузе, открытых позиций нет")
+
+            # SL order health check: verify each position has a live SL on exchange
+            for symbol, pos in list(state.positions.items()):
+                if pos.sl == 0 or not pos.sl_order_id:
+                    if pos.sl == 0:
+                        issues.append(f"⚠️ {symbol}: нет SL-уровня (внешняя позиция?)")
+                    else:
+                        # Has SL price but no order ID — try to re-place
+                        log.warning(f"{symbol}: нет sl_order_id, перевыставляем SL @ {pos.sl}")
+                        try:
+                            side_str = "BUY" if pos.side == "LONG" else "SELL"
+                            r = await self.ex.place_stop_loss(symbol, side_str, pos.qty, pos.sl)
+                            if r.get("code") == 0:
+                                pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
+                                db.save_open_position(pos)
+                                issues.append(f"ℹ️ {symbol}: SL перевыставлен @ {pos.sl:.4f}")
+                            else:
+                                issues.append(
+                                    f"⚠️ {symbol}: не удалось перевыставить SL "
+                                    f"(код {r.get('code')})"
+                                )
+                        except Exception as se:
+                            issues.append(f"⚠️ {symbol}: ошибка SL re-place: {_html.escape(str(se))}")
+                    continue
+                # Verify the order is still open on exchange
+                try:
+                    open_orders = await self.ex.get_open_orders(symbol)
+                    order_ids = {str(o.get("orderId", "")) for o in open_orders}
+                    if pos.sl_order_id and pos.sl_order_id not in order_ids:
+                        # SL order is gone — re-place it
+                        log.warning(f"{symbol}: SL ордер {pos.sl_order_id} исчез, перевыставляем")
+                        side_str = "BUY" if pos.side == "LONG" else "SELL"
+                        r = await self.ex.place_stop_loss(symbol, side_str, pos.qty, pos.sl)
+                        if r.get("code") == 0:
+                            pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
+                            db.save_open_position(pos)
+                            issues.append(f"🔄 {symbol}: SL ордер потерялся — перевыставлен @ {pos.sl:.4f}")
+                        else:
+                            issues.append(
+                                f"🚨 {symbol}: SL ОТСУТСТВУЕТ на бирже! "
+                                f"Ошибка перевыставления: код {r.get('code')}"
+                            )
+                except Exception as oe:
+                    log.warning(f"health SL check {symbol}: {oe}")
 
             log.info(
                 f"[healthcheck] баланс={balance:.2f} USDT | "
@@ -1333,21 +1435,37 @@ class Scanner:
     async def weekly_report(self):
         s    = db.get_stats(days=7)
         sign = "+" if s["pnl"] >= 0 else ""
+        patterns = db.get_stats_by_pattern(days=7)
+        pat_lines = ""
+        for pname, total, wins, pnl in patterns[:5]:
+            wr = round(wins / total * 100) if total else 0
+            ps = "+" if pnl >= 0 else ""
+            short = pname[:18]
+            pat_lines += f"  {short}: {total}сд WR{wr}% {ps}{pnl:.2f}₮\n"
         await self._notify(
             f"📊 <b>Недельный отчёт</b>\n\n"
             f"Сделок: {s['total']}  |  WR: {s['wr']}%\n"
             f"Прибыльных: {s['wins']}  |  Убыточных: {s['total'] - s['wins']}\n"
             f"PnL за 7 дней: <code>{sign}{s['pnl']:.2f} USDT</code>"
+            + (f"\n\n<b>По паттернам:</b>\n<code>{pat_lines.rstrip()}</code>" if pat_lines else "")
         )
 
     async def monthly_report(self):
         s    = db.get_stats(days=30)
         sign = "+" if s["pnl"] >= 0 else ""
+        patterns = db.get_stats_by_pattern(days=30)
+        pat_lines = ""
+        for pname, total, wins, pnl in patterns[:6]:
+            wr = round(wins / total * 100) if total else 0
+            ps = "+" if pnl >= 0 else ""
+            short = pname[:18]
+            pat_lines += f"  {short}: {total}сд WR{wr}% {ps}{pnl:.2f}₮\n"
         await self._notify(
             f"🗓 <b>Месячный отчёт</b>\n\n"
             f"Сделок: {s['total']}  |  WR: {s['wr']}%\n"
             f"Прибыльных: {s['wins']}  |  Убыточных: {s['total'] - s['wins']}\n"
             f"PnL за 30 дней: <code>{sign}{s['pnl']:.2f} USDT</code>"
+            + (f"\n\n<b>По паттернам:</b>\n<code>{pat_lines.rstrip()}</code>" if pat_lines else "")
         )
 
     async def btc_weekly_alert(self):

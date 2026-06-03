@@ -240,7 +240,7 @@ async def cmd_settings(msg: Message):
         f"Мин. позиция: <code>{cfg.MIN_POSITION_USDT} USDT</code>\n"
         f"Макс. риск USDT: <code>{cfg.MAX_RISK_USDT} USDT</code>\n"
         f"Авто-плечо: <code>{al}</code>\n"
-        f"  до 1000$ → x5 | от 1000$ → x3\n"
+        f"  до 100$ → x3 | 100$–2000$ → x5 | от 2000$ → x3\n"
         f"Безубыток: <code>{be_mode}</code> (буфер +{cfg.BE_BUFFER_PCT}%)\n"
         f"Трейлинг стоп: <code>{cfg.TRAIL_PCT}%</code>\n"
         f"Фандинг LONG макс: <code>{cfg.FUNDING_MAX_LONG}%</code>\n"
@@ -576,9 +576,8 @@ async def cmd_setautolev(msg: Message):
         await msg.answer(
             f"⚡ <b>Авто-плечо:</b> {status}\n\n"
             f"При включении плечо выбирается по балансу:\n"
-            f"• &lt; $100 → x10\n"
-            f"• &lt; $500 → x7\n"
-            f"• &lt; $2000 → x5\n"
+            f"• &lt; $100 → x3 (защита малого счёта)\n"
+            f"• $100 – $2000 → x5\n"
             f"• ≥ $2000 → x3\n\n"
             f"Включить: <code>/setautolev on</code>\n"
             f"Выключить: <code>/setautolev off</code>",

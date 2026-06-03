@@ -46,7 +46,7 @@ class Config:
     # 0 = use TP1 as trigger (original behaviour); 0.5 = after +0.5% profit
     BE_TRIGGER_PCT:       float = float(os.getenv("BE_TRIGGER_PCT", "0.5").strip())
     # SL is placed at entry + this % buffer (locks in tiny profit above fees)
-    BE_BUFFER_PCT:        float = float(os.getenv("BE_BUFFER_PCT", "0.05").strip())
+    BE_BUFFER_PCT:        float = float(os.getenv("BE_BUFFER_PCT", "0.10").strip())
     # Trailing stop: move SL this % behind the peak price (after breakeven)
     TRAIL_PCT:            float = float(os.getenv("TRAIL_PCT", "1.0").strip())
     # Minimum position size in USDT of notional exposure (not margin)
@@ -73,5 +73,7 @@ class Config:
     BINANCE_FILTER:          bool  = os.getenv("BINANCE_FILTER", "false").strip().lower() == "true"
     # Maximum SL distance from entry in % (0 = disabled). Signals with wider SL are discarded.
     MAX_SL_PCT:              float = float(os.getenv("MAX_SL_PCT", "10.0").strip())
+    # Max price drift from signal entry before skipping (%). 0.8% = skip if price moved >0.8% against signal.
+    PRICE_DRIFT_PCT:         float = float(os.getenv("PRICE_DRIFT_PCT", "0.8").strip())
 
 cfg = Config()

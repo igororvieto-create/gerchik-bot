@@ -437,8 +437,9 @@ class Scanner:
                 cur_price = float(ticker.get("lastPrice", sig.entry))
                 if cur_price > 0:
                     orig_entry = sig.entry
-                    against = (sig.side == "LONG"  and cur_price < sig.entry * 0.992) or \
-                              (sig.side == "SHORT" and cur_price > sig.entry * 1.008)
+                    _drift_mul = cfg.PRICE_DRIFT_PCT / 100
+                    against = (sig.side == "LONG"  and cur_price < sig.entry * (1 - _drift_mul)) or \
+                              (sig.side == "SHORT" and cur_price > sig.entry * (1 + _drift_mul))
                     if against:
                         drift = abs(cur_price - orig_entry) / orig_entry * 100
                         log.info(f"{sig.symbol}: цена ушла против сигнала на {drift:.2f}% — тихий пропуск")
@@ -676,8 +677,9 @@ class Scanner:
                 try:
                     ticker = await self.ex.get_ticker(sig.symbol)
                     cur_price = float(ticker.get("lastPrice", sig.entry))
-                    against = (sig.side == "LONG"  and cur_price < sig.entry * 0.992) or \
-                              (sig.side == "SHORT" and cur_price > sig.entry * 1.008)
+                    _drift_mul = cfg.PRICE_DRIFT_PCT / 100
+                    against = (sig.side == "LONG"  and cur_price < sig.entry * (1 - _drift_mul)) or \
+                              (sig.side == "SHORT" and cur_price > sig.entry * (1 + _drift_mul))
                     if against:
                         drift = abs(cur_price - sig.entry) / sig.entry * 100
                         log.info(f"{sig.symbol}: цена ушла против сигнала на {drift:.2f}% — пропуск")

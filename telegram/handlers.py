@@ -753,12 +753,14 @@ async def cmd_closeall(msg: Message):
         await msg.answer("Нет открытых позиций", reply_markup=main_keyboard())
         return
     closed, errors = [], []
+    live_syms = set()
     for p in live:
         sym  = p.get("symbol")
         side = p.get("positionSide", "LONG")
         amt  = abs(float(p.get("positionAmt", 0)))
         if amt == 0:
             continue
+        live_syms.add(sym)
         try:
             # Cancel SL/TP orders if tracked in state
             tracked = state.positions.get(sym)
@@ -776,26 +778,33 @@ async def cmd_closeall(msg: Message):
         except Exception as e:
             log.error(f"closeall {sym}: {e}")
             errors.append(sym)
-    if not live:
-        for sym, p in list(state.positions.items()):
-            try:
-                if p.sl_order_id:
-                    try:
-                        await ex.cancel_order(sym, p.sl_order_id)
-                    except Exception:
-                        pass
-                if p.tp_order_id:
-                    try:
-                        await ex.cancel_order(sym, p.tp_order_id)
-                    except Exception:
-                        pass
+
+    # Close positions tracked in state but absent from exchange (ghost state or API returned none)
+    ghost_syms = [sym for sym in list(state.positions.keys()) if sym not in live_syms]
+    for sym in ghost_syms:
+        p = state.positions.get(sym)
+        if not p:
+            continue
+        try:
+            if p.sl_order_id:
+                try:
+                    await ex.cancel_order(sym, p.sl_order_id)
+                except Exception:
+                    pass
+            if p.tp_order_id:
+                try:
+                    await ex.cancel_order(sym, p.tp_order_id)
+                except Exception:
+                    pass
+            if not live:
+                # Exchange returned nothing — try to close anyway (position may exist)
                 await ex.close_position(sym, p.qty, p.side)
-                del state.positions[sym]
-                from core import db as _db; _db.delete_open_position(sym)
-                closed.append(sym)
-            except Exception as e:
-                log.error(f"closeall {sym}: {e}")
-                errors.append(sym)
+            state.positions.pop(sym, None)
+            from core import db as _db; _db.delete_open_position(sym)
+            closed.append(sym)
+        except Exception as e:
+            log.error(f"closeall ghost {sym}: {e}")
+            errors.append(sym)
     await ex.close()
     text = f"✅ Закрыто: {', '.join(closed) or 'ничего'}"
     if errors:

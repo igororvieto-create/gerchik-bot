@@ -191,6 +191,23 @@ def load_all_cooldowns() -> dict:
     return result
 
 
+def load_all_loss_streaks() -> dict:
+    """Load all sl_streak:* entries at once (used on scanner startup)."""
+    result = {}
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.execute("SELECT key, value FROM kv WHERE key LIKE 'sl_streak:%'")
+            for key, val in cur.fetchall():
+                symbol = key[len("sl_streak:"):]
+                try:
+                    result[symbol] = int(val)
+                except Exception:
+                    pass
+    except Exception as e:
+        log.error(f"load_all_loss_streaks: {e}")
+    return result
+
+
 def save_kv(key: str, value):
     try:
         with sqlite3.connect(DB_PATH) as conn:

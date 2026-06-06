@@ -14,7 +14,7 @@ from exchange.bingx import BingXClient
 from strategy.strategy.gerchik import (
     Signal, analyze, analyze_false_breakout, analyze_breakout,
     analyze_range_breakout, parse_klines, reset_stats, get_stats,
-    nearest_weekly_levels, near_level,
+    nearest_weekly_levels, near_level, level_last_touch_age,
 )
 
 log = logging.getLogger("scanner")
@@ -62,6 +62,11 @@ class Scanner:
                 log.warning(
                     f"{symbol}: {streak} убытков подряд — расширенный кулдаун {cooldown_min} мин"
                 )
+            # Persist streak so it survives restart
+            try:
+                db.save_kv(f"sl_streak:{symbol}", str(self._symbol_loss_streak[symbol]))
+            except Exception as e:
+                log.warning(f"streak save {symbol}: {e}")
         self._sl_cooldown[symbol] = now
         try:
             db.save_kv(f"sl_cd:{symbol}", now.isoformat())
@@ -81,17 +86,28 @@ class Scanner:
         return (datetime.utcnow() - self._sl_cooldown[symbol]).total_seconds() < minutes * 60
 
     def _restore_cooldowns(self):
-        """Load all cooldowns from DB in one query at startup."""
+        """Load all cooldowns and loss streaks from DB at startup."""
         try:
+            # Restore streaks first so _in_cooldown uses correct duration
+            streaks = db.load_all_loss_streaks()
+            for sym, streak in streaks.items():
+                if streak > 0:
+                    self._symbol_loss_streak[sym] = streak
             loaded = db.load_all_cooldowns()
             now = datetime.utcnow()
             active = 0
             for sym, cd_time in loaded.items():
-                if (now - cd_time).total_seconds() < SL_COOLDOWN_MIN * 60:
+                streak = self._symbol_loss_streak.get(sym, 0)
+                max_min = (
+                    cfg.SYMBOL_LOSS_COOLDOWN_MIN
+                    if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT
+                    else SL_COOLDOWN_MIN
+                )
+                if (now - cd_time).total_seconds() < max_min * 60:
                     self._sl_cooldown[sym] = cd_time
                     active += 1
             if active:
-                log.info(f"Восстановлено {active} кулдаунов из БД")
+                log.info(f"Восстановлено {active} кулдаунов из БД (серий: {len(streaks)})")
         except Exception as e:
             log.warning(f"restore_cooldowns: {e}")
 
@@ -826,7 +842,7 @@ class Scanner:
                     await self.ex.close_position(sig.symbol, qty, sig.side)
                 except Exception as ce:
                     log.error(f"emergency close {sig.symbol}: {ce}")
-                self._set_cooldown(sig.symbol)
+                self._set_cooldown(sig.symbol, is_loss=True)  # позиция открылась без SL = реальная потеря
                 return
             if not sl_id:
                 log.warning(f"SL выставлен (code=0) но orderId не получен {sig.symbol} — отмена SL позже недоступна")
@@ -1028,8 +1044,9 @@ class Scanner:
                     f"Авто-закрытие через {cfg.MAX_POSITION_HOURS - age_h:.0f}ч"
                 )
 
-        # Clean up stale sl_cooldown entries (older than 2x cooldown window)
-        cutoff = datetime.utcnow() - timedelta(minutes=SL_COOLDOWN_MIN * 2)
+        # Clean up stale sl_cooldown entries — use max possible cooldown to not evict early
+        max_cooldown = max(SL_COOLDOWN_MIN, cfg.SYMBOL_LOSS_COOLDOWN_MIN)
+        cutoff = datetime.utcnow() - timedelta(minutes=max_cooldown * 2)
         self._sl_cooldown = {s: t for s, t in self._sl_cooldown.items() if t > cutoff}
 
         for symbol, pos in list(state.positions.items()):
@@ -1220,14 +1237,6 @@ class Scanner:
                 pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))
 
             db.save_open_position(pos)  # persist updated qty and tp2_hit flag
-
-            sign = "+" if partial_pnl >= 0 else ""
-            await self._notify(
-                f"💚 <b>{label}</b> | {pos.symbol}\n"
-                f"Закрыто {int(pct * 100)}% позиции | цена <code>{close_price:.4f}</code>\n"
-                f"PnL частичный: <code>{sign}{partial_pnl:.2f} USDT</code>\n"
-                f"Остаток {int((1-pct)*100)}% → TP3 <code>{pos.tp3:.4f}</code>"
-            )
         except Exception as e:
             log.error(f"partial_close {pos.symbol}: {e}")
 

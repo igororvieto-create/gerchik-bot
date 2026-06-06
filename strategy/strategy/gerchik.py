@@ -522,7 +522,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     elif touches == 4:  score += 5
     # 5+ touches: no bonus (level near exhaustion)
     # Level freshness — recently touched level is still respected by market
-    touch_age = level_last_touch_age(level, h1["high"][-60:], h1["low"][-60:])
+    # Check both H1 and H4 (level may originate from either TF), use the freshest
+    touch_age_h1 = level_last_touch_age(level, h1["high"][-60:], h1["low"][-60:])
+    touch_age_h4 = level_last_touch_age(level, h4["high"][-120:], h4["low"][-120:]) * 4  # convert H4→H1 units
+    touch_age = min(touch_age_h1, touch_age_h4)
     if touch_age <= 5:    score += 8
     elif touch_age <= 15: score += 5
     elif touch_age <= 30: score += 2
@@ -791,8 +794,10 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
     elif touches == 1:  score += 2
     elif touches == 4:  score += 4
     # 5+ touches: no bonus
-    # Level freshness — recently defended = strong
-    fb_touch_age = level_last_touch_age(fb_level, h1["high"][-60:], h1["low"][-60:])
+    # Level freshness — recently defended = strong (check H1 + H4, use freshest)
+    fb_age_h1 = level_last_touch_age(fb_level, h1["high"][-60:], h1["low"][-60:])
+    fb_age_h4 = level_last_touch_age(fb_level, h4["high"][-120:], h4["low"][-120:]) * 4
+    fb_touch_age = min(fb_age_h1, fb_age_h4)
     if fb_touch_age <= 5:    score += 8
     elif fb_touch_age <= 15: score += 5
     elif fb_touch_age <= 30: score += 2

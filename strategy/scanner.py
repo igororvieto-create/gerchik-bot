@@ -50,28 +50,34 @@ class Scanner:
         _global_scanner = self
         self._restore_cooldowns()
 
-    def _set_cooldown(self, symbol: str, is_loss: bool = False):
-        """Set cooldown in memory and persist to DB.
-        After SYMBOL_LOSS_STREAK_LIMIT consecutive SL hits, uses extended cooldown."""
+    def _loss_cooldown(self, symbol: str) -> None:
+        """Record a loss for this symbol, increment streak, and set cooldown."""
+        self._symbol_loss_streak[symbol] = self._symbol_loss_streak.get(symbol, 0) + 1
+        streak = self._symbol_loss_streak[symbol]
+        if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT:
+            log.warning(
+                f"{symbol}: {streak} убытков подряд — расширенный кулдаун {cfg.SYMBOL_LOSS_COOLDOWN_MIN} мин"
+            )
+        try:
+            db.save_kv(f"sl_streak:{symbol}", str(streak))
+        except Exception as e:
+            log.warning(f"streak save {symbol}: {e}")
+        self._normal_cooldown(symbol)
+
+    def _normal_cooldown(self, symbol: str) -> None:
+        """Set standard cooldown (no streak increment) in memory and DB."""
         now = datetime.utcnow()
-        if is_loss:
-            self._symbol_loss_streak[symbol] = self._symbol_loss_streak.get(symbol, 0) + 1
-            streak = self._symbol_loss_streak[symbol]
-            if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT:
-                cooldown_min = cfg.SYMBOL_LOSS_COOLDOWN_MIN
-                log.warning(
-                    f"{symbol}: {streak} убытков подряд — расширенный кулдаун {cooldown_min} мин"
-                )
-            # Persist streak so it survives restart
-            try:
-                db.save_kv(f"sl_streak:{symbol}", str(self._symbol_loss_streak[symbol]))
-            except Exception as e:
-                log.warning(f"streak save {symbol}: {e}")
         self._sl_cooldown[symbol] = now
         try:
             db.save_kv(f"sl_cd:{symbol}", now.isoformat())
         except Exception as e:
             log.warning(f"cooldown save {symbol}: {e}")
+
+    @staticmethod
+    def _calc_pnl(pos, price: float) -> float:
+        """Realised PnL in USDT for a position closed at price."""
+        return (price - pos.entry) * pos.qty if pos.side == "LONG" \
+               else (pos.entry - price) * pos.qty
 
     def _in_cooldown(self, symbol: str) -> bool:
         """Check in-memory cooldown. Uses extended duration on loss streak."""
@@ -476,7 +482,7 @@ class Scanner:
                         drift = abs(cur_price - orig_entry) / orig_entry * 100
                         log.info(f"{sig.symbol}: цена ушла против сигнала на {drift:.2f}% — тихий пропуск")
                         if drift > 3.0:
-                            self._set_cooldown(sig.symbol)
+                            self._normal_cooldown(sig.symbol)
                         return  # Silent — no notification to avoid confusion
                     # Validate SL width with updated entry (price may have run far in our favor)
                     sld = abs(cur_price - sig.sl)
@@ -488,7 +494,7 @@ class Scanner:
                             f"(дрейф +{drift:.1f}%) — сигнал устарел, пропуск"
                         )
                         if drift > 3.0:
-                            self._set_cooldown(sig.symbol)
+                            self._normal_cooldown(sig.symbol)
                         return  # Silent — price ran too far before we could enter
                     sig.entry = cur_price  # Update to current price before notify
                     # Recalculate TP from new entry (SL is structural, stays fixed)
@@ -716,7 +722,7 @@ class Scanner:
                         drift = abs(cur_price - sig.entry) / sig.entry * 100
                         log.info(f"{sig.symbol}: цена ушла против сигнала на {drift:.2f}% — пропуск")
                         if drift > 3.0:
-                            self._set_cooldown(sig.symbol)
+                            self._normal_cooldown(sig.symbol)
                             log.info(f"{sig.symbol}: дрейф {drift:.1f}% > 3% — кулдаун 1ч")
                         await self._notify(
                             f"⏭ <b>{sig.symbol}</b> пропущен\n"
@@ -784,7 +790,7 @@ class Scanner:
                         await self.ex.close_position(sig.symbol, qty, sig.side)
                     except Exception as ce:
                         log.error(f"emergency close (pre-SL) {sig.symbol}: {ce}")
-                    self._set_cooldown(sig.symbol)
+                    self._loss_cooldown(sig.symbol)
                     return
                 # Liquidation check: SL must be inside the margin safety zone
                 # Approximate liq price (isolated margin, maintenance rate ~0.5%)
@@ -806,7 +812,7 @@ class Scanner:
                             await self.ex.close_position(sig.symbol, qty, sig.side)
                         except Exception as ce:
                             log.error(f"emergency close (liq check) {sig.symbol}: {ce}")
-                        self._set_cooldown(sig.symbol)
+                        self._loss_cooldown(sig.symbol)
                         return
                 else:
                     liq_price = sig.entry * (1 + 1.0 / leverage - maint_rate)
@@ -825,7 +831,7 @@ class Scanner:
                             await self.ex.close_position(sig.symbol, qty, sig.side)
                         except Exception as ce:
                             log.error(f"emergency close (liq check) {sig.symbol}: {ce}")
-                        self._set_cooldown(sig.symbol)
+                        self._loss_cooldown(sig.symbol)
                         return
             except Exception as e:
                 log.warning(f"{sig.symbol}: не удалось проверить mark price перед SL: {e}")
@@ -842,7 +848,7 @@ class Scanner:
                     await self.ex.close_position(sig.symbol, qty, sig.side)
                 except Exception as ce:
                     log.error(f"emergency close {sig.symbol}: {ce}")
-                self._set_cooldown(sig.symbol, is_loss=True)  # позиция открылась без SL = реальная потеря
+                self._loss_cooldown(sig.symbol)  # позиция открылась без SL = реальная потеря
                 return
             if not sl_id:
                 log.warning(f"SL выставлен (code=0) но orderId не получен {sig.symbol} — отмена SL позже недоступна")
@@ -956,8 +962,7 @@ class Scanner:
                     except Exception as e:
                         log.warning(f"{symbol}: ошибка получения цены при закрытии — P&L посчитан по цене входа: {e}")
                         price = pos.entry
-                    pnl = (price - pos.entry) * pos.qty if pos.side == "LONG" \
-                          else (pos.entry - price) * pos.qty
+                    pnl = self._calc_pnl(pos, price)
                     state.total_pnl    += pnl
                     state.day.pnl_usdt += pnl
                     result = "WIN" if pnl > 0 else "LOSS"
@@ -994,7 +999,7 @@ class Scanner:
                         pass
                     # Set cooldown if closed at a loss
                     if pnl <= 0:
-                        self._set_cooldown(symbol, is_loss=True)
+                        self._loss_cooldown(symbol)
                     else:
                         self._symbol_loss_streak.pop(symbol, None)
                     sign = "+" if pnl >= 0 else ""
@@ -1017,8 +1022,7 @@ class Scanner:
                     ticker = await self.ex.get_ticker(symbol)
                     price = float(ticker.get("lastPrice", pos.entry)) if ticker else pos.entry
                     await self.ex.close_position(symbol, pos.qty, pos.side)
-                    pnl = (price - pos.entry) * pos.qty if pos.side == "LONG" \
-                          else (pos.entry - price) * pos.qty
+                    pnl = self._calc_pnl(pos, price)
                     state.day.pnl_usdt += pnl
                     state.total_pnl += pnl
                     db.save_trade(pos, price, pnl, "WIN" if pnl > 0 else "LOSS")
@@ -1261,8 +1265,7 @@ class Scanner:
         except Exception as e:
             log.warning(f"cancel opposite order {pos.symbol}: {e}")
 
-        pnl = (price - pos.entry) * pos.qty if pos.side == "LONG" \
-              else (pos.entry - price) * pos.qty
+        pnl = self._calc_pnl(pos, price)
         state.total_pnl    += pnl
         state.day.pnl_usdt += pnl
         result = "WIN" if pnl > 0 else "LOSS"
@@ -1298,7 +1301,7 @@ class Scanner:
 
         # Cooldown after SL hit — extended if consecutive losses on same symbol
         if sl_hit:
-            self._set_cooldown(pos.symbol, is_loss=True)
+            self._loss_cooldown(pos.symbol)
             streak = self._symbol_loss_streak.get(pos.symbol, 0)
             if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT:
                 await self._notify(

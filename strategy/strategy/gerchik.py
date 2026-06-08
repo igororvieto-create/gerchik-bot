@@ -17,6 +17,13 @@ def get_stats() -> dict:
 def _reject(reason: str):
     _stats[reason] = _stats.get(reason, 0) + 1
 
+def _px(p: float) -> float:
+    """Round price to exchange-compatible precision."""
+    if p >= 10:   return round(p, 2)
+    if p >= 1:    return round(p, 4)
+    if p >= 0.01: return round(p, 5)
+    return round(p, 6)
+
 @dataclass
 class Signal:
     symbol:  str
@@ -492,13 +499,6 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
         _reject("SL слишком широкий")
         return None
 
-    # Round prices to match exchange precision
-    def _px(p):
-        if p >= 10:   return round(p, 2)
-        if p >= 1:    return round(p, 4)
-        if p >= 0.01: return round(p, 5)
-        return round(p, 6)
-
     sl  = _px(sl)
     tp1 = _px(price + sld*cfg.TP1_RR if trend=="LONG" else price - sld*cfg.TP1_RR)
     tp2 = _px(price + sld*cfg.TP2_RR if trend=="LONG" else price - sld*cfg.TP2_RR)
@@ -757,12 +757,6 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
     if sld / price > 0.05:
         _reject("ложный пробой: SL слишком широкий")
         return None
-
-    def _px(p):
-        if p >= 10:   return round(p, 2)
-        if p >= 1:    return round(p, 4)
-        if p >= 0.01: return round(p, 5)
-        return round(p, 6)
 
     sl  = _px(sl)
     tp1 = _px(price + sld * cfg.TP1_RR if trend == "LONG" else price - sld * cfg.TP1_RR)
@@ -1029,12 +1023,6 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg):
         _reject("накопление: SL слишком широкий")
         return None
 
-    def _px(p):
-        if p >= 10:   return round(p, 2)
-        if p >= 1:    return round(p, 4)
-        if p >= 0.01: return round(p, 5)
-        return round(p, 6)
-
     sl      = _px(sl)
     tp1     = _px(price + sld * cfg.TP1_RR if trend == "LONG" else price - sld * cfg.TP1_RR)
     tp2     = _px(price + sld * cfg.TP2_RR if trend == "LONG" else price - sld * cfg.TP2_RR)
@@ -1245,12 +1233,6 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
     if sld / price > 0.05:
         _reject("пробой: SL слишком широкий")
         return None
-
-    def _px(p):
-        if p >= 10:   return round(p, 2)
-        if p >= 1:    return round(p, 4)
-        if p >= 0.01: return round(p, 5)
-        return round(p, 6)
 
     sl  = _px(sl)
     tp1 = _px(price + sld * cfg.TP1_RR if trend == "LONG" else price - sld * cfg.TP1_RR)

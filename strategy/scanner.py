@@ -79,22 +79,78 @@ class Scanner:
         return (price - pos.entry) * pos.qty if pos.side == "LONG" \
                else (pos.entry - price) * pos.qty
 
+    async def _record_close(self, pos, price: float) -> float:
+        """Single entry point for all position-close accounting.
+
+        Updates state, DB, and cooldowns. Returns realised PnL.
+        Each call site is responsible only for its own Telegram notification
+        and any path-specific logic (e.g. balance refresh, extended-streak alert).
+        """
+        symbol = pos.symbol
+        pnl = self._calc_pnl(pos, price)
+        state.total_pnl    += pnl
+        state.day.pnl_usdt += pnl
+        result = "WIN" if pnl > 0 else "LOSS"
+        if pnl > 0:
+            state.day.wins += 1
+            state.day.loss_streak = 0
+        else:
+            state.day.losses += 1
+            state.day.loss_streak += 1
+            if state.day.loss_streak == 3:
+                pause_min = cfg.PAUSE_3X_LOSS_MIN
+                await self._notify(
+                    f"⛔ <b>3 убытка подряд</b> — пауза {pause_min} мин\n"
+                    f"Серия: {state.day.loss_streak} | "
+                    f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
+                )
+            else:
+                pause_min = cfg.PAUSE_AFTER_LOSS_MIN
+            state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
+            db.save_kv("paused_until", state.day.paused_until.isoformat())
+        try:
+            db.save_trade(pos, price, pnl, result)
+        except Exception as e:
+            log.error(f"db.save_trade {symbol}: {e}")
+        del state.positions[symbol]
+        db.delete_open_position(symbol)
+        self._stale_alerted.discard(symbol)
+        self._funding_warned.discard(symbol)
+        if pnl <= 0:
+            self._loss_cooldown(symbol)
+        else:
+            self._symbol_loss_streak.pop(symbol, None)
+        return pnl
+
+    async def _drought_alert(self, diag: str = "") -> None:
+        """Send a 24h no-signal drought alert at most once every ~2 hours."""
+        if self._last_signal_time is None:
+            return
+        drought_h = (datetime.utcnow() - self._last_signal_time).total_seconds() / 3600
+        if drought_h < 24 or self._scan_count % 8 != 1:
+            return
+        msg = (
+            f"⏳ <b>Нет сигналов уже {drought_h:.0f}ч</b>\n"
+            f"MIN_SCORE: {cfg.MIN_SCORE} | Пар: {len(state.pairs)}"
+        )
+        if diag:
+            msg += f"\n📊 Топ причин отсева: {diag}\nРассмотри снижение MIN_SCORE или смену пар"
+        await self._notify(msg)
+
+    def _cooldown_minutes(self, symbol: str) -> int:
+        """Return active cooldown duration in minutes for symbol (extended on loss streak)."""
+        streak = self._symbol_loss_streak.get(symbol, 0)
+        return cfg.SYMBOL_LOSS_COOLDOWN_MIN if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT else SL_COOLDOWN_MIN
+
     def _in_cooldown(self, symbol: str) -> bool:
         """Check in-memory cooldown. Uses extended duration on loss streak."""
         if symbol not in self._sl_cooldown:
             return False
-        streak = self._symbol_loss_streak.get(symbol, 0)
-        minutes = (
-            cfg.SYMBOL_LOSS_COOLDOWN_MIN
-            if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT
-            else SL_COOLDOWN_MIN
-        )
-        return (datetime.utcnow() - self._sl_cooldown[symbol]).total_seconds() < minutes * 60
+        return (datetime.utcnow() - self._sl_cooldown[symbol]).total_seconds() < self._cooldown_minutes(symbol) * 60
 
     def _restore_cooldowns(self):
         """Load all cooldowns and loss streaks from DB at startup."""
         try:
-            # Restore streaks first so _in_cooldown uses correct duration
             streaks = db.load_all_loss_streaks()
             for sym, streak in streaks.items():
                 if streak > 0:
@@ -103,13 +159,7 @@ class Scanner:
             now = datetime.utcnow()
             active = 0
             for sym, cd_time in loaded.items():
-                streak = self._symbol_loss_streak.get(sym, 0)
-                max_min = (
-                    cfg.SYMBOL_LOSS_COOLDOWN_MIN
-                    if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT
-                    else SL_COOLDOWN_MIN
-                )
-                if (now - cd_time).total_seconds() < max_min * 60:
+                if (now - cd_time).total_seconds() < self._cooldown_minutes(sym) * 60:
                     self._sl_cooldown[sym] = cd_time
                     active += 1
             if active:
@@ -253,16 +303,7 @@ class Scanner:
                     f"📊 Фильтры: {diag}\n"
                     f"Следующий через 15 мин"
                 )
-            # 24h drought alert
-            if self._last_signal_time is not None:
-                drought_h = (datetime.utcnow() - self._last_signal_time).total_seconds() / 3600
-                if drought_h >= 24 and self._scan_count % 8 == 1:
-                    await self._notify(
-                        f"⏳ <b>Нет сигналов уже {drought_h:.0f}ч</b>\n"
-                        f"MIN_SCORE: {cfg.MIN_SCORE} | Пар: {len(state.pairs)}\n"
-                        f"📊 Топ причин отсева: {diag}\n"
-                        f"Рассмотри снижение MIN_SCORE или смену пар"
-                    )
+            await self._drought_alert(diag)
             return
 
         signals.sort(key=lambda s: s.score, reverse=True)
@@ -293,15 +334,7 @@ class Scanner:
                     f"📊 Фильтры: {diag}\n"
                     f"Следующий через 15 мин"
                 )
-            # 24h drought alert (signals exist but all below MIN_SCORE)
-            if self._last_signal_time is not None:
-                drought_h = (datetime.utcnow() - self._last_signal_time).total_seconds() / 3600
-                if drought_h >= 24 and self._scan_count % 8 == 1:
-                    await self._notify(
-                        f"⏳ <b>Нет торговых сигналов уже {drought_h:.0f}ч</b>\n"
-                        f"MIN_SCORE: {cfg.MIN_SCORE} | Найдено: {len(signals)} ниже порога\n"
-                        f"Рассмотри снижение MIN_SCORE или смену пар"
-                    )
+            await self._drought_alert()
             return
 
         # Qualified signals found — update last signal time
@@ -962,46 +995,12 @@ class Scanner:
                     except Exception as e:
                         log.warning(f"{symbol}: ошибка получения цены при закрытии — P&L посчитан по цене входа: {e}")
                         price = pos.entry
-                    pnl = self._calc_pnl(pos, price)
-                    state.total_pnl    += pnl
-                    state.day.pnl_usdt += pnl
-                    result = "WIN" if pnl > 0 else "LOSS"
-                    if pnl > 0:
-                        state.day.wins += 1
-                        state.day.loss_streak = 0
-                    else:
-                        state.day.losses += 1
-                        state.day.loss_streak += 1
-                        if state.day.loss_streak == 3:
-                            pause_min = cfg.PAUSE_3X_LOSS_MIN
-                            await self._notify(
-                                f"⛔ <b>3 убытка подряд</b> — пауза {pause_min} мин\n"
-                                f"Серия: {state.day.loss_streak} | "
-                                f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
-                            )
-                        else:
-                            pause_min = cfg.PAUSE_AFTER_LOSS_MIN
-                        state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
-                        db.save_kv("paused_until", state.day.paused_until.isoformat())
-                    try:
-                        from core import db
-                        db.save_trade(pos, price, pnl, result)
-                    except Exception as e:
-                        log.error(f"{symbol}: ошибка сохранения сделки в БД: {e}")
-                    del state.positions[symbol]
-                    db.delete_open_position(symbol)
-                    self._stale_alerted.discard(symbol)
-                    self._funding_warned.discard(symbol)
+                    pnl = await self._record_close(pos, price)
                     # Refresh balance so next position sizing uses real balance
                     try:
                         state.current_balance = await self.ex.get_balance()
                     except Exception:
                         pass
-                    # Set cooldown if closed at a loss
-                    if pnl <= 0:
-                        self._loss_cooldown(symbol)
-                    else:
-                        self._symbol_loss_streak.pop(symbol, None)
                     sign = "+" if pnl >= 0 else ""
                     await self._notify(
                         f"{'✅ WIN' if pnl > 0 else '❌ LOSS'} | {symbol} {pos.side}\n"
@@ -1022,36 +1021,7 @@ class Scanner:
                     ticker = await self.ex.get_ticker(symbol)
                     price = float(ticker.get("lastPrice", pos.entry)) if ticker else pos.entry
                     await self.ex.close_position(symbol, pos.qty, pos.side)
-                    pnl = self._calc_pnl(pos, price)
-                    state.day.pnl_usdt += pnl
-                    state.total_pnl += pnl
-                    result = "WIN" if pnl > 0 else "LOSS"
-                    if pnl > 0:
-                        state.day.wins += 1
-                        state.day.loss_streak = 0
-                    else:
-                        state.day.losses += 1
-                        state.day.loss_streak += 1
-                        if state.day.loss_streak == 3:
-                            pause_min = cfg.PAUSE_3X_LOSS_MIN
-                            await self._notify(
-                                f"⛔ <b>3 убытка подряд</b> — пауза {pause_min} мин\n"
-                                f"Серия: {state.day.loss_streak} | "
-                                f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
-                            )
-                        else:
-                            pause_min = cfg.PAUSE_AFTER_LOSS_MIN
-                        state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
-                        db.save_kv("paused_until", state.day.paused_until.isoformat())
-                    db.save_trade(pos, price, pnl, result)
-                    del state.positions[symbol]
-                    db.delete_open_position(symbol)
-                    self._stale_alerted.discard(symbol)
-                    self._funding_warned.discard(symbol)
-                    if pnl <= 0:
-                        self._loss_cooldown(symbol)
-                    else:
-                        self._symbol_loss_streak.pop(symbol, None)
+                    pnl = await self._record_close(pos, price)
                     sign = "+" if pnl >= 0 else ""
                     await self._notify(
                         f"⏰ {'✅' if pnl > 0 else '❌'} Авто-закрытие | {symbol} {pos.side}\n"
@@ -1291,51 +1261,16 @@ class Scanner:
         except Exception as e:
             log.warning(f"cancel opposite order {pos.symbol}: {e}")
 
-        pnl = self._calc_pnl(pos, price)
-        state.total_pnl    += pnl
-        state.day.pnl_usdt += pnl
-        result = "WIN" if pnl > 0 else "LOSS"
+        pnl = await self._record_close(pos, price)
 
-        if pnl > 0:
-            state.day.wins       += 1
-            state.day.loss_streak = 0
-        else:
-            state.day.losses     += 1
-            state.day.loss_streak += 1
-            if state.day.loss_streak == 3:
-                pause_min = cfg.PAUSE_3X_LOSS_MIN
-                await self._notify(
-                    f"⛔ <b>3 убытка подряд</b> — пауза {pause_min} мин\n"
-                    f"Серия: {state.day.loss_streak} | "
-                    f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
-                )
-            else:
-                pause_min = cfg.PAUSE_AFTER_LOSS_MIN
-            state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
-            db.save_kv("paused_until", state.day.paused_until.isoformat())
-
-        # Save to DB
-        try:
-            db.save_trade(pos, price, pnl, result)
-        except Exception as e:
-            log.error(f"db.save_trade: {e}")
-
-        del state.positions[pos.symbol]
-        db.delete_open_position(pos.symbol)
-        self._stale_alerted.discard(pos.symbol)
-        self._funding_warned.discard(pos.symbol)
-
-        # Cooldown after SL hit — extended if consecutive losses on same symbol
+        # After SL hit: notify if extended streak cooldown activated
         if sl_hit:
-            self._loss_cooldown(pos.symbol)
             streak = self._symbol_loss_streak.get(pos.symbol, 0)
             if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT:
                 await self._notify(
                     f"🚫 <b>{pos.symbol}</b>: {streak} стопа подряд\n"
                     f"Кулдаун {cfg.SYMBOL_LOSS_COOLDOWN_MIN // 60}ч — не входим в эту монету"
                 )
-        elif tp3_hit:
-            self._symbol_loss_streak.pop(pos.symbol, None)
 
         trade_sign = "+" if pnl >= 0 else ""
         total_sign = "+" if state.total_pnl >= 0 else ""

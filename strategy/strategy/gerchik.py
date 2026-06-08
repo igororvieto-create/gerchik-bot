@@ -296,7 +296,7 @@ def detect_pattern(candles, idx=-1):
 
 # ─────────────────────────────────────── main ──
 
-def analyze(symbol, d1, h4, h1, funding, cfg):
+def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if not d1 or not h4 or not h1:
         _reject("нет данных")
         return None
@@ -559,7 +559,8 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     if detect_rsi_divergence(h4["close"], h4_rsi_v, trend):
         score -= 12
     # D1 level proximity: entering near major daily obstacle → penalty
-    d1_lv = find_levels(d1["high"], d1["low"], lookback=min(120, len(d1["high"])))
+    d1_lv = d1_levels if d1_levels is not None \
+            else find_levels(d1["high"], d1["low"], lookback=min(120, len(d1["high"])))
     d1_obstacles = d1_lv["resistance"] if trend == "LONG" else d1_lv["support"]
     is_near_d1, _ = near_level(price, d1_obstacles, tol=2.0)
     if is_near_d1:
@@ -591,7 +592,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg):
     )
 
 
-def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
+def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     """
     Ложный пробой — сетап №1 по Герчику.
 
@@ -737,6 +738,11 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
         _reject("ложный пробой: RSI перепродан")
         return None
 
+    # ── Volume minimum — check early to avoid wasted SL/TP math ──
+    if fb_vrat < 1.5:
+        _reject("ложный пробой: объём < 1.5x")
+        return None
+
     # ── Funding ──
     if trend == "LONG"  and funding > cfg.FUNDING_MAX_LONG:
         return None
@@ -763,10 +769,8 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
     tp2 = _px(price + sld * cfg.TP2_RR if trend == "LONG" else price - sld * cfg.TP2_RR)
     tp3 = _px(price + sld * cfg.TP3_RR if trend == "LONG" else price - sld * cfg.TP3_RR)
     rr  = cfg.TP2_RR
-
-    # Volume minimum for false breakout: must have at least 1.5x to even consider
-    if fb_vrat < 1.5:
-        _reject("ложный пробой: объём < 1.5x")
+    if rr < cfg.MIN_RR:
+        _reject(f"ложный пробой: R/R {rr:.1f} < MIN_RR {cfg.MIN_RR}")
         return None
 
     # wick_pct must be computed BEFORE score section
@@ -816,7 +820,8 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
     if detect_rsi_divergence(h4["close"], h4_rsi_fb, trend):
         score -= 12
     # D1 level proximity: entering near major daily obstacle → penalty
-    d1_lv_fb = find_levels(d1["high"], d1["low"], lookback=min(120, len(d1["high"])))
+    d1_lv_fb = d1_levels if d1_levels is not None \
+               else find_levels(d1["high"], d1["low"], lookback=min(120, len(d1["high"])))
     d1_obs_fb = d1_lv_fb["resistance"] if trend == "LONG" else d1_lv_fb["support"]
     is_near_d1_fb, _ = near_level(price, d1_obs_fb, tol=2.0)
     if is_near_d1_fb:
@@ -846,7 +851,7 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg):
     )
 
 
-def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg):
+def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     """
     Accumulation range breakout — Gerchik's core concept.
 
@@ -1029,6 +1034,9 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg):
     tp3_rr  = cfg.TP3_RR * 1.5   # accumulation breakouts go further
     tp3     = _px(price + sld * tp3_rr if trend == "LONG" else price - sld * tp3_rr)
     rr      = cfg.TP2_RR
+    if rr < cfg.MIN_RR:
+        _reject(f"накопление: R/R {rr:.1f} < MIN_RR {cfg.MIN_RR}")
+        return None
 
     # ── H1 candle pattern — optional confirmation bonus ──
     h1_pname, h1_pside = detect_pattern(h1, -2)
@@ -1053,8 +1061,13 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg):
         score += 5
     if h1_pat_ok:
         score += 8  # H1 candle confirms the breakout direction
+    # RSI divergence on H4: weakening momentum into a breakout = warning signal
+    h4_rsi_rb = rsi(h4["close"], 14)
+    if detect_rsi_divergence(h4["close"], h4_rsi_rb, trend):
+        score -= 10
     # D1 level proximity: entering near major daily obstacle → penalty
-    d1_lv_rb = find_levels(d1["high"], d1["low"], lookback=min(120, len(d1["high"])))
+    d1_lv_rb = d1_levels if d1_levels is not None \
+               else find_levels(d1["high"], d1["low"], lookback=min(120, len(d1["high"])))
     d1_obs_rb = d1_lv_rb["resistance"] if trend == "LONG" else d1_lv_rb["support"]
     is_near_d1_rb, _ = near_level(price, d1_obs_rb, tol=2.0)
     if is_near_d1_rb:
@@ -1087,7 +1100,7 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg):
     )
 
 
-def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
+def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     """
     Breakout signal: price closes through a key S/R level with conviction.
     Complements the pullback strategy — catches strong directional moves.
@@ -1239,6 +1252,9 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
     tp2 = _px(price + sld * cfg.TP2_RR if trend == "LONG" else price - sld * cfg.TP2_RR)
     tp3 = _px(price + sld * cfg.TP3_RR if trend == "LONG" else price - sld * cfg.TP3_RR)
     rr  = cfg.TP2_RR
+    if rr < cfg.MIN_RR:
+        _reject(f"пробой: R/R {rr:.1f} < MIN_RR {cfg.MIN_RR}")
+        return None
 
     # Score breakout signals
     score = 55  # base higher than pullback (50) — breakout is higher conviction
@@ -1252,7 +1268,8 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg):
     if (trend == "LONG" and d1_slope > 0.3) or (trend == "SHORT" and d1_slope < -0.3):
         score += 7
     # D1 level proximity: entering near major daily obstacle → penalty
-    d1_lv_br = find_levels(d1["high"], d1["low"], lookback=min(120, len(d1["high"])))
+    d1_lv_br = d1_levels if d1_levels is not None \
+               else find_levels(d1["high"], d1["low"], lookback=min(120, len(d1["high"])))
     d1_obs_br = d1_lv_br["resistance"] if trend == "LONG" else d1_lv_br["support"]
     is_near_d1_br, _ = near_level(price, d1_obs_br, tol=2.0)
     if is_near_d1_br:

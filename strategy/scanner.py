@@ -14,7 +14,7 @@ from exchange.bingx import BingXClient
 from strategy.strategy.gerchik import (
     Signal, analyze, analyze_false_breakout, analyze_breakout,
     analyze_range_breakout, parse_klines, reset_stats, get_stats,
-    nearest_weekly_levels, near_level, level_last_touch_age,
+    nearest_weekly_levels, near_level, level_last_touch_age, find_levels,
 )
 
 log = logging.getLogger("scanner")
@@ -397,27 +397,38 @@ class Scanner:
 
     async def _analyze(self, symbol: str):
         try:
-            d1      = parse_klines(await self.ex.get_klines(symbol, cfg.TREND_TF,  limit=250))
-            h4      = parse_klines(await self.ex.get_klines(symbol, cfg.H4_TF,     limit=150))
-            h1      = parse_klines(await self.ex.get_klines(symbol, cfg.SIGNAL_TF, limit=100))
-            w1      = parse_klines(await self.ex.get_klines(symbol, "1w",          limit=60))
-            funding = await self.ex.get_funding_rate(symbol)
+            raw_d1, raw_h4, raw_h1, raw_w1, funding = await asyncio.gather(
+                self.ex.get_klines(symbol, cfg.TREND_TF,  limit=250),
+                self.ex.get_klines(symbol, cfg.H4_TF,     limit=150),
+                self.ex.get_klines(symbol, cfg.SIGNAL_TF, limit=100),
+                self.ex.get_klines(symbol, "1w",          limit=60),
+                self.ex.get_funding_rate(symbol),
+            )
+            d1 = parse_klines(raw_d1)
+            h4 = parse_klines(raw_h4)
+            h1 = parse_klines(raw_h1)
+            w1 = parse_klines(raw_w1)
 
             if funding > 0.1 or funding < -0.1:
                 log.warning(f"⚠️ Экстремальный фандинг {symbol}: {funding:.4f}%")
 
+            # Pre-compute D1 levels once — reused by all 4 analyze functions
+            d1_levels = find_levels(
+                d1["high"], d1["low"], lookback=min(120, len(d1["high"]))
+            ) if d1 else None
+
             # Priority order (Gerchik methodology):
             # 1. Pullback to S/R (откат к уровню — базовый вход)
-            sig = analyze(symbol, d1, h4, h1, funding, cfg)
+            sig = analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=d1_levels)
             # 2. False breakout (ложный пробой — сетап №1 по Герчику)
             if sig is None:
-                sig = analyze_false_breakout(symbol, d1, h4, h1, funding, cfg)
+                sig = analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=d1_levels)
             # 3. Accumulation range breakout (накопление — пробой диапазона)
             if sig is None:
-                sig = analyze_range_breakout(symbol, d1, h4, h1, funding, cfg)
+                sig = analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=d1_levels)
             # 4. Momentum breakout through a single level
             if sig is None:
-                sig = analyze_breakout(symbol, d1, h4, h1, funding, cfg)
+                sig = analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=d1_levels)
 
             # Orderbook filter (optional, controlled by ORDERBOOK_ENABLED)
             if sig is not None and cfg.ORDERBOOK_ENABLED:
@@ -1203,6 +1214,12 @@ class Scanner:
                           else (pos.entry - close_price) * qty
             state.total_pnl    += partial_pnl
             state.day.pnl_usdt += partial_pnl
+            # A profitable partial close means the trade is winning — reset streak so
+            # a subsequent SL on the remainder doesn't compound the loss count.
+            if partial_pnl > 0:
+                state.day.loss_streak = 0
+                state.day.paused_until = None
+                db.save_kv("paused_until", "")
             try:
                 from dataclasses import replace as dc_replace
                 pos_snap = dc_replace(pos, qty=qty)

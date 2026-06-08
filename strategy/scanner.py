@@ -1036,11 +1036,16 @@ class Scanner:
                     await self._notify(f"⚠️ Ошибка авто-закрытия {symbol}: {_html.escape(str(e))}")
             elif age_h > 48 and symbol not in self._stale_alerted:
                 self._stale_alerted.add(symbol)
+                auto_close_note = (
+                    f"Авто-закрытие через {cfg.MAX_POSITION_HOURS - age_h:.0f}ч"
+                    if cfg.MAX_POSITION_HOURS > 0
+                    else "Авто-закрытие выключено"
+                )
                 await self._notify(
                     f"⏰ <b>Позиция завязла</b> | {symbol} {pos.side}\n"
                     f"Открыта {age_h:.0f}ч назад без движения к TP\n"
                     f"Вход: <code>{pos.entry:.4f}</code> | TP2: <code>{pos.tp2:.4f}</code>\n"
-                    f"Авто-закрытие через {cfg.MAX_POSITION_HOURS - age_h:.0f}ч"
+                    f"{auto_close_note}"
                 )
 
         # Clean up stale sl_cooldown entries — use max possible cooldown to not evict early
@@ -1266,8 +1271,12 @@ class Scanner:
 
         pnl = await self._record_close(pos, price)
 
-        # After SL hit: notify if extended streak cooldown activated
         if sl_hit:
+            # SL fired at breakeven (pnl > 0): _record_close cleared the streak but
+            # the stop was still hit — apply a normal cooldown without incrementing streak
+            if pnl > 0:
+                self._normal_cooldown(pos.symbol)
+            # Notify if extended streak cooldown activated (streak was incremented by _record_close on loss)
             streak = self._symbol_loss_streak.get(pos.symbol, 0)
             if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT:
                 await self._notify(

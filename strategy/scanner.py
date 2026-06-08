@@ -94,16 +94,19 @@ class Scanner:
         if pnl > 0:
             state.day.wins += 1
             state.day.loss_streak = 0
+            state.day.paused_until = None
+            db.save_kv("paused_until", "")
         else:
             state.day.losses += 1
             state.day.loss_streak += 1
-            if state.day.loss_streak == 3:
+            if state.day.loss_streak >= 3:
                 pause_min = cfg.PAUSE_3X_LOSS_MIN
-                await self._notify(
-                    f"⛔ <b>3 убытка подряд</b> — пауза {pause_min} мин\n"
-                    f"Серия: {state.day.loss_streak} | "
-                    f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
-                )
+                if state.day.loss_streak == 3:
+                    await self._notify(
+                        f"⛔ <b>3 убытка подряд</b> — пауза {pause_min} мин\n"
+                        f"Серия: {state.day.loss_streak} | "
+                        f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
+                    )
             else:
                 pause_min = cfg.PAUSE_AFTER_LOSS_MIN
             state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
@@ -334,7 +337,7 @@ class Scanner:
                     f"📊 Фильтры: {diag}\n"
                     f"Следующий через 15 мин"
                 )
-            await self._drought_alert()
+            await self._drought_alert(diag)
             return
 
         # Qualified signals found — update last signal time

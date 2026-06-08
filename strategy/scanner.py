@@ -583,7 +583,7 @@ class Scanner:
 
             # Orderbook module may suggest lower leverage (e.g. thin book)
             ob_lev = getattr(sig, "_ob_suggested_leverage", None)
-            if ob_lev and ob_lev < leverage:
+            if ob_lev is not None and ob_lev < leverage:
                 log.info(f"{sig.symbol}: стакан рекомендует x{ob_lev} (было x{leverage}) — применяем")
                 leverage = ob_lev
 
@@ -939,8 +939,8 @@ class Scanner:
 
     async def _monitor_inner(self):
         self._monitor_count += 1
-        # Check funding on open positions every ~30 min (30s × 60 cycles)
-        if self._monitor_count % 60 == 0:
+        # Check funding on open positions every ~30 min (60s × 30 cycles)
+        if self._monitor_count % 30 == 0:
             await self._check_open_funding()
 
         # Sync with BingX: detect positions closed externally (SL/TP hit on exchange)
@@ -972,7 +972,7 @@ class Scanner:
                     else:
                         state.day.losses += 1
                         state.day.loss_streak += 1
-                        if state.day.loss_streak >= 3:
+                        if state.day.loss_streak == 3:
                             pause_min = cfg.PAUSE_3X_LOSS_MIN
                             await self._notify(
                                 f"⛔ <b>3 убытка подряд</b> — пауза {pause_min} мин\n"
@@ -1025,11 +1025,33 @@ class Scanner:
                     pnl = self._calc_pnl(pos, price)
                     state.day.pnl_usdt += pnl
                     state.total_pnl += pnl
-                    db.save_trade(pos, price, pnl, "WIN" if pnl > 0 else "LOSS")
+                    result = "WIN" if pnl > 0 else "LOSS"
+                    if pnl > 0:
+                        state.day.wins += 1
+                        state.day.loss_streak = 0
+                    else:
+                        state.day.losses += 1
+                        state.day.loss_streak += 1
+                        if state.day.loss_streak == 3:
+                            pause_min = cfg.PAUSE_3X_LOSS_MIN
+                            await self._notify(
+                                f"⛔ <b>3 убытка подряд</b> — пауза {pause_min} мин\n"
+                                f"Серия: {state.day.loss_streak} | "
+                                f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
+                            )
+                        else:
+                            pause_min = cfg.PAUSE_AFTER_LOSS_MIN
+                        state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
+                        db.save_kv("paused_until", state.day.paused_until.isoformat())
+                    db.save_trade(pos, price, pnl, result)
                     del state.positions[symbol]
                     db.delete_open_position(symbol)
                     self._stale_alerted.discard(symbol)
                     self._funding_warned.discard(symbol)
+                    if pnl <= 0:
+                        self._loss_cooldown(symbol)
+                    else:
+                        self._symbol_loss_streak.pop(symbol, None)
                     sign = "+" if pnl >= 0 else ""
                     await self._notify(
                         f"⏰ {'✅' if pnl > 0 else '❌'} Авто-закрытие | {symbol} {pos.side}\n"
@@ -1064,6 +1086,7 @@ class Scanner:
                 price = float(ticker.get("lastPrice", pos.entry))
 
                 # Breakeven trigger — skip for exchange-synced positions (tp1/sl unknown)
+                _be_just_fired = False
                 if not pos.be_moved and pos.sl > 0:
                     be_triggered = False
                     if cfg.BE_TRIGGER_PCT > 0:
@@ -1073,14 +1096,17 @@ class Scanner:
                         else:
                             be_triggered = price <= pos.entry * (1 - cfg.BE_TRIGGER_PCT / 100)
                     elif pos.tp1 > 0:
-                        # Fallback: TP1 trigger (only if TP1 is known)
+                        # Fallback: use TP1 as BE trigger (BE_TRIGGER_PCT=0)
                         be_triggered = (pos.side == "LONG" and price >= pos.tp1) or \
                                        (pos.side == "SHORT" and price <= pos.tp1)
                     if be_triggered:
                         await self._move_be(pos)
+                        _be_just_fired = True
 
-                # TP1 → partial close 20% (lock early profit)
-                if not pos.tp1_hit and pos.tp1 > 0:
+                # TP1 → partial close 25% (lock early profit)
+                # Skip if BE just fired in the same cycle via the TP1-fallback path —
+                # _move_be already placed SL at BE; re-firing would cause a double SL churn.
+                if not pos.tp1_hit and pos.tp1 > 0 and not _be_just_fired:
                     tp1_triggered = (pos.side == "LONG" and price >= pos.tp1) or \
                                     (pos.side == "SHORT" and price <= pos.tp1)
                     if tp1_triggered:
@@ -1276,7 +1302,7 @@ class Scanner:
         else:
             state.day.losses     += 1
             state.day.loss_streak += 1
-            if state.day.loss_streak >= 3:
+            if state.day.loss_streak == 3:
                 pause_min = cfg.PAUSE_3X_LOSS_MIN
                 await self._notify(
                     f"⛔ <b>3 убытка подряд</b> — пауза {pause_min} мин\n"

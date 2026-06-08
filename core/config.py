@@ -78,7 +78,9 @@ class Config:
     # Drawdown protection: auto-pause if balance drops this % from the session peak (0 = disabled)
     MAX_DRAWDOWN_PCT:        float = float(os.getenv("MAX_DRAWDOWN_PCT", "20.0").strip())
     # Extended symbol cooldown: after this many consecutive SL hits on the same symbol, cooldown × multiplier
-    SYMBOL_LOSS_STREAK_LIMIT: int  = int(os.getenv("SYMBOL_LOSS_STREAK_LIMIT", "2").strip())
-    SYMBOL_LOSS_COOLDOWN_MIN: int  = int(os.getenv("SYMBOL_LOSS_COOLDOWN_MIN", "720").strip())
+    SYMBOL_LOSS_STREAK_LIMIT: int   = int(os.getenv("SYMBOL_LOSS_STREAK_LIMIT", "2").strip())
+    SYMBOL_LOSS_COOLDOWN_MIN: int   = int(os.getenv("SYMBOL_LOSS_COOLDOWN_MIN", "720").strip())
+    # Accumulation breakout TP3 multiplier — range breakouts travel further than pullbacks
+    RANGE_TP3_MULT:           float = float(os.getenv("RANGE_TP3_MULT", "1.5").strip())
 
 cfg = Config()

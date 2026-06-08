@@ -90,8 +90,11 @@ class Scanner:
         pnl = self._calc_pnl(pos, price)
         state.total_pnl    += pnl
         state.day.pnl_usdt += pnl
-        result = "WIN" if pnl > 0 else "LOSS"
-        if pnl > 0:
+        # Use total trade PnL (partials + final) to decide win/loss — prevents a small
+        # SL on the remainder from counting as a loss when TP1+TP2 were already taken.
+        total_trade_pnl = pnl + pos.partial_pnl_taken
+        result = "WIN" if total_trade_pnl > 0 else "LOSS"
+        if total_trade_pnl > 0:
             state.day.wins += 1
             state.day.loss_streak = 0
             state.day.paused_until = None
@@ -119,7 +122,7 @@ class Scanner:
         db.delete_open_position(symbol)
         self._stale_alerted.discard(symbol)
         self._funding_warned.discard(symbol)
-        if pnl <= 0:
+        if total_trade_pnl <= 0:
             self._loss_cooldown(symbol)
         else:
             self._symbol_loss_streak.pop(symbol, None)
@@ -397,17 +400,24 @@ class Scanner:
 
     async def _analyze(self, symbol: str):
         try:
-            raw_d1, raw_h4, raw_h1, raw_w1, funding = await asyncio.gather(
+            raw_d1, raw_h4, raw_h1, funding = await asyncio.gather(
                 self.ex.get_klines(symbol, cfg.TREND_TF,  limit=250),
                 self.ex.get_klines(symbol, cfg.H4_TF,     limit=150),
                 self.ex.get_klines(symbol, cfg.SIGNAL_TF, limit=100),
-                self.ex.get_klines(symbol, "1w",          limit=60),
                 self.ex.get_funding_rate(symbol),
+                return_exceptions=True,
             )
+            # Klines are essential — propagate exceptions for D1/H4/H1
+            for _name, _res in (("D1", raw_d1), ("H4", raw_h4), ("H1", raw_h1)):
+                if isinstance(_res, Exception):
+                    raise _res
+            # Funding is optional — default to neutral if the endpoint failed
+            if isinstance(funding, Exception):
+                log.warning(f"{symbol}: funding rate error ({funding!r}) — defaulting 0.0")
+                funding = 0.0
             d1 = parse_klines(raw_d1)
             h4 = parse_klines(raw_h4)
             h1 = parse_klines(raw_h1)
-            w1 = parse_klines(raw_w1)
 
             if funding > 0.1 or funding < -0.1:
                 log.warning(f"⚠️ Экстремальный фандинг {symbol}: {funding:.4f}%")
@@ -463,16 +473,19 @@ class Scanner:
                 except Exception as obe:
                     log.warning(f"orderbook filter {symbol}: {obe}")
 
-            # Weekly level bonus: +8 score if signal entry is near a key W1 level
-            if sig is not None and w1 and len(w1.get("close", [])) >= 10:
+            # Weekly level bonus: fetch W1 only when there is a signal (saves ~95% of W1 API calls)
+            if sig is not None:
                 try:
-                    w1_lvls = nearest_weekly_levels(sig.entry, w1, count=5)
-                    all_w1  = w1_lvls["support"] + w1_lvls["resistance"]
-                    is_near_w1, w1_lvl = near_level(sig.entry, all_w1, tol=1.5)
-                    if is_near_w1:
-                        sig.score = min(100, sig.score + 8)
-                        sig.reason += f"\n📅 <b>Недельный уровень</b> <code>{w1_lvl:.4f}</code> +8"
-                        log.info(f"{symbol}: +8 W1 уровень {w1_lvl:.4f}")
+                    raw_w1 = await self.ex.get_klines(symbol, "1w", limit=60)
+                    w1 = parse_klines(raw_w1)
+                    if w1 and len(w1.get("close", [])) >= 10:
+                        w1_lvls = nearest_weekly_levels(sig.entry, w1, count=5)
+                        all_w1  = w1_lvls["support"] + w1_lvls["resistance"]
+                        is_near_w1, w1_lvl = near_level(sig.entry, all_w1, tol=1.5)
+                        if is_near_w1:
+                            sig.score = min(100, sig.score + 8)
+                            sig.reason += f"\n📅 <b>Недельный уровень</b> <code>{w1_lvl:.4f}</code> +8"
+                            log.info(f"{symbol}: +8 W1 уровень {w1_lvl:.4f}")
                 except Exception as we:
                     log.debug(f"w1 bonus {symbol}: {we}")
 
@@ -1201,25 +1214,19 @@ class Scanner:
             qty = min(qty, pos.qty)  # safety: never close more than held
             await self.ex.close_position(pos.symbol, qty, pos.side)
 
-            # Record PnL for the closed portion
-            fallback = pos.tp1 if label == "TP1" else pos.tp2
-            close_price = fallback if fallback > 0 else pos.entry
+            # Record PnL for the closed portion; use entry as safe fallback (zero PnL, not inflated)
+            close_price = pos.entry
             try:
                 ticker = await self.ex.get_ticker(pos.symbol)
                 if ticker and float(ticker.get("lastPrice", 0)) > 0:
-                    close_price = float(ticker.get("lastPrice", close_price))
+                    close_price = float(ticker.get("lastPrice", pos.entry))
             except Exception as pe:
                 log.warning(f"partial_close ticker {pos.symbol}: {pe}")
             partial_pnl = (close_price - pos.entry) * qty if pos.side == "LONG" \
                           else (pos.entry - close_price) * qty
             state.total_pnl    += partial_pnl
             state.day.pnl_usdt += partial_pnl
-            # A profitable partial close means the trade is winning — reset streak so
-            # a subsequent SL on the remainder doesn't compound the loss count.
-            if partial_pnl > 0:
-                state.day.loss_streak = 0
-                state.day.paused_until = None
-                db.save_kv("paused_until", "")
+            pos.partial_pnl_taken += partial_pnl
             try:
                 from dataclasses import replace as dc_replace
                 pos_snap = dc_replace(pos, qty=qty)

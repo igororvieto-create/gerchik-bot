@@ -16,10 +16,11 @@ class Position:
     order_id:    str      = ""
     sl_order_id: str      = ""
     tp_order_id: str      = ""
-    be_moved:    bool     = False
-    tp1_hit:     bool     = False
-    tp2_hit:     bool     = False
-    trail_price: float    = 0.0   # peak price tracked for trailing stop
+    be_moved:          bool  = False
+    tp1_hit:           bool  = False
+    tp2_hit:           bool  = False
+    trail_price:       float = 0.0   # peak price tracked for trailing stop
+    partial_pnl_taken: float = 0.0   # cumulative PnL from TP1+TP2 partial closes
     opened_at:   datetime = field(default_factory=datetime.utcnow)
     pattern:     str      = ""
     tf:          str      = "H1+H4"

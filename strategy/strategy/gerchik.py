@@ -1031,7 +1031,7 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     sl      = _px(sl)
     tp1     = _px(price + sld * cfg.TP1_RR if trend == "LONG" else price - sld * cfg.TP1_RR)
     tp2     = _px(price + sld * cfg.TP2_RR if trend == "LONG" else price - sld * cfg.TP2_RR)
-    tp3_rr  = cfg.TP3_RR * 1.5   # accumulation breakouts go further
+    tp3_rr  = cfg.TP3_RR * cfg.RANGE_TP3_MULT   # accumulation breakouts go further
     tp3     = _px(price + sld * tp3_rr if trend == "LONG" else price - sld * tp3_rr)
     rr      = cfg.TP2_RR
     if rr < cfg.MIN_RR:

@@ -1429,6 +1429,69 @@ class Scanner:
 
     # ------------------------------------------------------------------ reports
 
+    async def periodic_report(self):
+        """Отчёт каждые 3 часа: баланс, позиции, дневная статистика."""
+        try:
+            # Balance (refresh from exchange)
+            try:
+                balance = await self.ex.get_balance()
+                state.current_balance = balance
+            except Exception:
+                balance = state.current_balance
+
+            # Live positions from exchange
+            try:
+                live = await self.ex.get_open_positions()
+                live_pos = [p for p in live if abs(float(p.get("positionAmt", 0))) > 0]
+            except Exception:
+                live_pos = []
+
+            d         = state.day
+            wr        = round(d.wins / d.trades * 100) if d.trades else 0
+            day_sign  = "+" if d.pnl_usdt >= 0 else ""
+            tot_sign  = "+" if state.total_pnl >= 0 else ""
+            now_str   = datetime.utcnow().strftime("%H:%M UTC")
+
+            lines = [f"🤖 <b>Статус</b> | {now_str}"]
+            lines.append(f"\n💰 <b>Баланс:</b> <code>{balance:.2f} USDT</code>")
+            lines.append(f"📊 <b>Всего PnL:</b> <code>{tot_sign}{state.total_pnl:.2f} USDT</code>")
+
+            if d.trades:
+                lines.append(
+                    f"\n📅 <b>Сегодня:</b> {d.trades} сд | ✅{d.wins} ❌{d.losses} | "
+                    f"WR {wr}% | <code>{day_sign}{d.pnl_usdt:.2f} USDT</code>"
+                )
+            else:
+                lines.append("\n📅 <b>Сегодня:</b> сделок ещё нет")
+
+            if live_pos:
+                lines.append(f"\n📌 <b>Открытых позиций:</b> {len(live_pos)}")
+                for p in live_pos[:5]:
+                    sym  = p.get("symbol", "?")
+                    side = p.get("positionSide", "?")
+                    upnl = float(p.get("unrealizedProfit", 0))
+                    s    = "+" if upnl >= 0 else ""
+                    lines.append(f"  • {sym} {side} uPnL: <code>{s}{upnl:.2f}</code>")
+            else:
+                lines.append("\n📌 <b>Открытых позиций:</b> нет")
+
+            if state.is_paused:
+                pu = state.day.paused_until
+                if pu:
+                    lines.append(f"\n⏸ <b>Пауза до</b> {pu.strftime('%H:%M UTC')}")
+                else:
+                    lines.append("\n⏸ <b>Бот на паузе</b>")
+
+            # Mismatch warning
+            if len(live_pos) != len(state.positions):
+                lines.append(
+                    f"\n⚠️ Расхождение: биржа={len(live_pos)}, бот={len(state.positions)}"
+                )
+
+            await self._notify("\n".join(lines))
+        except Exception as e:
+            log.error(f"periodic_report: {e}")
+
     async def daily_report(self):
         d  = state.day
         wr = round(d.wins / d.trades * 100) if d.trades else 0

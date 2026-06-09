@@ -51,6 +51,13 @@ class BingXClient:
             try:
                 sess = await self._sess()
                 async with sess.get(url, headers=headers) as r:
+                    if r.status == 429:
+                        if attempt == _RETRIES - 1:
+                            raise aiohttp.ClientError(f"Rate limited: GET {path}")
+                        log.warning(f"GET {path} rate limited, retry in {delay}s")
+                        await asyncio.sleep(delay)
+                        delay *= 2
+                        continue
                     data = await r.json()
                     if data.get("code") != 0:
                         log.error(f"GET {path}: {data}")
@@ -73,6 +80,13 @@ class BingXClient:
             try:
                 sess = await self._sess()
                 async with sess.post(f"{BASE}{path}", data=qs, headers=headers) as r:
+                    if r.status == 429:
+                        if attempt == _RETRIES - 1:
+                            raise aiohttp.ClientError(f"Rate limited: POST {path}")
+                        log.warning(f"POST {path} rate limited, retry in {delay}s")
+                        await asyncio.sleep(delay)
+                        delay *= 2
+                        continue
                     data = await r.json()
                     if data.get("code") != 0:
                         log.error(f"POST {path}: {data}")

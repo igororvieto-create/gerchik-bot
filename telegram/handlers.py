@@ -740,6 +740,33 @@ async def cmd_scan(msg: Message):
     asyncio.create_task(_do())
 
 
+# ── Shared accounting helper for manual position closes ─────────────
+async def _account_manual_close(ex, pos) -> tuple:
+    """Fetch close price, update PnL state, and save trade record for a manually closed position."""
+    try:
+        ticker = await ex.get_ticker(pos.symbol)
+        close_px = float(ticker.get("lastPrice", pos.entry)) if ticker else pos.entry
+    except Exception:
+        close_px = pos.entry
+    leg_pnl = (close_px - pos.entry) * pos.qty if pos.side == "LONG" \
+              else (pos.entry - close_px) * pos.qty
+    total_trade_pnl = leg_pnl + pos.partial_pnl_taken
+    state.total_pnl    += leg_pnl
+    state.day.pnl_usdt += leg_pnl
+    if total_trade_pnl > 0:
+        state.day.wins += 1
+        state.day.loss_streak = 0
+    else:
+        state.day.losses += 1
+        state.day.loss_streak += 1
+    try:
+        from core import db as _db
+        _db.save_trade(pos, close_px, round(leg_pnl, 4), "WIN" if total_trade_pnl > 0 else "LOSS")
+    except Exception as e:
+        log.warning(f"_account_manual_close db.save_trade {pos.symbol}: {e}")
+    return close_px, leg_pnl
+
+
 # ------------------------------------------------------------------ /closeall
 
 async def cmd_closeall(msg: Message):
@@ -772,6 +799,8 @@ async def cmd_closeall(msg: Message):
                         except Exception:
                             pass
             await ex.close_position(sym, amt, side)
+            if tracked and tracked.entry > 0:
+                await _account_manual_close(ex, tracked)
             state.positions.pop(sym, None)
             from core import db as _db; _db.delete_open_position(sym)
             closed.append(sym)
@@ -799,6 +828,8 @@ async def cmd_closeall(msg: Message):
             if not live:
                 # Exchange returned nothing — try to close anyway (position may exist)
                 await ex.close_position(sym, p.qty, p.side)
+            if p.entry > 0:
+                await _account_manual_close(ex, p)
             state.positions.pop(sym, None)
             from core import db as _db; _db.delete_open_position(sym)
             closed.append(sym)
@@ -841,9 +872,16 @@ async def cmd_close_symbol(msg: Message):
                 except Exception:
                     pass
         await ex.close_position(symbol, pos.qty, pos.side)
-        state.positions.pop(symbol, None)
+        close_px, leg_pnl = await _account_manual_close(ex, pos)
         from core import db as _db; _db.delete_open_position(symbol)
-        await msg.answer(f"✅ Позиция {symbol} закрыта", reply_markup=main_keyboard())
+        state.positions.pop(symbol, None)
+        sign = "+" if leg_pnl >= 0 else ""
+        await msg.answer(
+            f"✅ Позиция {symbol} закрыта\n"
+            f"PnL: <code>{sign}{leg_pnl:.2f} USDT</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard()
+        )
     except Exception as e:
         log.error(f"close_symbol {symbol}: {e}")
         await msg.answer(f"❌ Ошибка закрытия {symbol}: {_html.escape(str(e))}", parse_mode="HTML", reply_markup=main_keyboard())

@@ -126,7 +126,7 @@ class Scanner:
             self._loss_cooldown(symbol)
         else:
             self._symbol_loss_streak.pop(symbol, None)
-        return pnl
+        return total_trade_pnl
 
     async def _drought_alert(self, diag: str = "") -> None:
         """Send a 24h no-signal drought alert at most once every ~2 hours."""

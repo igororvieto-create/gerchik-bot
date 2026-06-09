@@ -244,6 +244,7 @@ def save_open_position(pos) -> None:
         "tp_order_id": pos.tp_order_id,
         "be_moved": pos.be_moved, "tp1_hit": pos.tp1_hit, "tp2_hit": pos.tp2_hit,
         "trail_price": pos.trail_price,
+        "partial_pnl_taken": pos.partial_pnl_taken,
         "opened_at": pos.opened_at.isoformat(),
         "pattern": pos.pattern, "tf": pos.tf,
         "rr": pos.rr, "score": pos.score,

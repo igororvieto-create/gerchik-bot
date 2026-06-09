@@ -167,6 +167,7 @@ async def main():
                         tp1_hit=bool(d.get("tp1_hit", False)),
                         tp2_hit=bool(d.get("tp2_hit", False)),
                         trail_price=float(d.get("trail_price", 0.0)),
+                        partial_pnl_taken=float(d.get("partial_pnl_taken", 0.0)),
                         opened_at=datetime.fromisoformat(
                             d.get("opened_at") or datetime.utcnow().isoformat()
                         ) if d.get("opened_at") else datetime.utcnow(),

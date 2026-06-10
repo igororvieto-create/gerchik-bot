@@ -41,13 +41,13 @@ class BingXClient:
 
     async def _get(self, path, params=None, signed=False):
         params = params or {}
-        if signed:
-            url = f"{BASE}{path}?{self._sign(params)}"
-        else:
+        if not signed:
             url = f"{BASE}{path}" + ("?" + urlencode(params) if params else "")
         headers = {"X-BX-APIKEY": self.api_key}
         delay = 2
         for attempt in range(_RETRIES):
+            if signed:
+                url = f"{BASE}{path}?{self._sign(params)}"  # refresh timestamp on every attempt
             try:
                 sess = await self._sess()
                 async with sess.get(url, headers=headers) as r:
@@ -70,13 +70,13 @@ class BingXClient:
                 delay *= 2
 
     async def _post(self, path, params):
-        qs = self._sign(params)
         headers = {
             "X-BX-APIKEY": self.api_key,
             "Content-Type": "application/x-www-form-urlencoded",
         }
         delay = 2
         for attempt in range(_RETRIES):
+            qs = self._sign(params)  # refresh timestamp on every attempt
             try:
                 sess = await self._sess()
                 async with sess.post(f"{BASE}{path}", data=qs, headers=headers) as r:

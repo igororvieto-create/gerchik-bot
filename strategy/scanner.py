@@ -1255,11 +1255,20 @@ class Scanner:
                     f"Остаток: <code>{pos.qty:.3f}</code> | Трейлинг активен"
                 )
             side = "BUY" if pos.side == "LONG" else "SELL"
-            # Re-place SL for remaining qty
+            # Re-place SL: cancel old, then place new — clear ID first so health_check
+            # detects a missing SL if placement fails and re-places it.
             if pos.sl_order_id:
-                await self.ex.cancel_order(pos.symbol, pos.sl_order_id)
-                r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, pos.sl)
-                pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
+                old_sl_id = pos.sl_order_id
+                pos.sl_order_id = ""
+                try:
+                    await self.ex.cancel_order(pos.symbol, old_sl_id)
+                except Exception:
+                    pass  # already filled or cancelled
+                try:
+                    r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, pos.sl)
+                    pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
+                except Exception as e:
+                    log.error(f"partial_close {pos.symbol}: SL re-place failed — health_check will retry: {e}")
             # Re-place TP3 for remaining qty (old order had original full qty)
             if pos.tp_order_id:
                 await self.ex.cancel_order(pos.symbol, pos.tp_order_id)

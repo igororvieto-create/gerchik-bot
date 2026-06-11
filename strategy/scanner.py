@@ -622,7 +622,7 @@ class Scanner:
 
     async def _enter(self, sig: Signal, confirmed: bool = False, price_checked: bool = False):
         try:
-            balance = await self.ex.get_balance()
+            balance, _avail_margin = await self.ex.get_balance_and_margin()
             if balance <= 0:
                 await self._notify("⚠️ Нет баланса для входа")
                 return
@@ -754,7 +754,7 @@ class Scanner:
             actual_notional  = qty * sig.entry
             required_margin  = actual_notional / leverage
             try:
-                avail_margin = await self.ex.get_available_margin()
+                avail_margin = _avail_margin  # reuse from get_balance_and_margin() above
                 if avail_margin > 0 and avail_margin < required_margin * 1.1:
                     log.warning(
                         f"{sig.symbol}: недостаточно свободной маржи "
@@ -896,7 +896,17 @@ class Scanner:
             except Exception as e:
                 log.warning(f"{sig.symbol}: не удалось проверить mark price перед SL: {e}")
 
-            sl_order = await self.ex.place_stop_loss(sig.symbol, side, qty, sig.sl)
+            try:
+                sl_order = await self.ex.place_stop_loss(sig.symbol, side, qty, sig.sl)
+            except Exception as _sl_exc:
+                log.error(f"place_stop_loss raised {sig.symbol}: {_sl_exc} — аварийное закрытие")
+                await self._notify(f"⚠️ SL не выставился <b>{sig.symbol}</b> (исключение) — закрываем")
+                try:
+                    await self.ex.close_position(sig.symbol, qty, sig.side)
+                except Exception as ce:
+                    log.error(f"emergency close {sig.symbol}: {ce}")
+                self._loss_cooldown(sig.symbol)
+                return
             sl_id    = str(sl_order.get("data", {}).get("orderId", ""))
             if sl_order.get("code") != 0:
                 err_code = sl_order.get("code", "?")
@@ -999,7 +1009,7 @@ class Scanner:
 
     async def _monitor_inner(self):
         self._monitor_count += 1
-        # Check funding on open positions every ~30 min (60s × 30 cycles)
+        # Check funding on open positions every ~15 min (30s × 30 cycles)
         if self._monitor_count % 30 == 0:
             await self._check_open_funding()
 
@@ -1077,12 +1087,25 @@ class Scanner:
         cutoff = datetime.utcnow() - timedelta(minutes=max_cooldown * 2)
         self._sl_cooldown = {s: t for s, t in self._sl_cooldown.items() if t > cutoff}
 
+        # Batch-fetch all tickers once — avoids N sequential round-trips in the loop below
+        _pos_syms = [s for s in state.positions]
+        if _pos_syms:
+            _ticker_res = await asyncio.gather(
+                *[self.ex.get_ticker(s) for s in _pos_syms], return_exceptions=True
+            )
+            _tickers = {
+                s: r for s, r in zip(_pos_syms, _ticker_res)
+                if not isinstance(r, Exception) and r
+            }
+        else:
+            _tickers = {}
+
         for symbol, pos in list(state.positions.items()):
             try:
                 # Guard: position may have been removed by exchange sync earlier in this cycle
                 if symbol not in state.positions:
                     continue
-                ticker = await self.ex.get_ticker(symbol)
+                ticker = _tickers.get(symbol)
                 if not ticker:
                     continue
                 price = float(ticker.get("lastPrice", pos.entry))
@@ -1112,7 +1135,7 @@ class Scanner:
                     tp1_triggered = (pos.side == "LONG" and price >= pos.tp1) or \
                                     (pos.side == "SHORT" and price <= pos.tp1)
                     if tp1_triggered:
-                        await self._partial_close(pos, 0.25, "TP1")
+                        await self._partial_close(pos, cfg.TP1_CLOSE_PCT, "TP1")
 
                 # TP2 → partial close 60% of remaining — skip if tp2 unknown
                 if pos.be_moved and not pos.tp2_hit and pos.tp2 > 0:
@@ -1139,7 +1162,12 @@ class Scanner:
                 be_price = _px(pos.entry - buffer)
 
             if pos.sl_order_id:
-                await self.ex.cancel_order(pos.symbol, pos.sl_order_id)
+                old_sl_id = pos.sl_order_id
+                pos.sl_order_id = ""  # clear first — health_check detects missing SL if place fails
+                try:
+                    await self.ex.cancel_order(pos.symbol, old_sl_id)
+                except Exception:
+                    pass
             side = "BUY" if pos.side == "LONG" else "SELL"
             r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, be_price)
             if r.get("code") != 0:
@@ -1191,7 +1219,12 @@ class Scanner:
                 return
 
             if pos.sl_order_id:
-                await self.ex.cancel_order(pos.symbol, pos.sl_order_id)
+                old_sl_id = pos.sl_order_id
+                pos.sl_order_id = ""  # clear first — health_check detects missing SL if place fails
+                try:
+                    await self.ex.cancel_order(pos.symbol, old_sl_id)
+                except Exception:
+                    pass
             side = "BUY" if pos.side == "LONG" else "SELL"
             r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, new_sl)
             new_id = str(r.get("data", {}).get("orderId", ""))
@@ -1238,16 +1271,20 @@ class Scanner:
             pos.qty -= qty
             if label == "TP1":
                 pos.tp1_hit = True
-                sign = "+" if partial_pnl >= 0 else ""
+            else:
+                pos.tp2_hit = True
+            # Persist partial_pnl_taken, updated qty, and tp_hit flag immediately — before any
+            # further awaits so a crash during SL/TP order management doesn't lose these values.
+            db.save_open_position(pos)
+            sign = "+" if partial_pnl >= 0 else ""
+            if label == "TP1":
                 await self._notify(
                     f"🎯 <b>TP1</b> | {pos.symbol} {pos.side}\n"
-                    f"Закрыто 25% позиции по <code>{close_price:.4f}</code>\n"
+                    f"Закрыто {int(cfg.TP1_CLOSE_PCT*100)}% позиции по <code>{close_price:.4f}</code>\n"
                     f"PnL частичный: <code>{sign}{partial_pnl:.2f} USDT</code>\n"
                     f"Остаток: <code>{pos.qty:.3f}</code> | SL → безубыток"
                 )
             else:
-                pos.tp2_hit = True
-                sign = "+" if partial_pnl >= 0 else ""
                 await self._notify(
                     f"🎯 <b>TP2</b> | {pos.symbol} {pos.side}\n"
                     f"Закрыто {int(cfg.TP2_CLOSE_PCT*100)}% позиции по <code>{close_price:.4f}</code>\n"

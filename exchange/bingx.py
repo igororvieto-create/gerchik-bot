@@ -182,6 +182,47 @@ class BingXClient:
         """Returns the raw API response for debugging."""
         return await self._get("/openApi/swap/v2/user/balance", {}, signed=True)
 
+    async def get_balance_and_margin(self) -> tuple:
+        """Returns (equity/balance, available_margin) in a single API call."""
+        data = await self._get("/openApi/swap/v2/user/balance", {}, signed=True)
+        balance = 0.0
+        avail   = 0.0
+        try:
+            d = data.get("data", {})
+            if isinstance(d, dict) and "balance" in d:
+                bal = d["balance"]
+                if isinstance(bal, dict):
+                    for field in ("equity", "balance", "availableMargin", "available"):
+                        if field in bal and float(bal[field]) > 0 and balance == 0.0:
+                            balance = float(bal[field])
+                    for field in ("availableMargin", "available"):
+                        if field in bal and avail == 0.0:
+                            avail = float(bal[field])
+                            break
+                elif isinstance(bal, list):
+                    for a in bal:
+                        if a.get("asset") in ("USDT", "usdt"):
+                            for field in ("equity", "balance", "availableMargin", "available"):
+                                if field in a and float(a[field]) > 0 and balance == 0.0:
+                                    balance = float(a[field])
+                            for field in ("availableMargin", "available"):
+                                if field in a and avail == 0.0:
+                                    avail = float(a[field])
+                                    break
+            if isinstance(d, dict) and balance == 0.0:
+                for field in ("equity", "balance", "availableMargin", "available"):
+                    if field in d and float(d[field]) > 0:
+                        balance = float(d[field])
+                        break
+            if isinstance(d, dict) and avail == 0.0:
+                for field in ("availableMargin", "available"):
+                    if field in d:
+                        avail = float(d[field])
+                        break
+        except Exception as e:
+            log.error(f"get_balance_and_margin parse error: {e} | response: {data}")
+        return balance, avail
+
     async def get_available_margin(self):
         """Returns available (free) margin for new positions."""
         data = await self._get("/openApi/swap/v2/user/balance", {}, signed=True)

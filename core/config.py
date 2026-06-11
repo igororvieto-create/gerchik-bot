@@ -33,6 +33,7 @@ class Config:
     TP1_RR: float = 1.0
     TP2_RR: float = 2.0
     TP3_RR: float = 3.0
+    TP1_CLOSE_PCT:        float = float(os.getenv("TP1_CLOSE_PCT", "0.25").strip())
     TP2_CLOSE_PCT:        float = float(os.getenv("TP2_CLOSE_PCT", "0.50").strip())
     PAUSE_AFTER_LOSS_MIN: int   = 30
     PAUSE_3X_LOSS_MIN:    int   = int(os.getenv("PAUSE_3X_LOSS_MIN", "120").strip())

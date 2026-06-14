@@ -96,9 +96,13 @@ class Scanner:
         result = "WIN" if total_trade_pnl > 0 else "LOSS"
         if total_trade_pnl > 0:
             state.day.wins += 1
-            state.day.loss_streak = 0
-            state.day.paused_until = None
-            db.save_kv("paused_until", "")
+            # Only reset loss streak on meaningful profit — a breakeven SL (total_pnl ≈ fees)
+            # must not clear the consecutive-loss protection streak.
+            min_profit = max(0.5, pos.risk_usdt * 0.2) if pos.risk_usdt > 0 else 0.5
+            if total_trade_pnl >= min_profit:
+                state.day.loss_streak = 0
+                state.day.paused_until = None
+                db.save_kv("paused_until", "")
         else:
             state.day.losses += 1
             state.day.loss_streak += 1
@@ -667,7 +671,7 @@ class Scanner:
                             f"SL {sl_pct_check*100:.1f}% от входа — слишком широкий для любого плеча"
                         )
                         return
-                orig_lev = (3 if balance < 100 else 5 if balance < 2000 else 3) if cfg.AUTO_LEVERAGE else cfg.LEVERAGE
+                orig_lev = (3 if balance < 100 else 5 if balance < 500 else 5 if balance < 2000 else 3) if cfg.AUTO_LEVERAGE else cfg.LEVERAGE
                 if leverage < orig_lev:
                     log.info(
                         f"{sig.symbol}: плечо снижено x{orig_lev}→x{leverage} "
@@ -754,7 +758,7 @@ class Scanner:
             actual_notional  = qty * sig.entry
             required_margin  = actual_notional / leverage
             try:
-                avail_margin = await self.ex.get_available_margin()
+                avail_margin = _avail_margin  # reuse from get_balance_and_margin() above
                 if avail_margin > 0 and avail_margin < required_margin * 1.1:
                     log.warning(
                         f"{sig.symbol}: недостаточно свободной маржи "
@@ -850,6 +854,11 @@ class Scanner:
                         await self.ex.close_position(sig.symbol, qty, sig.side)
                     except Exception as ce:
                         log.error(f"emergency close (pre-SL) {sig.symbol}: {ce}")
+                        _orphan = Position(symbol=sig.symbol, side=sig.side, entry=sig.entry,
+                                          sl=0.0, tp1=0.0, tp2=0.0, tp3=0.0, qty=qty, risk_usdt=0.0)
+                        state.positions[sig.symbol] = _orphan
+                        db.save_open_position(_orphan)
+                        await self._notify(f"🚨 <b>{sig.symbol}</b>: аварийное закрытие не удалось — позиция добавлена без SL для мониторинга")
                     self._loss_cooldown(sig.symbol)
                     return
                 # Liquidation check: SL must be inside the margin safety zone
@@ -872,6 +881,11 @@ class Scanner:
                             await self.ex.close_position(sig.symbol, qty, sig.side)
                         except Exception as ce:
                             log.error(f"emergency close (liq check) {sig.symbol}: {ce}")
+                            _orphan = Position(symbol=sig.symbol, side=sig.side, entry=sig.entry,
+                                              sl=0.0, tp1=0.0, tp2=0.0, tp3=0.0, qty=qty, risk_usdt=0.0)
+                            state.positions[sig.symbol] = _orphan
+                            db.save_open_position(_orphan)
+                            await self._notify(f"🚨 <b>{sig.symbol}</b>: аварийное закрытие не удалось — позиция добавлена без SL для мониторинга")
                         self._loss_cooldown(sig.symbol)
                         return
                 else:
@@ -891,6 +905,11 @@ class Scanner:
                             await self.ex.close_position(sig.symbol, qty, sig.side)
                         except Exception as ce:
                             log.error(f"emergency close (liq check) {sig.symbol}: {ce}")
+                            _orphan = Position(symbol=sig.symbol, side=sig.side, entry=sig.entry,
+                                              sl=0.0, tp1=0.0, tp2=0.0, tp3=0.0, qty=qty, risk_usdt=0.0)
+                            state.positions[sig.symbol] = _orphan
+                            db.save_open_position(_orphan)
+                            await self._notify(f"🚨 <b>{sig.symbol}</b>: аварийное закрытие не удалось — позиция добавлена без SL для мониторинга")
                         self._loss_cooldown(sig.symbol)
                         return
             except Exception as e:
@@ -1063,6 +1082,9 @@ class Scanner:
 
         # Alert on stale positions (open > 48h) and auto-close at MAX_POSITION_HOURS
         for symbol, pos in list(state.positions.items()):
+            # Guard: exchange sync above may have already removed this position
+            if symbol not in state.positions:
+                continue
             if pos.sl == 0:
                 continue
             age_h = (datetime.utcnow() - pos.opened_at).total_seconds() / 3600
@@ -1153,7 +1175,7 @@ class Scanner:
                     if tp1_triggered:
                         await self._partial_close(pos, cfg.TP1_CLOSE_PCT, "TP1")
 
-                # TP2 → partial close 60% of remaining — skip if tp2 unknown
+                # TP2 → partial close TP2_CLOSE_PCT% of remaining qty — skip if tp2 unknown
                 # Attempt BE first (best-effort) so remainder is protected even if BE failed earlier
                 if not pos.tp2_hit and pos.tp2 > 0:
                     tp2_hit = (pos.side == "LONG" and price >= pos.tp2) or \
@@ -1339,8 +1361,12 @@ class Scanner:
                     log.error(f"partial_close {pos.symbol}: SL re-place failed — health_check will retry: {e}")
             # Re-place TP3 for remaining qty (old order had original full qty)
             if pos.tp_order_id:
-                await self.ex.cancel_order(pos.symbol, pos.tp_order_id)
+                old_tp_id = pos.tp_order_id
                 pos.tp_order_id = ""
+                try:
+                    await self.ex.cancel_order(pos.symbol, old_tp_id)
+                except Exception:
+                    pass  # already filled or cancelled
             if pos.tp3 > 0 and pos.qty > 0:
                 r = await self.ex.place_take_profit(pos.symbol, side, pos.qty, pos.tp3)
                 pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))

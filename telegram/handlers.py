@@ -766,12 +766,12 @@ async def _account_manual_close(ex, pos) -> tuple:
         pause_min = cfg.PAUSE_3X_LOSS_MIN if state.day.loss_streak >= 3 else cfg.PAUSE_AFTER_LOSS_MIN
         state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
         _db.save_kv("paused_until", state.day.paused_until.isoformat())
-        if state.day.loss_streak == 3:
+        if state.day.loss_streak >= 3:
             try:
-                from strategy.scanner import _global_scanner
-                if _global_scanner:
-                    await _global_scanner._notify(
-                        f"⛔ <b>3 убытка подряд</b> — пауза {pause_min} мин\n"
+                from strategy.scanner import _global_scanner as _gs
+                if _gs:
+                    await _gs._notify(
+                        f"⛔ <b>{state.day.loss_streak} убытка подряд</b> — пауза {pause_min} мин\n"
                         f"Серия: {state.day.loss_streak} | "
                         f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
                     )
@@ -782,12 +782,12 @@ async def _account_manual_close(ex, pos) -> tuple:
     except Exception as e:
         log.warning(f"_account_manual_close db.save_trade {pos.symbol}: {e}")
     try:
-        from strategy.scanner import _global_scanner
-        if _global_scanner:
+        from strategy.scanner import _global_scanner as _gs
+        if _gs:
             if total_trade_pnl <= 0:
-                _global_scanner._loss_cooldown(pos.symbol)
+                _gs._loss_cooldown(pos.symbol)
             else:
-                _global_scanner._symbol_loss_streak.pop(pos.symbol, None)
+                _gs._symbol_loss_streak.pop(pos.symbol, None)
     except Exception:
         pass
     return close_px, leg_pnl

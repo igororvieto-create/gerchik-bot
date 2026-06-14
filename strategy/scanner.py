@@ -754,7 +754,7 @@ class Scanner:
             actual_notional  = qty * sig.entry
             required_margin  = actual_notional / leverage
             try:
-                avail_margin = _avail_margin  # reuse from get_balance_and_margin() above
+                avail_margin = await self.ex.get_available_margin()
                 if avail_margin > 0 and avail_margin < required_margin * 1.1:
                     log.warning(
                         f"{sig.symbol}: недостаточно свободной маржи "
@@ -905,6 +905,20 @@ class Scanner:
                     await self.ex.close_position(sig.symbol, qty, sig.side)
                 except Exception as ce:
                     log.error(f"emergency close {sig.symbol}: {ce}")
+                    # close_position also failed — position may still be open with no SL.
+                    # Add to state so monitor can track and health_check can re-place SL.
+                    _orphan = Position(
+                        symbol=sig.symbol, side=sig.side,
+                        entry=sig.entry, sl=0.0,
+                        tp1=0.0, tp2=0.0, tp3=0.0,
+                        qty=qty, risk_usdt=0.0,
+                    )
+                    state.positions[sig.symbol] = _orphan
+                    db.save_open_position(_orphan)
+                    await self._notify(
+                        f"🚨 <b>{sig.symbol}</b>: аварийное закрытие не удалось — "
+                        f"позиция добавлена без SL для мониторинга"
+                    )
                 self._loss_cooldown(sig.symbol)
                 return
             sl_id    = str(sl_order.get("data", {}).get("orderId", ""))
@@ -1087,8 +1101,10 @@ class Scanner:
         cutoff = datetime.utcnow() - timedelta(minutes=max_cooldown * 2)
         self._sl_cooldown = {s: t for s, t in self._sl_cooldown.items() if t > cutoff}
 
-        # Batch-fetch all tickers once — avoids N sequential round-trips in the loop below
-        _pos_syms = [s for s in state.positions]
+        # Batch-fetch all tickers once — avoids N sequential round-trips in the loop below.
+        # Single consistent snapshot: positions added after this point wait for the next cycle.
+        _pos_snapshot = list(state.positions.items())
+        _pos_syms = [s for s, _ in _pos_snapshot]
         if _pos_syms:
             _ticker_res = await asyncio.gather(
                 *[self.ex.get_ticker(s) for s in _pos_syms], return_exceptions=True
@@ -1100,7 +1116,7 @@ class Scanner:
         else:
             _tickers = {}
 
-        for symbol, pos in list(state.positions.items()):
+        for symbol, pos in _pos_snapshot:
             try:
                 # Guard: position may have been removed by exchange sync earlier in this cycle
                 if symbol not in state.positions:
@@ -1138,10 +1154,13 @@ class Scanner:
                         await self._partial_close(pos, cfg.TP1_CLOSE_PCT, "TP1")
 
                 # TP2 → partial close 60% of remaining — skip if tp2 unknown
-                if pos.be_moved and not pos.tp2_hit and pos.tp2 > 0:
+                # Attempt BE first (best-effort) so remainder is protected even if BE failed earlier
+                if not pos.tp2_hit and pos.tp2 > 0:
                     tp2_hit = (pos.side == "LONG" and price >= pos.tp2) or \
                               (pos.side == "SHORT" and price <= pos.tp2)
                     if tp2_hit:
+                        if not pos.be_moved and pos.sl > 0:
+                            await self._move_be(pos)  # best-effort; TP2 proceeds regardless
                         await self._partial_close(pos, cfg.TP2_CLOSE_PCT, "TP2")
 
                 # Trailing stop (only after BE is moved)
@@ -1163,11 +1182,15 @@ class Scanner:
 
             if pos.sl_order_id:
                 old_sl_id = pos.sl_order_id
-                pos.sl_order_id = ""  # clear first — health_check detects missing SL if place fails
+                pos.sl_order_id = ""  # clear first — health_check re-places if new SL fails
                 try:
                     await self.ex.cancel_order(pos.symbol, old_sl_id)
                 except Exception:
-                    pass
+                    # Cancel failed — old SL is still active on exchange.
+                    # Restore ID and abort to avoid placing a duplicate SL order.
+                    pos.sl_order_id = old_sl_id
+                    log.warning(f"_move_be {pos.symbol}: cancel failed, retrying next cycle")
+                    return
             side = "BUY" if pos.side == "LONG" else "SELL"
             r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, be_price)
             if r.get("code") != 0:
@@ -1220,11 +1243,14 @@ class Scanner:
 
             if pos.sl_order_id:
                 old_sl_id = pos.sl_order_id
-                pos.sl_order_id = ""  # clear first — health_check detects missing SL if place fails
+                pos.sl_order_id = ""  # clear first — health_check re-places if new SL fails
                 try:
                     await self.ex.cancel_order(pos.symbol, old_sl_id)
                 except Exception:
-                    pass
+                    # Cancel failed — old SL still active on exchange; abort to avoid duplicate.
+                    pos.sl_order_id = old_sl_id
+                    log.warning(f"_trail_sl {pos.symbol}: cancel failed, retrying next cycle")
+                    return
             side = "BUY" if pos.side == "LONG" else "SELL"
             r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, new_sl)
             new_id = str(r.get("data", {}).get("orderId", ""))
@@ -1243,6 +1269,11 @@ class Scanner:
         try:
             qty = round(pos.qty * pct, 3)
             if qty <= 0:
+                # Mark hit so monitor doesn't re-fire every cycle on a negligible-size position
+                if label == "TP1":
+                    pos.tp1_hit = True
+                else:
+                    pos.tp2_hit = True
                 return
             qty = min(qty, pos.qty)  # safety: never close more than held
             await self.ex.close_position(pos.symbol, qty, pos.side)

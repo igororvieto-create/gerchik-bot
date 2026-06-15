@@ -1556,11 +1556,18 @@ class Scanner:
             # Сверка с биржей
             try:
                 live = await self.ex.get_open_positions()
-                live_count = len(live)
-                if live_count != pos_count:
+                live_syms = {p.get("symbol") for p in live if abs(float(p.get("positionAmt", 0))) > 0}
+                bot_syms  = set(state.positions.keys())
+                # Бот-позиции, которых нет на бирже — настоящая проблема
+                missing_on_exchange = bot_syms - live_syms
+                if missing_on_exchange:
                     issues.append(
-                        f"⚠️ Расхождение позиций: бот={pos_count}, биржа={live_count}"
+                        f"⚠️ Позиции бота не найдены на бирже: {', '.join(sorted(missing_on_exchange))}"
                     )
+                # Позиции биржи без бота — ручные, просто логируем (не спамим в Telegram)
+                manual_on_exchange = live_syms - bot_syms
+                if manual_on_exchange:
+                    log.info(f"health_check: ручные позиции на бирже (бот не управляет): {manual_on_exchange}")
             except Exception as e:
                 issues.append(f"⚠️ Не удалось получить позиции с биржи: {_html.escape(str(e))}")
 

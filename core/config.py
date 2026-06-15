@@ -86,6 +86,6 @@ class Config:
     # Limit orders: use limit instead of market on entry (better fill price, no slippage)
     USE_LIMIT_ORDERS:         bool  = os.getenv("USE_LIMIT_ORDERS", "true").strip().lower() == "true"
     # How long to wait for limit order fill before cancelling (seconds)
-    LIMIT_ORDER_TIMEOUT_SEC:  int   = int(os.getenv("LIMIT_ORDER_TIMEOUT_SEC", "45").strip())
+    LIMIT_ORDER_TIMEOUT_SEC:  int   = int(os.getenv("LIMIT_ORDER_TIMEOUT_SEC", "90").strip())
 
 cfg = Config()

@@ -876,17 +876,34 @@ class Scanner:
                     except Exception as _pe:
                         log.warning(f"get_order {sig.symbol}: {_pe}")
                 if not filled:
-                    # Timeout — cancel limit order and skip this signal
+                    # Timeout — attempt to cancel; order may have been partially filled
                     try:
                         await self.ex.cancel_order(sig.symbol, order_id)
                         log.info(f"{sig.symbol}: лимитный ордер отменён (таймаут {cfg.LIMIT_ORDER_TIMEOUT_SEC}с)")
                     except Exception as _ce:
                         log.warning(f"cancel limit {sig.symbol}: {_ce}")
-                    await self._notify(
-                        f"⏭ <b>{sig.symbol}</b>: лимитный ордер не исполнен за "
-                        f"{cfg.LIMIT_ORDER_TIMEOUT_SEC}с — цена ушла от уровня"
-                    )
-                    return
+                    # Check for partial fill: a position may exist even after cancel
+                    await asyncio.sleep(0.5)
+                    _partial_qty = 0.0
+                    try:
+                        _live_chk = await self.ex.get_open_positions()
+                        for _lp in _live_chk:
+                            if _lp.get("symbol") == sig.symbol and _lp.get("positionSide") == sig.side:
+                                _partial_qty = abs(float(_lp.get("positionAmt", 0)))
+                                break
+                    except Exception as _chk_e:
+                        log.warning(f"partial fill check {sig.symbol}: {_chk_e}")
+                    if _partial_qty > 0:
+                        # Partial fill — register position and place emergency SL
+                        log.warning(f"{sig.symbol}: частичное исполнение {_partial_qty} — регистрируем с SL")
+                        qty = round(_partial_qty, 3)
+                        filled = True  # fall through to SL/TP placement below
+                    else:
+                        await self._notify(
+                            f"⏭ <b>{sig.symbol}</b>: лимитный ордер не исполнен за "
+                            f"{cfg.LIMIT_ORDER_TIMEOUT_SEC}с — цена ушла от уровня"
+                        )
+                        return
 
             # Get actual filled qty from exchange (may differ from calculated)
             await asyncio.sleep(0.5)

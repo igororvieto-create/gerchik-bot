@@ -18,7 +18,7 @@ class Config:
     SL_BUFFER_PCT:    float = float(os.getenv("SL_BUFFER_PCT", "0.15").strip())
     VOLUME_MULT:      float = float(os.getenv("VOLUME_MULT", "1.3").strip())
     VOLUME_MA_PERIOD: int   = int(os.getenv("VOLUME_MA_PERIOD", "20").strip())
-    MIN_SCORE:        int   = int(os.getenv("MIN_SCORE", "68").strip())
+    MIN_SCORE:        int   = int(os.getenv("MIN_SCORE", "72").strip())
     TREND_EMA_D1:     int   = int(os.getenv("TREND_EMA_D1", "200").strip())
     TREND_EMA_H4:     int   = int(os.getenv("TREND_EMA_H4", "50").strip())
     FUNDING_MAX_LONG:  float = float(os.getenv("FUNDING_MAX_LONG", "0.02").strip())
@@ -73,7 +73,7 @@ class Config:
     # Binance cross-filter: only scan pairs that also exist on Binance Futures
     BINANCE_FILTER:          bool  = os.getenv("BINANCE_FILTER", "false").strip().lower() == "true"
     # Maximum SL distance from entry in % (0 = disabled). Signals with wider SL are discarded.
-    MAX_SL_PCT:              float = float(os.getenv("MAX_SL_PCT", "10.0").strip())
+    MAX_SL_PCT:              float = float(os.getenv("MAX_SL_PCT", "5.0").strip())
     # Max price drift from signal entry before skipping (%). 0.8% = skip if price moved >0.8% against signal.
     PRICE_DRIFT_PCT:         float = float(os.getenv("PRICE_DRIFT_PCT", "0.8").strip())
     # Drawdown protection: auto-pause if balance drops this % from the session peak (0 = disabled)

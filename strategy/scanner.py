@@ -773,24 +773,30 @@ class Scanner:
             except Exception as e:
                 log.warning(f"{sig.symbol}: не удалось проверить маржу — продолжаем: {e}")
 
-            # Staleness check: skip only if price moved AGAINST the signal.
+            # Staleness check: reject if price moved in either direction beyond drift limit.
+            # Moving AGAINST = worse entry (obvious reject).
+            # Moving IN FAVOR = SL no longer valid (distance from new entry to original SL grows).
             # Skipped in auto mode when _handle already validated the price (price_checked=True).
             if not price_checked:
                 try:
                     ticker = await self.ex.get_ticker(sig.symbol)
                     cur_price = float(ticker.get("lastPrice", sig.entry))
+                    drift = abs(cur_price - sig.entry) / sig.entry * 100
                     _drift_mul = cfg.PRICE_DRIFT_PCT / 100
                     against = (sig.side == "LONG"  and cur_price < sig.entry * (1 - _drift_mul)) or \
                               (sig.side == "SHORT" and cur_price > sig.entry * (1 + _drift_mul))
-                    if against:
-                        drift = abs(cur_price - sig.entry) / sig.entry * 100
-                        log.info(f"{sig.symbol}: цена ушла против сигнала на {drift:.2f}% — пропуск")
+                    # Price moved in favour but too far: the original SL level is now too wide
+                    favour_too_far = (sig.side == "LONG"  and cur_price > sig.entry * (1 + _drift_mul * 2)) or \
+                                     (sig.side == "SHORT" and cur_price < sig.entry * (1 - _drift_mul * 2))
+                    if against or favour_too_far:
+                        reason = "против сигнала" if against else "слишком далеко от уровня (SL устарел)"
+                        log.info(f"{sig.symbol}: цена ушла {reason} на {drift:.2f}% — пропуск")
                         if drift > 3.0:
                             self._normal_cooldown(sig.symbol)
                             log.info(f"{sig.symbol}: дрейф {drift:.1f}% > 3% — кулдаун 1ч")
                         await self._notify(
                             f"⏭ <b>{sig.symbol}</b> пропущен\n"
-                            f"Цена ушла против сигнала: {drift:.1f}%\n"
+                            f"Цена ушла {reason}: {drift:.1f}%\n"
                             f"Сигнал: <code>{sig.entry:.6f}</code> → Сейчас: <code>{cur_price:.6f}</code>"
                         )
                         return

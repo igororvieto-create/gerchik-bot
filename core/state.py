@@ -16,10 +16,11 @@ class Position:
     order_id:    str      = ""
     sl_order_id: str      = ""
     tp_order_id: str      = ""
-    be_moved:    bool     = False
-    tp1_hit:     bool     = False
-    tp2_hit:     bool     = False
-    trail_price: float    = 0.0   # peak price tracked for trailing stop
+    be_moved:          bool  = False
+    tp1_hit:           bool  = False
+    tp2_hit:           bool  = False
+    trail_price:       float = 0.0   # peak price tracked for trailing stop
+    partial_pnl_taken: float = 0.0   # cumulative PnL from TP1+TP2 partial closes
     opened_at:   datetime = field(default_factory=datetime.utcnow)
     pattern:     str      = ""
     tf:          str      = "H1+H4"
@@ -45,10 +46,17 @@ class BotState:
     paused:    bool                = False
     total_pnl: float               = 0.0
     current_balance: float         = 0.0
+    peak_balance:    float         = 0.0
 
     def reset_day(self):
         if self.day.date != date.today():
             self.day = DayStats()
+            # clear persisted pause so restart on a new day doesn't inherit yesterday's pause
+            try:
+                from core import db as _db
+                _db.save_kv("paused_until", "")
+            except Exception:
+                pass
 
     @property
     def is_paused(self):

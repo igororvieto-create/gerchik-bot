@@ -128,6 +128,31 @@ def load_total_pnl() -> float:
     return get_stats()["pnl"]
 
 
+def get_stats_by_pattern(days: int = None) -> list:
+    """Returns list of (pattern, total, wins, pnl) sorted by total trades."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            if days:
+                since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+                cur = conn.execute(
+                    """SELECT pattern, COUNT(*), SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END), SUM(pnl)
+                       FROM trades WHERE closed_at >= ? AND pattern != ''
+                       GROUP BY pattern ORDER BY COUNT(*) DESC""",
+                    (since,),
+                )
+            else:
+                cur = conn.execute(
+                    """SELECT pattern, COUNT(*), SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END), SUM(pnl)
+                       FROM trades WHERE pattern != ''
+                       GROUP BY pattern ORDER BY COUNT(*) DESC"""
+                )
+            rows = cur.fetchall()
+        return [(r[0], r[1], r[2] or 0, round(r[3] or 0, 2)) for r in rows]
+    except Exception as e:
+        log.error(f"get_stats_by_pattern: {e}")
+        return []
+
+
 def get_today_stats() -> dict:
     """Stats for today (UTC) — used to restore state.day after restart."""
     try:
@@ -163,6 +188,23 @@ def load_all_cooldowns() -> dict:
                     pass
     except Exception as e:
         log.error(f"load_all_cooldowns: {e}")
+    return result
+
+
+def load_all_loss_streaks() -> dict:
+    """Load all sl_streak:* entries at once (used on scanner startup)."""
+    result = {}
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.execute("SELECT key, value FROM kv WHERE key LIKE 'sl_streak:%'")
+            for key, val in cur.fetchall():
+                symbol = key[len("sl_streak:"):]
+                try:
+                    result[symbol] = int(val)
+                except Exception:
+                    pass
+    except Exception as e:
+        log.error(f"load_all_loss_streaks: {e}")
     return result
 
 
@@ -202,6 +244,7 @@ def save_open_position(pos) -> None:
         "tp_order_id": pos.tp_order_id,
         "be_moved": pos.be_moved, "tp1_hit": pos.tp1_hit, "tp2_hit": pos.tp2_hit,
         "trail_price": pos.trail_price,
+        "partial_pnl_taken": pos.partial_pnl_taken,
         "opened_at": pos.opened_at.isoformat(),
         "pattern": pos.pattern, "tf": pos.tf,
         "rr": pos.rr, "score": pos.score,
@@ -219,6 +262,24 @@ def delete_open_position(symbol: str) -> None:
         _update_backup()
     except Exception as e:
         log.error(f"delete_open_position {symbol}: {e}")
+
+
+def save_cfg_value(key: str, value) -> None:
+    """Persist a runtime-changed config value so it survives restarts."""
+    save_kv(f"cfg:{key}", str(value))
+
+
+def load_cfg_values() -> dict:
+    """Load all previously saved config overrides (keys without 'cfg:' prefix)."""
+    result = {}
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.execute("SELECT key, value FROM kv WHERE key LIKE 'cfg:%'")
+            for k, v in cur.fetchall():
+                result[k[4:]] = v
+    except Exception as e:
+        log.error(f"load_cfg_values: {e}")
+    return result
 
 
 def load_open_positions() -> list:

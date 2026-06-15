@@ -1,4 +1,5 @@
 import asyncio
+import html as _html
 import logging
 from datetime import datetime
 
@@ -15,6 +16,14 @@ from core.config import cfg
 from core.state import state
 
 log = logging.getLogger("handlers")
+
+
+def _smc_shadow() -> bool:
+    try:
+        from strategy.smc_filters import SHADOW_MODE
+        return SHADOW_MODE
+    except Exception:
+        return True
 
 
 def _auth(msg: Message) -> bool:
@@ -35,7 +44,7 @@ def main_keyboard():
             [KeyboardButton(text="🔄 Безубыток"),    KeyboardButton(text="📉 Трейлинг")],
             [KeyboardButton(text="⏸ Пауза"),       KeyboardButton(text="▶️ Продолжить")],
             [KeyboardButton(text="🤖 Авто"),        KeyboardButton(text="✋ Ручной")],
-            [KeyboardButton(text="❌ Закрыть всё")],
+            [KeyboardButton(text="💸 Фандинг"),     KeyboardButton(text="❌ Закрыть всё")],
         ],
         resize_keyboard=True,
         persistent=True,
@@ -66,7 +75,7 @@ async def cmd_debug(msg: Message):
             f"<pre>{json.dumps(raw, ensure_ascii=False, indent=2)[:1000]}</pre>"
         )
     except Exception as e:
-        text = f"❌ Ошибка API: <code>{e}</code>"
+        text = f"❌ Ошибка API: <code>{_html.escape(str(e))}</code>"
     finally:
         await ex.close()
     await msg.answer(text, parse_mode="HTML")
@@ -93,7 +102,13 @@ async def cmd_help(msg: Message):
         "/setmode auto|manual — режим\n"
         "/setrisk 1.0 — риск %\n"
         "/setlev 5 — плечо\n"
-        "/closeall — закрыть все позиции",
+        "/closeall — закрыть все позиции\n"
+        "/close_BTC_USDT — закрыть конкретную позицию\n\n"
+        "<b>Настройки риска:</b>\n"
+        "/setmaxloss 3.0 — макс. дневной убыток %\n"
+        "/setmaxdaily 5 — макс. сделок в день\n"
+        "/setminscore 70 — мин. оценка сигнала\n"
+        "/setautolev on|off — авто-плечо по балансу",
         parse_mode="HTML",
         reply_markup=main_keyboard(),
     )
@@ -225,12 +240,15 @@ async def cmd_settings(msg: Message):
         f"Мин. позиция: <code>{cfg.MIN_POSITION_USDT} USDT</code>\n"
         f"Макс. риск USDT: <code>{cfg.MAX_RISK_USDT} USDT</code>\n"
         f"Авто-плечо: <code>{al}</code>\n"
-        f"  до 100$ → x10 | до 500$ → x7 | до 2000$ → x5 | от 2000$ → x3\n"
+        f"  до 100$ → x3 | 100$–2000$ → x5 | от 2000$ → x3\n"
         f"Безубыток: <code>{be_mode}</code> (буфер +{cfg.BE_BUFFER_PCT}%)\n"
         f"Трейлинг стоп: <code>{cfg.TRAIL_PCT}%</code>\n"
         f"Фандинг LONG макс: <code>{cfg.FUNDING_MAX_LONG}%</code>\n"
-        f"Фандинг SHORT макс: <code>{cfg.FUNDING_MAX_SHORT}%</code>\n\n"
-        f"<i>/setrisk 1.0 | /setlev 5 | /setbe 0.5 | /settrail 1.0</i>"
+        f"Фандинг SHORT макс: <code>{cfg.FUNDING_MAX_SHORT}%</code>\n"
+        f"Макс. время позиции: <code>{cfg.MAX_POSITION_HOURS}ч</code>\n"
+        f"SMC фильтр: <code>{'тень (лог)' if _smc_shadow() else 'АКТИВЕН'}</code>\n\n"
+        f"<i>/setrisk | /setlev | /setbe | /settrail | /setautolev</i>\n"
+        f"<i>/setmaxloss | /setmaxdaily | /setminscore</i>"
     )
     await msg.answer(text, parse_mode="HTML", reply_markup=main_keyboard())
 
@@ -317,6 +335,7 @@ async def cmd_setminpos(msg: Message):
         if v < 1 or v > 10000:
             raise ValueError
         cfg.MIN_POSITION_USDT = v
+        from core import db; db.save_cfg_value("MIN_POSITION_USDT", v)
         await msg.answer(
             f"✅ Мин. позиция: <code>{v} USDT</code>",
             parse_mode="HTML",
@@ -342,6 +361,7 @@ async def cmd_setmaxpos(msg: Message):
         if v < 1 or v > 20:
             raise ValueError
         cfg.MAX_POSITIONS = v
+        from core import db; db.save_cfg_value("MAX_POSITIONS", v)
         await msg.answer(
             f"✅ Макс. позиций: <code>{v}</code>",
             parse_mode="HTML",
@@ -368,6 +388,7 @@ async def cmd_settrail(msg: Message):
         if v < 0.1 or v > 10:
             raise ValueError
         cfg.TRAIL_PCT = v
+        from core import db; db.save_cfg_value("TRAIL_PCT", v)
         await msg.answer(
             f"✅ Трейлинг стоп: <code>{v}%</code>",
             parse_mode="HTML",
@@ -399,6 +420,7 @@ async def cmd_setbe(msg: Message):
         if v < 0 or v > 10:
             raise ValueError
         cfg.BE_TRIGGER_PCT = v
+        from core import db; db.save_cfg_value("BE_TRIGGER_PCT", v)
         mode = f"+{v}% от входа" if v > 0 else "TP1"
         await msg.answer(
             f"✅ Безубыток теперь переставляется при {mode}",
@@ -425,6 +447,7 @@ async def cmd_setmaxrisk(msg: Message):
         if v < 1 or v > 10000:
             raise ValueError
         cfg.MAX_RISK_USDT = v
+        from core import db; db.save_cfg_value("MAX_RISK_USDT", v)
         await msg.answer(
             f"✅ Макс. риск: <code>{v} USDT</code> на сделку",
             parse_mode="HTML",
@@ -432,6 +455,151 @@ async def cmd_setmaxrisk(msg: Message):
         )
     except Exception:
         await msg.answer("Введи число от 1 до 10000 (например: /setmaxrisk 20)")
+
+
+async def cmd_setminscore(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        await msg.answer(
+            f"⭐ <b>Мин. оценка сигнала:</b> <code>{cfg.MIN_SCORE}</code>\n\n"
+            f"Сигналы ниже этого порога игнорируются.\n"
+            f"Изменить: <code>/setminscore 70</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        v = int(args[1])
+        if v < 40 or v > 95:
+            raise ValueError
+        cfg.MIN_SCORE = v
+        from core import db; db.save_cfg_value("MIN_SCORE", v)
+        await msg.answer(
+            f"✅ Мин. оценка: <code>{v}</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
+    except Exception:
+        await msg.answer("Введи число от 40 до 95 (например: /setminscore 70)")
+
+
+async def cmd_setmaxloss(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        await msg.answer(
+            f"🛑 <b>Макс. дневной убыток:</b> <code>{cfg.MAX_DAILY_LOSS}%</code>\n\n"
+            f"При достижении торговля останавливается до следующего дня.\n"
+            f"Изменить: <code>/setmaxloss 3.0</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        v = float(args[1])
+        if v < 0.5 or v > 20:
+            raise ValueError
+        cfg.MAX_DAILY_LOSS = v
+        from core import db; db.save_cfg_value("MAX_DAILY_LOSS", v)
+        await msg.answer(
+            f"✅ Макс. дневной убыток: <code>{v}%</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
+    except Exception:
+        await msg.answer("Введи число от 0.5 до 20 (например: /setmaxloss 3.0)")
+
+
+async def cmd_setmaxdaily(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        await msg.answer(
+            f"📅 <b>Макс. сделок в день:</b> <code>{cfg.MAX_DAILY_TRADES}</code>\n\n"
+            f"Изменить: <code>/setmaxdaily 5</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        v = int(args[1])
+        if v < 1 or v > 50:
+            raise ValueError
+        cfg.MAX_DAILY_TRADES = v
+        from core import db; db.save_cfg_value("MAX_DAILY_TRADES", v)
+        await msg.answer(
+            f"✅ Макс. сделок/день: <code>{v}</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
+    except Exception:
+        await msg.answer("Введи число от 1 до 50 (например: /setmaxdaily 5)")
+
+
+async def cmd_setmaxsl(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        current = f"{cfg.MAX_SL_PCT}%" if cfg.MAX_SL_PCT > 0 else "выкл"
+        await msg.answer(
+            f"🛑 <b>Макс. ширина SL от входа:</b> <code>{current}</code>\n\n"
+            f"Сигналы с SL шире этого порога игнорируются.\n"
+            f"Изменить: <code>/setmaxsl 10</code>\n"
+            f"Отключить: <code>/setmaxsl 0</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        v = float(args[1])
+        if v < 0 or v > 100:
+            raise ValueError
+        cfg.MAX_SL_PCT = v
+        from core import db; db.save_cfg_value("MAX_SL_PCT", v)
+        label = f"{v}%" if v > 0 else "выкл"
+        await msg.answer(
+            f"✅ Макс. SL: <code>{label}</code> от входа",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
+    except Exception:
+        await msg.answer("Введи число от 0 до 100 (например: /setmaxsl 10)")
+
+
+async def cmd_setautolev(msg: Message):
+    if not _auth(msg):
+        return
+    args = msg.text.split()
+    if len(args) < 2:
+        status = "✅ вкл" if cfg.AUTO_LEVERAGE else "❌ выкл"
+        await msg.answer(
+            f"⚡ <b>Авто-плечо:</b> {status}\n\n"
+            f"При включении плечо выбирается по балансу:\n"
+            f"• &lt; $100 → x3 (защита малого счёта)\n"
+            f"• $100 – $2000 → x5\n"
+            f"• ≥ $2000 → x3\n\n"
+            f"Включить: <code>/setautolev on</code>\n"
+            f"Выключить: <code>/setautolev off</code>",
+            parse_mode="HTML",
+        )
+        return
+    v = args[1].lower()
+    if v in ("on", "1", "true", "вкл"):
+        cfg.AUTO_LEVERAGE = True
+        from core import db; db.save_cfg_value("AUTO_LEVERAGE", "true")
+        await msg.answer("✅ Авто-плечо включено", reply_markup=main_keyboard())
+    elif v in ("off", "0", "false", "выкл"):
+        cfg.AUTO_LEVERAGE = False
+        from core import db; db.save_cfg_value("AUTO_LEVERAGE", "false")
+        await msg.answer(
+            f"❌ Авто-плечо выключено. Используется фиксированное плечо x{cfg.LEVERAGE}.\n"
+            f"Изменить: <code>/setlev 5</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
+    else:
+        await msg.answer("Используй: /setautolev on или /setautolev off")
 
 
 async def cmd_setpairs(msg: Message):
@@ -490,6 +658,7 @@ async def cmd_resume(msg: Message):
     state.paused           = False
     state.day.paused_until = None
     db.save_kv("paused", "0")
+    db.save_kv("paused_until", "")
     await msg.answer("▶️ Торговля возобновлена", reply_markup=main_keyboard())
 
 
@@ -501,6 +670,7 @@ async def cmd_setmode(msg: Message):
         await msg.answer("/setmode auto | /setmode manual")
         return
     cfg.MODE = args[1]
+    from core import db; db.save_cfg_value("MODE", cfg.MODE)
     await msg.answer(f"✅ Режим: <code>{cfg.MODE}</code>", parse_mode="HTML",
                      reply_markup=main_keyboard())
 
@@ -517,6 +687,7 @@ async def cmd_setrisk(msg: Message):
         if not 0.1 <= v <= 3.0:
             raise ValueError
         cfg.RISK_PER_TRADE = v
+        from core import db; db.save_cfg_value("RISK_PER_TRADE", v)
         await msg.answer(f"✅ Риск: <code>{v}%</code>", parse_mode="HTML",
                          reply_markup=main_keyboard())
     except Exception:
@@ -535,6 +706,7 @@ async def cmd_setlev(msg: Message):
         if not 1 <= v <= 50:
             raise ValueError
         cfg.LEVERAGE = v
+        from core import db; db.save_cfg_value("LEVERAGE", v)
         await msg.answer(f"✅ Плечо: <code>x{v}</code>", parse_mode="HTML",
                          reply_markup=main_keyboard())
     except Exception:
@@ -568,6 +740,59 @@ async def cmd_scan(msg: Message):
     asyncio.create_task(_do())
 
 
+# ── Shared accounting helper for manual position closes ─────────────
+async def _account_manual_close(ex, pos) -> tuple:
+    """Fetch close price, update PnL state, and save trade record for a manually closed position."""
+    from core import db as _db
+    from datetime import timedelta
+    try:
+        ticker = await ex.get_ticker(pos.symbol)
+        close_px = float(ticker.get("lastPrice", pos.entry)) if ticker else pos.entry
+    except Exception:
+        close_px = pos.entry
+    leg_pnl = (close_px - pos.entry) * pos.qty if pos.side == "LONG" \
+              else (pos.entry - close_px) * pos.qty
+    total_trade_pnl = leg_pnl + pos.partial_pnl_taken
+    state.total_pnl    += leg_pnl
+    state.day.pnl_usdt += leg_pnl
+    if total_trade_pnl > 0:
+        state.day.wins += 1
+        state.day.loss_streak = 0
+        state.day.paused_until = None
+        _db.save_kv("paused_until", "")
+    else:
+        state.day.losses += 1
+        state.day.loss_streak += 1
+        pause_min = cfg.PAUSE_3X_LOSS_MIN if state.day.loss_streak >= 3 else cfg.PAUSE_AFTER_LOSS_MIN
+        state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
+        _db.save_kv("paused_until", state.day.paused_until.isoformat())
+        if state.day.loss_streak >= 3:
+            try:
+                from strategy.scanner import _global_scanner as _gs
+                if _gs:
+                    await _gs._notify(
+                        f"⛔ <b>{state.day.loss_streak} убытка подряд</b> — пауза {pause_min} мин\n"
+                        f"Серия: {state.day.loss_streak} | "
+                        f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
+                    )
+            except Exception:
+                pass
+    try:
+        _db.save_trade(pos, close_px, round(leg_pnl, 4), "WIN" if total_trade_pnl > 0 else "LOSS")
+    except Exception as e:
+        log.warning(f"_account_manual_close db.save_trade {pos.symbol}: {e}")
+    try:
+        from strategy.scanner import _global_scanner as _gs
+        if _gs:
+            if total_trade_pnl <= 0:
+                _gs._loss_cooldown(pos.symbol)
+            else:
+                _gs._symbol_loss_streak.pop(pos.symbol, None)
+    except Exception:
+        pass
+    return close_px, leg_pnl
+
+
 # ------------------------------------------------------------------ /closeall
 
 async def cmd_closeall(msg: Message):
@@ -581,12 +806,14 @@ async def cmd_closeall(msg: Message):
         await msg.answer("Нет открытых позиций", reply_markup=main_keyboard())
         return
     closed, errors = [], []
+    live_syms = set()
     for p in live:
         sym  = p.get("symbol")
         side = p.get("positionSide", "LONG")
         amt  = abs(float(p.get("positionAmt", 0)))
         if amt == 0:
             continue
+        live_syms.add(sym)
         try:
             # Cancel SL/TP orders if tracked in state
             tracked = state.positions.get(sym)
@@ -598,32 +825,43 @@ async def cmd_closeall(msg: Message):
                         except Exception:
                             pass
             await ex.close_position(sym, amt, side)
-            state.positions.pop(sym, None)
-            from core import db as _db; _db.delete_open_position(sym)
+            state.positions.pop(sym, None)  # pop before await — prevents monitor race
+            if tracked and tracked.entry > 0:
+                await _account_manual_close(ex, tracked)
+            from core import db as _db; _db.delete_open_position(sym)  # after accounting
             closed.append(sym)
         except Exception as e:
             log.error(f"closeall {sym}: {e}")
             errors.append(sym)
-    if not live:
-        for sym, p in list(state.positions.items()):
-            try:
-                if p.sl_order_id:
-                    try:
-                        await ex.cancel_order(sym, p.sl_order_id)
-                    except Exception:
-                        pass
-                if p.tp_order_id:
-                    try:
-                        await ex.cancel_order(sym, p.tp_order_id)
-                    except Exception:
-                        pass
+
+    # Close positions tracked in state but absent from exchange (ghost state or API returned none)
+    ghost_syms = [sym for sym in list(state.positions.keys()) if sym not in live_syms]
+    for sym in ghost_syms:
+        p = state.positions.get(sym)
+        if not p:
+            continue
+        try:
+            if p.sl_order_id:
+                try:
+                    await ex.cancel_order(sym, p.sl_order_id)
+                except Exception:
+                    pass
+            if p.tp_order_id:
+                try:
+                    await ex.cancel_order(sym, p.tp_order_id)
+                except Exception:
+                    pass
+            if not live:
+                # Exchange returned nothing — try to close anyway (position may exist)
                 await ex.close_position(sym, p.qty, p.side)
-                del state.positions[sym]
-                from core import db as _db; _db.delete_open_position(sym)
-                closed.append(sym)
-            except Exception as e:
-                log.error(f"closeall {sym}: {e}")
-                errors.append(sym)
+            state.positions.pop(sym, None)  # pop before await — prevents monitor race
+            if p.entry > 0:
+                await _account_manual_close(ex, p)
+            from core import db as _db; _db.delete_open_position(sym)  # after accounting
+            closed.append(sym)
+        except Exception as e:
+            log.error(f"closeall ghost {sym}: {e}")
+            errors.append(sym)
     await ex.close()
     text = f"✅ Закрыто: {', '.join(closed) or 'ничего'}"
     if errors:
@@ -660,12 +898,19 @@ async def cmd_close_symbol(msg: Message):
                 except Exception:
                     pass
         await ex.close_position(symbol, pos.qty, pos.side)
-        state.positions.pop(symbol, None)
-        from core import db as _db; _db.delete_open_position(symbol)
-        await msg.answer(f"✅ Позиция {symbol} закрыта", reply_markup=main_keyboard())
+        state.positions.pop(symbol, None)  # pop before await — prevents monitor race
+        close_px, leg_pnl = await _account_manual_close(ex, pos)
+        from core import db as _db; _db.delete_open_position(symbol)  # after accounting
+        sign = "+" if leg_pnl >= 0 else ""
+        await msg.answer(
+            f"✅ Позиция {symbol} закрыта\n"
+            f"PnL: <code>{sign}{leg_pnl:.2f} USDT</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard()
+        )
     except Exception as e:
         log.error(f"close_symbol {symbol}: {e}")
-        await msg.answer(f"❌ Ошибка закрытия {symbol}: {e}", reply_markup=main_keyboard())
+        await msg.answer(f"❌ Ошибка закрытия {symbol}: {_html.escape(str(e))}", parse_mode="HTML", reply_markup=main_keyboard())
     finally:
         await ex.close()
 
@@ -754,6 +999,7 @@ async def handle_misc(msg: Message):
         "📈 Отчёт":       cmd_report,
         "📜 История":     cmd_history,
         "🏆 Топ пары":    cmd_top,
+        "💸 Фандинг":    cmd_funding,
         "⏸ Пауза":       cmd_pause,
         "▶️ Продолжить": cmd_resume,
         "❌ Закрыть всё": cmd_closeall,
@@ -785,11 +1031,13 @@ async def handle_misc(msg: Message):
 
     if text == "🤖 Авто":
         cfg.MODE = "auto"
+        from core import db as _db; _db.save_cfg_value("MODE", "auto")
         await msg.answer("✅ Режим: <code>auto</code>", parse_mode="HTML",
                          reply_markup=main_keyboard())
         return
     if text == "✋ Ручной":
         cfg.MODE = "manual"
+        from core import db as _db; _db.save_cfg_value("MODE", "manual")
         await msg.answer("✅ Режим: <code>manual</code>", parse_mode="HTML",
                          reply_markup=main_keyboard())
         return
@@ -819,6 +1067,26 @@ async def handle_misc(msg: Message):
         sym = text.replace("/skip_", "").replace("_", "-").upper()
         state.pending.pop(sym, None)
         await msg.answer(f"⏭ Пропущен: {sym}")
+        return
+
+    if text.startswith("/close_"):
+        await cmd_close_symbol(msg)
+
+
+# ------------------------------------------------------------------ /funding
+
+async def cmd_funding(msg: Message):
+    if not _auth(msg):
+        return
+    from strategy.scanner import _global_scanner
+    if _global_scanner is None:
+        await msg.answer("⚠️ Сканер не запущен", reply_markup=main_keyboard())
+        return
+    await msg.answer("⏳ Сканирую фандинг по всем парам...", reply_markup=main_keyboard())
+    try:
+        await _global_scanner.funding_scan()
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка: {_html.escape(str(e))}", parse_mode="HTML")
 
 
 # ------------------------------------------------------------------ register
@@ -834,11 +1102,17 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_report,   Command("report"))
     dp.message.register(cmd_history,  Command("history"))
     dp.message.register(cmd_top,      Command("top"))
+    dp.message.register(cmd_funding,  Command("funding"))
     dp.message.register(cmd_setminpos,  Command("setminpos"))
     dp.message.register(cmd_setmaxpos,  Command("setmaxpos"))
     dp.message.register(cmd_setmaxrisk, Command("setmaxrisk"))
-    dp.message.register(cmd_setbe,      Command("setbe"))
-    dp.message.register(cmd_settrail, Command("settrail"))
+    dp.message.register(cmd_setbe,       Command("setbe"))
+    dp.message.register(cmd_settrail,   Command("settrail"))
+    dp.message.register(cmd_setminscore, Command("setminscore"))
+    dp.message.register(cmd_setmaxloss,  Command("setmaxloss"))
+    dp.message.register(cmd_setmaxdaily, Command("setmaxdaily"))
+    dp.message.register(cmd_setmaxsl,    Command("setmaxsl"))
+    dp.message.register(cmd_setautolev,  Command("setautolev"))
     dp.message.register(cmd_setpairs, Command("setpairs"))
     dp.message.register(cmd_pause,    Command("pause"))
     dp.message.register(cmd_resume,   Command("resume"))

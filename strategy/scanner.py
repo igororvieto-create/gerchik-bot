@@ -1571,10 +1571,6 @@ class Scanner:
             except Exception as e:
                 issues.append(f"⚠️ Не удалось получить позиции с биржи: {_html.escape(str(e))}")
 
-            # Пауза без причины
-            if state.is_paused and pos_count == 0:
-                issues.append("ℹ️ Бот на паузе, открытых позиций нет")
-
             # SL order health check: verify each position has a live SL on exchange
             for symbol, pos in list(state.positions.items()):
                 if pos.sl == 0 or not pos.sl_order_id:

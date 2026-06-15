@@ -951,6 +951,11 @@ class Scanner:
                     await self.ex.close_position(sig.symbol, qty, sig.side)
                 except Exception as ce:
                     log.error(f"emergency close {sig.symbol}: {ce}")
+                    _orphan = Position(symbol=sig.symbol, side=sig.side, entry=sig.entry,
+                                      sl=0.0, tp1=0.0, tp2=0.0, tp3=0.0, qty=qty, risk_usdt=0.0)
+                    state.positions[sig.symbol] = _orphan
+                    db.save_open_position(_orphan)
+                    await self._notify(f"🚨 <b>{sig.symbol}</b>: аварийное закрытие не удалось — позиция добавлена без SL для мониторинга")
                 self._loss_cooldown(sig.symbol)  # позиция открылась без SL = реальная потеря
                 return
             if not sl_id:
@@ -1477,7 +1482,36 @@ class Scanner:
             for symbol, pos in list(state.positions.items()):
                 if pos.sl == 0 or not pos.sl_order_id:
                     if pos.sl == 0:
-                        issues.append(f"⚠️ {symbol}: нет SL-уровня (внешняя позиция?)")
+                        # Orphan or external position — place a protective SL at 5% from entry
+                        if pos.qty > 0:
+                            try:
+                                sl_pct = 0.05
+                                emergency_sl = _px(
+                                    pos.entry * (1 - sl_pct) if pos.side == "LONG"
+                                    else pos.entry * (1 + sl_pct)
+                                )
+                                side_str = "BUY" if pos.side == "LONG" else "SELL"
+                                r = await self.ex.place_stop_loss(symbol, side_str, pos.qty, emergency_sl)
+                                if r.get("code") == 0:
+                                    pos.sl = emergency_sl
+                                    pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
+                                    db.save_open_position(pos)
+                                    issues.append(
+                                        f"🔧 {symbol}: аварийный SL выставлен @ "
+                                        f"<code>{emergency_sl:.4f}</code> (5% от входа)"
+                                    )
+                                else:
+                                    issues.append(
+                                        f"🚨 {symbol}: позиция БЕЗ SL! "
+                                        f"Аварийный SL не выставился (код {r.get('code')})"
+                                    )
+                            except Exception as se:
+                                issues.append(
+                                    f"🚨 {symbol}: позиция БЕЗ SL! "
+                                    f"Ошибка выставления: {_html.escape(str(se))}"
+                                )
+                        else:
+                            issues.append(f"⚠️ {symbol}: нет SL-уровня (внешняя позиция?)")
                     else:
                         # Has SL price but no order ID — try to re-place
                         log.warning(f"{symbol}: нет sl_order_id, перевыставляем SL @ {pos.sl}")

@@ -146,14 +146,19 @@ async def main():
             from core.state import Position
             saved = db.load_open_positions()
             restored = 0
+            downtime_closed = []
             for d in saved:
                 sym = d.get("symbol", "")
                 if not sym:
                     continue
                 if sym not in live_map:
-                    # Closed during downtime — clean up DB
+                    # Closed during downtime — PnL cannot be recorded without the close price.
+                    # Notify the user so they can check exchange history manually.
+                    log.warning(
+                        f"Позиция {sym} закрыта в downtime — PnL не записан (нет цены закрытия)"
+                    )
+                    downtime_closed.append(sym)
                     db.delete_open_position(sym)
-                    log.info(f"Позиция {sym} закрыта в downtime — убрана из БД")
                     continue
                 if sym not in state.positions:
                     state.positions[sym] = Position(
@@ -180,6 +185,18 @@ async def main():
                     restored += 1
             if restored:
                 log.info(f"Восстановлено {restored} позиций из БД с полными данными (SL/TP/BE)")
+            if downtime_closed:
+                syms_str = ", ".join(downtime_closed)
+                try:
+                    await bot.send_message(
+                        cfg.TELEGRAM_CHAT_ID,
+                        f"⚠️ <b>Позиции закрыты в downtime</b>\n"
+                        f"Символы: <code>{syms_str}</code>\n"
+                        f"PnL не записан — проверь историю на бирже вручную",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
 
             # Any live exchange position not in DB → add with sl=0 (manual / unknown)
             # Try multiple field names for entry price (BingX API inconsistency)

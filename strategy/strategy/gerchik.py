@@ -391,6 +391,9 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         return None
 
     touches = level_touches(level, h4["high"][-120:], h4["low"][-120:])
+    if touches == 0:
+        _reject("уровень не подтверждён (0 касаний H4)")
+        return None
     if touches > 6:
         _reject("уровень пробит (>6 касаний)")
         return None

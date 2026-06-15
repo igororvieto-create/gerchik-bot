@@ -198,22 +198,23 @@ async def main():
                 except Exception:
                     pass
 
-            # Any live exchange position not in DB → add with sl=0 (manual / unknown)
-            # Try multiple field names for entry price (BingX API inconsistency)
-            for sym, lp in live_map.items():
+            # Any live exchange position not in DB → manual position, do NOT manage it
+            manual_syms = []
+            for sym in live_map:
                 if sym not in state.positions:
-                    raw_entry = (
-                        float(lp.get("entryPrice") or 0) or
-                        float(lp.get("avgPrice")   or 0) or
-                        float(lp.get("markPrice")  or 0)
+                    manual_syms.append(sym)
+                    log.info(f"Ручная позиция {sym} — бот не вмешивается (нет в БД)")
+            if manual_syms:
+                try:
+                    await bot.send_message(
+                        cfg.TELEGRAM_CHAT_ID,
+                        f"ℹ️ <b>Ручные позиции найдены</b>\n"
+                        f"Символы: <code>{', '.join(manual_syms)}</code>\n"
+                        f"Бот их <b>не трогает</b> — SL/TP не ставит, не закрывает",
+                        parse_mode="HTML",
                     )
-                    state.positions[sym] = Position(
-                        symbol=sym, side=lp.get("positionSide", "LONG"),
-                        entry=raw_entry, sl=0.0,
-                        tp1=0.0, tp2=0.0, tp3=0.0,
-                        qty=abs(float(lp.get("positionAmt", 0))), risk_usdt=0.0,
-                    )
-                    log.info(f"Внешняя позиция {sym} добавлена без SL/TP (вход={raw_entry})")
+                except Exception:
+                    pass
 
             await bot.send_message(
                 cfg.TELEGRAM_CHAT_ID,

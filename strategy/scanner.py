@@ -280,6 +280,18 @@ class Scanner:
         if cfg.QUIET_HOURS_START <= hour < cfg.QUIET_HOURS_END:
             log.info(f"Тихая сессия {hour}:00 UTC ({cfg.QUIET_HOURS_START}-{cfg.QUIET_HOURS_END}) — скан пропущен")
             return
+
+        # Fetch live positions to detect manual positions — never enter those symbols
+        _manual_syms: set = set()
+        try:
+            _live = await self.ex.get_open_positions()
+            _live_syms = {p.get("symbol") for p in _live if abs(float(p.get("positionAmt", 0))) > 0}
+            _manual_syms = _live_syms - set(state.positions.keys())
+            if _manual_syms:
+                log.info(f"Пропуск ручных позиций: {_manual_syms}")
+        except Exception as _le:
+            log.warning(f"live positions check: {_le}")
+
         log.info(f"Сканирую {len(state.pairs)} пар...")
         reset_stats()
         signals = []
@@ -288,6 +300,7 @@ class Scanner:
             tasks = [
                 self._analyze(s) for s in batch
                 if s not in state.positions and s not in state.pending
+                and s not in _manual_syms
                 and not self._in_cooldown(s)
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)

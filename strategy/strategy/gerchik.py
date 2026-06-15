@@ -114,27 +114,33 @@ def vol_ma(volumes, period=20):
     return result
 
 def _merge_levels(levels, merge_pct=1.0):
-    """Deduplicate levels within merge_pct% of each other, keeping the average."""
+    """Deduplicate levels within merge_pct% of each other, keeping the cluster mean."""
     if not levels:
         return []
     sorted_lvls = sorted(levels)
-    merged = [sorted_lvls[0]]
+    merged = []
+    cluster_start = sorted_lvls[0]
+    cluster = [sorted_lvls[0]]
     for lvl in sorted_lvls[1:]:
-        base = merged[-1]
-        if base > 0 and abs(lvl - base) / base * 100 <= merge_pct:
-            merged[-1] = (base + lvl) / 2.0
+        if cluster_start > 0 and abs(lvl - cluster_start) / cluster_start * 100 <= merge_pct:
+            cluster.append(lvl)
         else:
-            merged.append(lvl)
+            merged.append(sum(cluster) / len(cluster))
+            cluster_start = lvl
+            cluster = [lvl]
+    merged.append(sum(cluster) / len(cluster))
     return merged
 
 def find_levels(highs, lows, lookback=80):
     rh, rl = highs[-lookback:], lows[-lookback:]
     res, sup = [], []
-    for i in range(3, len(rh)-3):
-        if rh[i] > max(rh[i-1], rh[i-2], rh[i-3], rh[i+1], rh[i+2], rh[i+3]):
+    for i in range(5, len(rh)-5):
+        if rh[i] > max(rh[i-1], rh[i-2], rh[i-3], rh[i-4], rh[i-5],
+                       rh[i+1], rh[i+2], rh[i+3], rh[i+4], rh[i+5]):
             res.append(float(rh[i]))
-    for i in range(3, len(rl)-3):
-        if rl[i] < min(rl[i-1], rl[i-2], rl[i-3], rl[i+1], rl[i+2], rl[i+3]):
+    for i in range(5, len(rl)-5):
+        if rl[i] < min(rl[i-1], rl[i-2], rl[i-3], rl[i-4], rl[i-5],
+                       rl[i+1], rl[i+2], rl[i+3], rl[i+4], rl[i+5]):
             sup.append(float(rl[i]))
     return {"resistance": _merge_levels(res), "support": _merge_levels(sup)}
 
@@ -160,7 +166,7 @@ def nearest_weekly_levels(price, w1, count=3):
     resistances = sorted([l for l in lvls["resistance"] if l > price])[:count]
     return {"support": supports, "resistance": resistances}
 
-def level_last_touch_age(level, highs, lows, tol=0.3):
+def level_last_touch_age(level, highs, lows, tol=0.5):
     """Returns candles since the level was last touched. Large = stale level."""
     t = level * tol / 100
     for i in range(len(highs) - 1, -1, -1):
@@ -179,7 +185,7 @@ def near_level(price, levels, tol=0.8):
             best = (True, lvl, dist)
     return best[0], best[1]
 
-def level_touches(level, highs, lows, tol=0.3):
+def level_touches(level, highs, lows, tol=0.5):
     t = level*tol/100
     return sum(1 for h,l in zip(highs, lows) if abs(h-level)<=t or abs(l-level)<=t)
 
@@ -240,27 +246,29 @@ def detect_rsi_divergence(closes, rsi_vals, signal_side, lookback=24):
     if signal_side == "LONG":
         i1 = int(np.argmax(rec_c[:mid]))
         i2 = mid + int(np.argmax(rec_c[mid:]))
-        return rec_c[i2] > rec_c[i1] * 1.01 and rec_r[i2] < rec_r[i1] - 3
+        return rec_c[i2] > rec_c[i1] * 1.01 and rec_r[i2] < rec_r[i1] - 5
     else:
         i1 = int(np.argmin(rec_c[:mid]))
         i2 = mid + int(np.argmin(rec_c[mid:]))
-        return rec_c[i2] < rec_c[i1] * 0.99 and rec_r[i2] > rec_r[i1] + 3
+        return rec_c[i2] < rec_c[i1] * 0.99 and rec_r[i2] > rec_r[i1] + 5
 
 # ─────────────────────────────────────── patterns ──
 
 def hammer(o,h,l,c):
     body=abs(c-o); full=h-l
-    return full>0 and body/full<=0.4 and (min(o,c)-l)>=body*1.5 and c>o
+    return full>0 and body/full<=0.4 and (min(o,c)-l)>=body*1.5
 
 def shooting_star(o,h,l,c):
     body=abs(c-o); full=h-l
-    return full>0 and body/full<=0.4 and (h-max(o,c))>=body*1.5 and c<o
+    return full>0 and body/full<=0.4 and (h-max(o,c))>=body*1.5
 
 def bull_engulf(o1,c1,o2,c2):
-    return c1<o1 and c2>o2 and o2<=c1 and c2>=o1
+    body1 = abs(c1-o1); body2 = abs(c2-o2)
+    return c1<o1 and c2>o2 and o2<=c1 and c2>=o1 and (body1==0 or body2>=body1*1.2)
 
 def bear_engulf(o1,c1,o2,c2):
-    return c1>o1 and c2<o2 and o2>=c1 and c2<=o1
+    body1 = abs(c1-o1); body2 = abs(c2-o2)
+    return c1>o1 and c2<o2 and o2>=c1 and c2<=o1 and (body1==0 or body2>=body1*1.2)
 
 def bull_pin(o,h,l,c):
     body=abs(c-o); full=h-l
@@ -314,13 +322,19 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     ema200  = ema(d1["close"], cfg.TREND_EMA_D1)
     d1_up   = d1["close"][-1] > ema200[-1]
     trend   = "LONG" if d1_up else "SHORT"
-    d1_slope= trend_slope(d1["close"], 5)
+    d1_slope= trend_slope(d1["close"], 10)
+
+    # Require minimum distance from EMA200 — price too close = trend unclear
+    d1_ema_dist = abs(d1["close"][-1] - ema200[-1]) / ema200[-1] * 100 if ema200[-1] > 0 else 0
+    if d1_ema_dist < 0.3:
+        _reject("D1 у EMA200 (зона неопределённости)")
+        return None
 
     # Mandatory slope filter: price above EMA200 but falling = no LONG (correction phase)
-    if trend == "LONG"  and d1_slope < -0.1:
+    if trend == "LONG"  and d1_slope < -0.05:
         _reject("D1 разворот вниз")
         return None
-    if trend == "SHORT" and d1_slope > 0.1:
+    if trend == "SHORT" and d1_slope > 0.05:
         _reject("D1 разворот вверх")
         return None
 
@@ -329,7 +343,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     h4_up   = h4["close"][-1] > ema50[-1]
     h4_dn   = h4["close"][-1] < ema50[-1]
     h4_aligned = (trend=="LONG" and h4_up) or (trend=="SHORT" and h4_dn)
-    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 2.0
+    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 1.0
     if not h4_aligned and not h4_near:
         _reject("H4 против тренда")
         return None
@@ -344,7 +358,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         # Reject: price approaching EMA50 from the WRONG side (bounce into resistance).
         # For LONG: price below EMA50 must have been ABOVE it recently (pullback from above).
         # For SHORT: price above EMA50 must have been BELOW it recently (bounce from below).
-        lookback = min(8, len(h4["close"]) - 1)
+        lookback = min(4, len(h4["close"]) - 1)
         if trend == "LONG":
             was_above = any(h4["close"][-lookback-1:-1] > ema50[-lookback-1:-1])
             if not was_above:
@@ -356,9 +370,20 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
                 _reject("H4 у EMA сверху (не откат — поддержка)")
                 return None
 
-    # H4 bearish/bullish impulse guard: if 3+ of last 4 H4 candles go against trend, skip.
-    h4_bear_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] < h4["open"][i])
-    h4_bull_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] > h4["open"][i])
+    # H4 bearish/bullish impulse guard: if 3+ of last 4 H4 candles go against trend with
+    # meaningful bodies (≥0.3% of price), skip — market is in corrective impulse.
+    _h4_ref = max(float(h4["close"][-1]), 0.001)
+    _h4_body_min = _h4_ref * 0.003
+    h4_bear_cnt = sum(
+        1 for i in (-1,-2,-3,-4)
+        if h4["close"][i] < h4["open"][i]
+        and (h4["open"][i] - h4["close"][i]) >= _h4_body_min
+    )
+    h4_bull_cnt = sum(
+        1 for i in (-1,-2,-3,-4)
+        if h4["close"][i] > h4["open"][i]
+        and (h4["close"][i] - h4["open"][i]) >= _h4_body_min
+    )
     if trend == "LONG"  and h4_bear_cnt >= 3:
         _reject("H4 медвежий импульс")
         return None
@@ -371,10 +396,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # ── RSI filter ──
     h1_rsi  = rsi(h1["close"], 14)
     cur_rsi = h1_rsi[-1]
-    if trend == "LONG"  and cur_rsi > 65:
+    if trend == "LONG"  and cur_rsi > 60:
         _reject("RSI перекуплен")
         return None
-    if trend == "SHORT" and cur_rsi < 35:
+    if trend == "SHORT" and cur_rsi < 40:
         _reject("RSI перепродан")
         return None
 
@@ -385,7 +410,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         primary = lv4["support"] + lv1["support"]
     else:
         primary = lv4["resistance"] + lv1["resistance"]
-    near, level = near_level(price, primary, tol=1.0)
+    near, level = near_level(price, primary, tol=0.8)
     if not near:
         _reject("не у уровня S/R")
         return None
@@ -422,6 +447,11 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if atr_pct > 5.0:
         _reject("ATR слишком велик (взрыв)")
         return None
+    # ATR spike: current ATR > 2× recent mean = market in explosion mode, skip
+    _atr_hist_mean = float(np.mean(h1_atr[-20:-1])) if len(h1_atr) > 20 else cur_atr
+    if _atr_hist_mean > 0 and cur_atr / _atr_hist_mean > 2.0:
+        _reject("ATR взрыв (спайк волатильности)")
+        return None
 
     # ── Candle pattern on H1: use index -2 (last COMPLETED candle) ──
     # Reject micro-candles: range < 25% of ATR means it's noise, not a real pattern
@@ -450,10 +480,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if trend == "SHORT" and price > pat_high:
         _reject("паттерн недействителен")
         return None
-    if trend == "LONG"  and price > pat_close * 1.015:
+    if trend == "LONG"  and price > pat_close * 1.008:
         _reject("цена ушла от паттерна")
         return None
-    if trend == "SHORT" and price < pat_close * 0.985:
+    if trend == "SHORT" and price < pat_close * 0.992:
         _reject("цена ушла от паттерна")
         return None
 
@@ -486,13 +516,14 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     atr_sl  = cur_atr * 1.5  # 1.5× ATR gives trade room to breathe vs noise
 
     if trend == "LONG":
-        sl_candle = h1["low"][-2]  - buf
+        sl_candle = h1["low"][-2] - buf
         sl_atr    = price - atr_sl
-        sl        = min(sl_candle, sl_atr)
+        # Prefer structural candle SL; use ATR only if candle SL is too tight (<0.4%)
+        sl = sl_candle if (price - sl_candle) / price >= 0.004 else sl_atr
     else:
         sl_candle = h1["high"][-2] + buf
         sl_atr    = price + atr_sl
-        sl        = max(sl_candle, sl_atr)
+        sl = sl_candle if (sl_candle - price) / price >= 0.004 else sl_atr
 
     sld = abs(price - sl)
     if price <= 0 or sld <= 0 or sld / price < 0.004:
@@ -518,10 +549,9 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     elif vrat >= 2.0: score += 10
     elif vrat >= 1.5: score += 6
     else:             score += 3
-    # Level quality — Gerchik: 2–3 touches optimal, 1 = unconfirmed, 5+ = exhausted
+    # Level quality — Gerchik: 2–3 touches optimal, 1 = unconfirmed (no bonus), 5+ = exhausted
     if touches == 2:    score += 12
     elif touches == 3:  score += 10
-    elif touches == 1:  score += 2   # fresh but unconfirmed
     elif touches == 4:  score += 5
     # 5+ touches: no bonus (level near exhaustion)
     # Level freshness — recently touched level is still respected by market
@@ -614,13 +644,19 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     ema200   = ema(d1["close"], cfg.TREND_EMA_D1)
     d1_up    = d1["close"][-1] > ema200[-1]
     trend    = "LONG" if d1_up else "SHORT"
-    d1_slope = trend_slope(d1["close"], 5)
+    d1_slope = trend_slope(d1["close"], 10)
+
+    # Require minimum distance from EMA200 — too close = trend unclear
+    _fb_d1_dist = abs(d1["close"][-1] - ema200[-1]) / ema200[-1] * 100 if ema200[-1] > 0 else 0
+    if _fb_d1_dist < 0.3:
+        _reject("ложный пробой: D1 у EMA200 (зона неопределённости)")
+        return None
 
     # Mandatory D1 slope filter — same as analyze()
-    if trend == "LONG"  and d1_slope < -0.1:
+    if trend == "LONG"  and d1_slope < -0.05:
         _reject("ложный пробой: D1 разворот вниз")
         return None
-    if trend == "SHORT" and d1_slope > 0.1:
+    if trend == "SHORT" and d1_slope > 0.05:
         _reject("ложный пробой: D1 разворот вверх")
         return None
 
@@ -673,7 +709,7 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     vm = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
 
     n = len(h1["close"])
-    for back in range(2, 12):         # candles [-11 .. -2], skip current (-1)
+    for back in range(2, 8):          # candles [-7 .. -2], skip current (-1); fresh breakouts only
         idx = n - back
         if idx < 1:
             break
@@ -873,13 +909,19 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     ema200   = ema(d1["close"], cfg.TREND_EMA_D1)
     d1_up    = d1["close"][-1] > ema200[-1]
     trend    = "LONG" if d1_up else "SHORT"
-    d1_slope = trend_slope(d1["close"], 5)
+    d1_slope = trend_slope(d1["close"], 10)
+
+    # Require minimum distance from EMA200 — too close = trend unclear
+    _rb_d1_dist = abs(d1["close"][-1] - ema200[-1]) / ema200[-1] * 100 if ema200[-1] > 0 else 0
+    if _rb_d1_dist < 0.3:
+        _reject("накопление: D1 у EMA200 (зона неопределённости)")
+        return None
 
     # Mandatory D1 slope filter — same as analyze() and analyze_false_breakout()
-    if trend == "LONG"  and d1_slope < -0.1:
+    if trend == "LONG"  and d1_slope < -0.05:
         _reject("накопление: D1 разворот вниз")
         return None
-    if trend == "SHORT" and d1_slope > 0.1:
+    if trend == "SHORT" and d1_slope > 0.05:
         _reject("накопление: D1 разворот вверх")
         return None
 
@@ -1117,7 +1159,7 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     ema200 = ema(d1["close"], cfg.TREND_EMA_D1)
     d1_up  = d1["close"][-1] > ema200[-1]
     trend  = "LONG" if d1_up else "SHORT"
-    d1_slope = trend_slope(d1["close"], 5)
+    d1_slope = trend_slope(d1["close"], 10)
 
     # Breakout requires D1 momentum aligned with direction
     if trend == "LONG"  and d1_slope < 0.05:

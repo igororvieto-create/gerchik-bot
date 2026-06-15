@@ -253,11 +253,27 @@ class BingXClient:
         }
         if order_type == "LIMIT" and price:
             params["price"] = price
+            params["timeInForce"] = "GTC"
         if stop_price:
             params["stopPrice"] = stop_price
         if reduce_only:
             params["reduceOnly"] = "true"
         return await self._post("/openApi/swap/v2/trade/order", params)
+
+    async def get_order(self, symbol: str, order_id: str) -> dict:
+        """Return order status dict. Fields: status, executedQty, avgPrice."""
+        data = await self._get(
+            "/openApi/swap/v2/trade/order",
+            {"symbol": symbol, "orderId": order_id},
+            signed=True,
+        )
+        try:
+            inner = data.get("data", {})
+            if isinstance(inner, dict):
+                return inner.get("order", inner)
+            return {}
+        except Exception:
+            return {}
 
     async def place_stop_loss(self, symbol, side, qty, stop_price):
         ps = "LONG" if side == "BUY" else "SHORT"

@@ -813,13 +813,67 @@ class Scanner:
                     f"Не удалось выставить плечо x{leverage}"
                 )
                 return
-            side  = "BUY" if sig.side == "LONG" else "SELL"
-            order = await self.ex.place_order(sig.symbol, side, qty, position_side=sig.side)
+            side = "BUY" if sig.side == "LONG" else "SELL"
+
+            # ── Entry order: limit preferred over market ──
+            use_limit  = cfg.USE_LIMIT_ORDERS
+            limit_price = _px(sig.entry)
+            if use_limit:
+                order = await self.ex.place_order(
+                    sig.symbol, side, qty,
+                    price=limit_price, order_type="LIMIT",
+                    position_side=sig.side,
+                )
+            else:
+                order = await self.ex.place_order(sig.symbol, side, qty, position_side=sig.side)
+
             if order.get("code") != 0:
                 log.error(f"Ордер входа отклонён {sig.symbol}: {order}")
                 await self._notify(f"❌ Вход отклонён <b>{sig.symbol}</b>: {_html.escape(str(order.get('msg', '')))}")
                 return
             order_id = str(order.get("data", {}).get("orderId", ""))
+
+            # ── Limit order: wait for fill ──
+            if use_limit and order_id:
+                await self._notify(
+                    f"⏳ <b>Лимитный ордер</b> | {sig.symbol} {sig.side}\n"
+                    f"Цена: <code>{limit_price}</code> | Ожидание до {cfg.LIMIT_ORDER_TIMEOUT_SEC}с"
+                )
+                deadline = datetime.utcnow() + timedelta(seconds=cfg.LIMIT_ORDER_TIMEOUT_SEC)
+                filled = False
+                while datetime.utcnow() < deadline:
+                    await asyncio.sleep(3)
+                    try:
+                        info = await self.ex.get_order(sig.symbol, order_id)
+                        status = info.get("status", "")
+                        if status == "FILLED":
+                            raw_fill = float(info.get("avgPrice") or info.get("price") or sig.entry)
+                            if raw_fill > 0:
+                                sig.entry = raw_fill
+                            raw_exec = float(info.get("executedQty", 0))
+                            if raw_exec > 0:
+                                qty = round(raw_exec, 3)
+                            filled = True
+                            log.info(f"{sig.symbol}: лимитный ордер исполнен @ {sig.entry}")
+                            break
+                        if status in ("CANCELED", "EXPIRED"):
+                            log.info(f"{sig.symbol}: лимитный ордер {status} биржей")
+                            await self._notify(f"⏭ <b>{sig.symbol}</b>: ордер {status} — пропуск")
+                            return
+                    except Exception as _pe:
+                        log.warning(f"get_order {sig.symbol}: {_pe}")
+                if not filled:
+                    # Timeout — cancel limit order and skip this signal
+                    try:
+                        await self.ex.cancel_order(sig.symbol, order_id)
+                        log.info(f"{sig.symbol}: лимитный ордер отменён (таймаут {cfg.LIMIT_ORDER_TIMEOUT_SEC}с)")
+                    except Exception as _ce:
+                        log.warning(f"cancel limit {sig.symbol}: {_ce}")
+                    await self._notify(
+                        f"⏭ <b>{sig.symbol}</b>: лимитный ордер не исполнен за "
+                        f"{cfg.LIMIT_ORDER_TIMEOUT_SEC}с — цена ушла от уровня"
+                    )
+                    return
 
             # Get actual filled qty from exchange (may differ from calculated)
             await asyncio.sleep(0.5)

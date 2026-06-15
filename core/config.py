@@ -83,5 +83,9 @@ class Config:
     SYMBOL_LOSS_COOLDOWN_MIN: int   = int(os.getenv("SYMBOL_LOSS_COOLDOWN_MIN", "720").strip())
     # Accumulation breakout TP3 multiplier — range breakouts travel further than pullbacks
     RANGE_TP3_MULT:           float = float(os.getenv("RANGE_TP3_MULT", "1.5").strip())
+    # Limit orders: use limit instead of market on entry (better fill price, no slippage)
+    USE_LIMIT_ORDERS:         bool  = os.getenv("USE_LIMIT_ORDERS", "true").strip().lower() == "true"
+    # How long to wait for limit order fill before cancelling (seconds)
+    LIMIT_ORDER_TIMEOUT_SEC:  int   = int(os.getenv("LIMIT_ORDER_TIMEOUT_SEC", "45").strip())
 
 cfg = Config()

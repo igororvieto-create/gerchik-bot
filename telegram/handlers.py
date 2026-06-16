@@ -31,7 +31,7 @@ def _auth(msg: Message) -> bool:
 
 
 def _auth_cb(cb: CallbackQuery) -> bool:
-    return str(cb.message.chat.id) == str(cfg.TELEGRAM_CHAT_ID)
+    return str(cb.from_user.id) == str(cfg.TELEGRAM_CHAT_ID)
 
 
 def main_keyboard():

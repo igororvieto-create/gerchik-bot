@@ -29,7 +29,7 @@ class Position:
 
 @dataclass
 class DayStats:
-    date:         date     = field(default_factory=date.today)
+    date:         date     = field(default_factory=lambda: datetime.utcnow().date())
     trades:       int      = 0
     wins:         int      = 0
     losses:       int      = 0
@@ -49,7 +49,7 @@ class BotState:
     peak_balance:    float         = 0.0
 
     def reset_day(self):
-        if self.day.date != date.today():
+        if self.day.date != datetime.utcnow().date():
             self.day = DayStats()
             # clear persisted pause so restart on a new day doesn't inherit yesterday's pause
             try:

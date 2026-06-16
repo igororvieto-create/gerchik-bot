@@ -8,7 +8,7 @@ class Config:
     TELEGRAM_CHAT_ID: str   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     BINGX_API_KEY:    str   = os.getenv("BINGX_API_KEY", "").strip()
     BINGX_SECRET:     str   = os.getenv("BINGX_SECRET", "").strip()
-    MODE:             str   = "auto"
+    MODE:             str   = os.getenv("BOT_MODE", os.getenv("MODE", "auto")).strip()
     RISK_PER_TRADE:   float = float(os.getenv("RISK_PER_TRADE", "0.5").strip())
     MAX_DAILY_LOSS:   float = float(os.getenv("MAX_DAILY_LOSS", "3.0").strip())
     MAX_POSITIONS:    int   = int(os.getenv("MAX_POSITIONS", "1").strip())
@@ -35,7 +35,7 @@ class Config:
     TP3_RR: float = 3.0
     TP1_CLOSE_PCT:        float = float(os.getenv("TP1_CLOSE_PCT", "0.25").strip())
     TP2_CLOSE_PCT:        float = float(os.getenv("TP2_CLOSE_PCT", "0.50").strip())
-    PAUSE_AFTER_LOSS_MIN: int   = 30
+    PAUSE_AFTER_LOSS_MIN: int   = int(os.getenv("PAUSE_AFTER_LOSS_MIN", "30").strip())
     PAUSE_3X_LOSS_MIN:    int   = int(os.getenv("PAUSE_3X_LOSS_MIN", "120").strip())
     SL_COOLDOWN_MIN:      int   = int(os.getenv("SL_COOLDOWN_MIN", "60").strip())
     MAX_MARGIN_PCT:       float = float(os.getenv("MAX_MARGIN_PCT", "15.0").strip())

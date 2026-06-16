@@ -91,8 +91,9 @@ def rsi(closes, period=14):
         avg_g[i] = (avg_g[i-1]*(period-1) + gains[i-1]) / period
         avg_l[i] = (avg_l[i-1]*(period-1) + losses[i-1]) / period
     with np.errstate(divide='ignore', invalid='ignore'):
-        rs = np.where(avg_l == 0, 100.0, avg_g / avg_l)
-    return np.where(avg_l == 0, 100.0, 100 - 100/(1+rs))
+        rs = np.where(avg_l == 0, np.where(avg_g == 0, 0.0, 100.0), avg_g / avg_l)
+    # Flat price (avg_g==0 and avg_l==0) → RSI 50 (neutral), not 100
+    return np.where(avg_l == 0, np.where(avg_g == 0, 50.0, 100.0), 100 - 100/(1+rs))
 
 def atr(highs, lows, closes, period=14):
     n  = len(closes)
@@ -499,7 +500,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
 
     # ── Volume ──
     vm    = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
-    vrat  = h1["volume"][-2] / vm[-3] if vm[-3] > 0 else 0
+    vrat  = h1["volume"][-2] / vm[-2] if vm[-2] > 0 else 0
     if vrat < cfg.VOLUME_MULT:
         _reject("объём низкий")
         return None

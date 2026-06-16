@@ -87,6 +87,9 @@ class Scanner:
         and any path-specific logic (e.g. balance refresh, extended-streak alert).
         """
         symbol = pos.symbol
+        if symbol not in state.positions:
+            log.warning(f"_record_close: {symbol} уже удалён из state — двойной вызов предотвращён")
+            return 0.0
         pnl = self._calc_pnl(pos, price)
         state.total_pnl    += pnl
         state.day.pnl_usdt += pnl
@@ -130,6 +133,10 @@ class Scanner:
             self._loss_cooldown(symbol)
         else:
             self._symbol_loss_streak.pop(symbol, None)
+        try:
+            db.save_kv("loss_streak", str(state.day.loss_streak))
+        except Exception:
+            pass
         return total_trade_pnl
 
     async def _drought_alert(self, diag: str = "") -> None:
@@ -745,8 +752,9 @@ class Scanner:
             min_qty = min_notional / sig.entry
             if qty < min_qty:
                 qty = min_qty
-                # Guard: bumping to min size must not create excessive actual risk
                 actual_risk = min_notional * sl_pct
+                risk_usdt = actual_risk  # update to match actual bumped size
+                # Guard: bumping to min size must not create excessive actual risk
                 if balance > 0 and actual_risk / balance * 100 > cfg.RISK_PER_TRADE * 3:
                     log.warning(
                         f"{sig.symbol}: мин. позиция {min_notional:.0f} USDT "
@@ -1051,6 +1059,12 @@ class Scanner:
                 await self._notify(
                     f"⚠️ SL не выставился <b>{sig.symbol}</b> (код {err_code}) — закрываем"
                 )
+                # Cancel potentially placed SL order before emergency close to avoid orphan stop
+                if sl_id:
+                    try:
+                        await self.ex.cancel_order(sig.symbol, sl_id)
+                    except Exception:
+                        pass
                 try:
                     await self.ex.close_position(sig.symbol, qty, sig.side)
                 except Exception as ce:
@@ -1213,6 +1227,10 @@ class Scanner:
                 except Exception as e:
                     log.error(f"{symbol}: ошибка авто-закрытия: {e}")
                     await self._notify(f"⚠️ Ошибка авто-закрытия {symbol}: {_html.escape(str(e))}")
+                    # Remove from state to prevent infinite retry storm every 30s
+                    if symbol in state.positions:
+                        del state.positions[symbol]
+                        db.delete_open_position(symbol)
             elif age_h > 48 and symbol not in self._stale_alerted:
                 self._stale_alerted.add(symbol)
                 auto_close_note = (
@@ -1478,11 +1496,18 @@ class Scanner:
                     pass  # already filled or cancelled
             if pos.tp3 > 0 and pos.qty > 0:
                 r = await self.ex.place_take_profit(pos.symbol, side, pos.qty, pos.tp3)
-                pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))
+                if r.get("code") == 0:
+                    pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))
+                else:
+                    log.error(f"partial_close {pos.symbol}: TP3 не выставился (код {r.get('code')}) — health_check перевыставит")
 
             db.save_open_position(pos)  # persist updated qty and tp2_hit flag
         except Exception as e:
             log.error(f"partial_close {pos.symbol}: {e}")
+            try:
+                await self._notify(f"⚠️ Ошибка частичного закрытия <b>{pos.symbol}</b>: {_html.escape(str(e))}")
+            except Exception:
+                pass
 
     async def _check_closed(self, pos: Position, price: float):
         # Guard: exchange sync may have already removed this position in the same monitor cycle
@@ -1737,6 +1762,7 @@ class Scanner:
             log.error(f"periodic_report: {e}")
 
     async def daily_report(self):
+        state.reset_day()  # ensure we report on the correct UTC day
         d  = state.day
         wr = round(d.wins / d.trades * 100) if d.trades else 0
         sign = "+" if d.pnl_usdt >= 0 else ""

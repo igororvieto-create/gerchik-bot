@@ -90,6 +90,12 @@ async def main():
     state.day.wins      = today["wins"]
     state.day.losses    = today["losses"]
     state.day.pnl_usdt  = today["pnl"]
+    try:
+        state.day.loss_streak = int(db.get_kv("loss_streak", "0"))
+        if state.day.loss_streak:
+            log.info(f"Восстановлена серия убытков: {state.day.loss_streak}")
+    except Exception:
+        pass
     log.info(f"Восстановлена дневная статистика: {today['total']} сделок, PnL {today['pnl']:.2f} USDT")
     state.paused = db.get_kv("paused", "0") == "1"
     if state.paused:

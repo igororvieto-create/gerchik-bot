@@ -281,7 +281,7 @@ class BingXClient:
         return await self._post("/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": cs, "positionSide": ps,
             "type": "STOP_MARKET", "quantity": qty,
-            "stopPrice": stop_price,
+            "stopPrice": stop_price, "workingType": "MARK_PRICE",
         })
 
     async def place_take_profit(self, symbol, side, qty, tp_price):
@@ -290,7 +290,7 @@ class BingXClient:
         return await self._post("/openApi/swap/v2/trade/order", {
             "symbol": symbol, "side": cs, "positionSide": ps,
             "type": "TAKE_PROFIT_MARKET", "quantity": qty,
-            "stopPrice": tp_price,
+            "stopPrice": tp_price, "workingType": "MARK_PRICE",
         })
 
     async def cancel_order(self, symbol, order_id):

@@ -97,10 +97,10 @@ class Scanner:
             except Exception:
                 pass
 
-        # Fall back to order history
+        # Fall back to order history (limit=200 — BingX max — covers all SL/TP/trail replacements)
         try:
             since_ms = int(pos.opened_at.timestamp() * 1000)
-            orders = await self.ex.get_all_orders(pos.symbol, start_time_ms=since_ms, limit=30)
+            orders = await self.ex.get_all_orders(pos.symbol, start_time_ms=since_ms, limit=200)
             close_side = "SELL" if pos.side == "LONG" else "BUY"
             for o in sorted(orders, key=lambda x: x.get("updateTime", 0), reverse=True):
                 if (o.get("status") == "FILLED"
@@ -117,9 +117,17 @@ class Scanner:
             ticker = await self.ex.get_ticker(pos.symbol)
             p = float(ticker.get("lastPrice", 0)) if ticker else 0
             if p > 0:
+                log.warning(
+                    f"_get_close_price {pos.symbol}: ордера не найдены — "
+                    f"PnL по цене тикера {p:.6f} (может отличаться от реального исполнения)"
+                )
                 return p
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"_get_close_price {pos.symbol}: тикер недоступен ({e})")
+        log.warning(
+            f"_get_close_price {pos.symbol}: все методы недоступны — "
+            f"PnL по цене входа {pos.entry:.6f}"
+        )
         return pos.entry
 
     async def _record_close(self, pos, price: float) -> float:

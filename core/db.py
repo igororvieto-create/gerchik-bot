@@ -11,11 +11,18 @@ DB_PATH = Path(os.getenv("DB_PATH", "data/gerchik.db"))
 _BACKUP_PATH = DB_PATH.parent / "positions_backup.json"
 
 
+def _connect():
+    """Open a SQLite connection with WAL mode and a generous write timeout."""
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
 def _update_backup():
     """Write current open positions from DB to JSON backup file (DB-only, no fallback)."""
     try:
         positions = []
-        with sqlite3.connect(DB_PATH) as conn:
+        with _connect() as conn:
             cur = conn.execute("SELECT value FROM kv WHERE key LIKE 'pos:%'")
             for (val,) in cur.fetchall():
                 try:
@@ -29,7 +36,7 @@ def _update_backup():
 
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS trades (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             symbol      TEXT,
@@ -54,8 +61,11 @@ def init_db():
             try:
                 conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {defn}")
                 conn.commit()
-            except Exception:
-                pass  # column already exists
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    log.error(f"init_db: ALTER TABLE trades ADD COLUMN {col} failed: {e}")
+            except Exception as e:
+                log.error(f"init_db: unexpected migration error for column {col}: {e}")
         conn.execute("""CREATE TABLE IF NOT EXISTS kv (
             key   TEXT PRIMARY KEY,
             value TEXT
@@ -65,7 +75,7 @@ def init_db():
 
 def save_trade(pos, exit_price: float, pnl: float, result: str, is_partial: bool = False):
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with _connect() as conn:
             conn.execute(
                 """INSERT INTO trades
                    (symbol,side,entry,exit_price,sl,tp3,qty,pnl,
@@ -86,7 +96,7 @@ def save_trade(pos, exit_price: float, pnl: float, result: str, is_partial: bool
 
 def get_history(limit: int = 15):
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with _connect() as conn:
             cur = conn.execute(
                 """SELECT symbol,side,entry,exit_price,pnl,result,closed_at
                    FROM trades WHERE is_partial = 0 ORDER BY id DESC LIMIT ?""",
@@ -102,7 +112,7 @@ def get_stats(days: int = None):
     """Aggregate stats. days=None → all time.
     Trade counts/wins exclude partial closes; PnL sums include all records."""
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with _connect() as conn:
             if days:
                 since = (datetime.utcnow() - timedelta(days=days)).isoformat()
                 cur = conn.execute(
@@ -140,7 +150,7 @@ def get_stats_by_pattern(days: int = None) -> list:
     """Returns list of (pattern, total, wins, pnl) sorted by total trades.
     Counts only final closes; PnL sums all records for each pattern."""
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with _connect() as conn:
             if days:
                 since = (datetime.utcnow() - timedelta(days=days)).isoformat()
                 cur = conn.execute(
@@ -175,7 +185,7 @@ def get_today_stats() -> dict:
     Counts only final closes; PnL includes all records (partials + final)."""
     try:
         today = datetime.utcnow().date().isoformat() + "T00:00:00"
-        with sqlite3.connect(DB_PATH) as conn:
+        with _connect() as conn:
             cur = conn.execute(
                 """SELECT
                       SUM(CASE WHEN is_partial=0 THEN 1 ELSE 0 END),
@@ -198,7 +208,7 @@ def load_all_cooldowns() -> dict:
     """Load all sl_cd:* cooldown entries at once (used on scanner startup)."""
     result = {}
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with _connect() as conn:
             cur = conn.execute("SELECT key, value FROM kv WHERE key LIKE 'sl_cd:%'")
             for key, val in cur.fetchall():
                 symbol = key[len("sl_cd:"):]
@@ -215,7 +225,7 @@ def load_all_loss_streaks() -> dict:
     """Load all sl_streak:* entries at once (used on scanner startup)."""
     result = {}
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with _connect() as conn:
             cur = conn.execute("SELECT key, value FROM kv WHERE key LIKE 'sl_streak:%'")
             for key, val in cur.fetchall():
                 symbol = key[len("sl_streak:"):]
@@ -230,7 +240,7 @@ def load_all_loss_streaks() -> dict:
 
 def save_kv(key: str, value):
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with _connect() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO kv (key,value) VALUES (?,?)",
                 (key, str(value)),
@@ -242,7 +252,7 @@ def save_kv(key: str, value):
 
 def get_kv(key: str, default=None):
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with _connect() as conn:
             cur = conn.execute("SELECT value FROM kv WHERE key=?", (key,))
             row = cur.fetchone()
             return row[0] if row else default
@@ -276,7 +286,7 @@ def save_open_position(pos) -> None:
 def delete_open_position(symbol: str) -> None:
     """Remove persisted position when it closes."""
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with _connect() as conn:
             conn.execute("DELETE FROM kv WHERE key=?", (f"pos:{symbol}",))
             conn.commit()
         _update_backup()
@@ -293,7 +303,7 @@ def load_cfg_values() -> dict:
     """Load all previously saved config overrides (keys without 'cfg:' prefix)."""
     result = {}
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with _connect() as conn:
             cur = conn.execute("SELECT key, value FROM kv WHERE key LIKE 'cfg:%'")
             for k, v in cur.fetchall():
                 result[k[4:]] = v
@@ -306,7 +316,7 @@ def load_open_positions() -> list:
     """Load all persisted open positions at startup."""
     result = []
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with _connect() as conn:
             cur = conn.execute("SELECT value FROM kv WHERE key LIKE 'pos:%'")
             for (val,) in cur.fetchall():
                 try:

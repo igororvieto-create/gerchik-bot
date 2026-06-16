@@ -281,7 +281,9 @@ class Scanner:
             log.info(f"Тихая сессия {hour}:00 UTC ({cfg.QUIET_HOURS_START}-{cfg.QUIET_HOURS_END}) — скан пропущен")
             return
 
-        # Fetch live positions to detect manual positions — never enter those symbols
+        # Fetch live positions to detect manual positions — never enter those symbols.
+        # If the exchange call fails we cannot safely distinguish manual from bot positions,
+        # so we skip the whole scan cycle rather than risk entering a manual position.
         _manual_syms: set = set()
         try:
             _live = await self.ex.get_open_positions()
@@ -290,7 +292,8 @@ class Scanner:
             if _manual_syms:
                 log.info(f"Пропуск ручных позиций: {_manual_syms}")
         except Exception as _le:
-            log.warning(f"live positions check: {_le}")
+            log.warning(f"live positions check failed — сканирование пропущено: {_le}")
+            return
 
         log.info(f"Сканирую {len(state.pairs)} пар...")
         reset_stats()
@@ -845,6 +848,10 @@ class Scanner:
                 await self._notify(f"❌ Вход отклонён <b>{sig.symbol}</b>: {_html.escape(str(order.get('msg', '')))}")
                 return
             order_id = str(order.get("data", {}).get("orderId", ""))
+            if use_limit and not order_id:
+                log.error(f"{sig.symbol}: лимитный ордер принят, но orderId отсутствует — отмена")
+                await self._notify(f"❌ <b>{sig.symbol}</b>: лимитный ордер без orderId — пропуск")
+                return
 
             # ── Limit order: wait for fill ──
             if use_limit and order_id:
@@ -894,8 +901,15 @@ class Scanner:
                     except Exception as _chk_e:
                         log.warning(f"partial fill check {sig.symbol}: {_chk_e}")
                     if _partial_qty > 0:
-                        # Partial fill — register position and place emergency SL
-                        log.warning(f"{sig.symbol}: частичное исполнение {_partial_qty} — регистрируем с SL")
+                        # Partial fill — try to get actual fill price from the (now cancelled/filled) order
+                        try:
+                            _fill_info = await self.ex.get_order(sig.symbol, order_id)
+                            _avg = float(_fill_info.get("avgPrice") or _fill_info.get("price") or 0)
+                            if _avg > 0:
+                                sig.entry = _avg
+                        except Exception:
+                            pass  # fallback: use original sig.entry; SL/TP will be approximate
+                        log.warning(f"{sig.symbol}: частичное исполнение {_partial_qty} @ {sig.entry:.4f} — регистрируем с SL")
                         qty = round(_partial_qty, 3)
                         filled = True  # fall through to SL/TP placement below
                     else:

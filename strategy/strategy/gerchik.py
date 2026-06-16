@@ -256,11 +256,11 @@ def detect_rsi_divergence(closes, rsi_vals, signal_side, lookback=24):
 
 def hammer(o,h,l,c):
     body=abs(c-o); full=h-l
-    return full>0 and body>0 and body/full<=0.4 and (min(o,c)-l)>=body*1.5
+    return full>0 and body>0 and c>o and body/full<=0.4 and (min(o,c)-l)>=body*1.5
 
 def shooting_star(o,h,l,c):
     body=abs(c-o); full=h-l
-    return full>0 and body>0 and body/full<=0.4 and (h-max(o,c))>=body*1.5
+    return full>0 and body>0 and c<o and body/full<=0.4 and (h-max(o,c))>=body*1.5
 
 def bull_engulf(o1,c1,o2,c2):
     body1 = abs(c1-o1); body2 = abs(c2-o2)

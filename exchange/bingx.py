@@ -352,6 +352,22 @@ class BingXClient:
             log.error(f"get_open_orders {symbol}: {e}")
             return []
 
+    async def get_all_orders(self, symbol: str, start_time_ms: int = 0,
+                             limit: int = 50) -> list:
+        """Fetch order history for a symbol (signed). Useful for actual fill prices."""
+        params: dict = {"symbol": symbol, "limit": limit}
+        if start_time_ms:
+            params["startTime"] = start_time_ms
+        data = await self._get("/openApi/swap/v2/trade/allOrders", params, signed=True)
+        try:
+            orders = data.get("data", {})
+            if isinstance(orders, dict):
+                orders = orders.get("orders", [])
+            return orders if isinstance(orders, list) else []
+        except Exception as e:
+            log.error(f"get_all_orders {symbol}: {e}")
+            return []
+
     async def close(self):
         if self._session:
             await self._session.close()

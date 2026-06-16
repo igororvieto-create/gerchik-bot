@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sqlite3
 import json
@@ -45,14 +46,16 @@ def init_db():
             rr          REAL,
             opened_at   TEXT,
             closed_at   TEXT,
-            result      TEXT
+            result      TEXT,
+            is_partial  INTEGER DEFAULT 0
         )""")
-        # Add tf column to existing DBs that were created without it
-        try:
-            conn.execute("ALTER TABLE trades ADD COLUMN tf TEXT DEFAULT ''")
-            conn.commit()
-        except Exception:
-            pass  # column already exists
+        # Migrations for existing DBs
+        for col, defn in [("tf", "TEXT DEFAULT ''"), ("is_partial", "INTEGER DEFAULT 0")]:
+            try:
+                conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {defn}")
+                conn.commit()
+            except Exception:
+                pass  # column already exists
         conn.execute("""CREATE TABLE IF NOT EXISTS kv (
             key   TEXT PRIMARY KEY,
             value TEXT
@@ -60,21 +63,21 @@ def init_db():
         conn.commit()
 
 
-def save_trade(pos, exit_price: float, pnl: float, result: str):
+def save_trade(pos, exit_price: float, pnl: float, result: str, is_partial: bool = False):
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute(
                 """INSERT INTO trades
                    (symbol,side,entry,exit_price,sl,tp3,qty,pnl,
-                    pattern,tf,score,rr,opened_at,closed_at,result)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    pattern,tf,score,rr,opened_at,closed_at,result,is_partial)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (pos.symbol, pos.side, pos.entry, exit_price,
                  pos.sl, pos.tp3, pos.qty, round(pnl, 4),
                  pos.pattern, getattr(pos, "tf", ""),
                  pos.score, pos.rr,
                  pos.opened_at.isoformat(),
                  datetime.utcnow().isoformat(),
-                 result),
+                 result, int(is_partial)),
             )
             conn.commit()
     except Exception as e:
@@ -86,7 +89,7 @@ def get_history(limit: int = 15):
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.execute(
                 """SELECT symbol,side,entry,exit_price,pnl,result,closed_at
-                   FROM trades ORDER BY id DESC LIMIT ?""",
+                   FROM trades WHERE is_partial = 0 ORDER BY id DESC LIMIT ?""",
                 (limit,),
             )
             return cur.fetchall()
@@ -96,21 +99,26 @@ def get_history(limit: int = 15):
 
 
 def get_stats(days: int = None):
-    """Aggregate stats. days=None → all time."""
+    """Aggregate stats. days=None → all time.
+    Trade counts/wins exclude partial closes; PnL sums include all records."""
     try:
         with sqlite3.connect(DB_PATH) as conn:
             if days:
                 since = (datetime.utcnow() - timedelta(days=days)).isoformat()
                 cur = conn.execute(
-                    """SELECT COUNT(*), SUM(pnl),
-                              SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END)
+                    """SELECT
+                          SUM(CASE WHEN is_partial=0 THEN 1 ELSE 0 END),
+                          SUM(pnl),
+                          SUM(CASE WHEN is_partial=0 AND pnl>0 THEN 1 ELSE 0 END)
                        FROM trades WHERE closed_at >= ?""",
                     (since,),
                 )
             else:
                 cur = conn.execute(
-                    """SELECT COUNT(*), SUM(pnl),
-                              SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END)
+                    """SELECT
+                          SUM(CASE WHEN is_partial=0 THEN 1 ELSE 0 END),
+                          SUM(pnl),
+                          SUM(CASE WHEN is_partial=0 AND pnl>0 THEN 1 ELSE 0 END)
                        FROM trades"""
                 )
             row = cur.fetchone()
@@ -129,38 +137,50 @@ def load_total_pnl() -> float:
 
 
 def get_stats_by_pattern(days: int = None) -> list:
-    """Returns list of (pattern, total, wins, pnl) sorted by total trades."""
+    """Returns list of (pattern, total, wins, pnl) sorted by total trades.
+    Counts only final closes; PnL sums all records for each pattern."""
     try:
         with sqlite3.connect(DB_PATH) as conn:
             if days:
                 since = (datetime.utcnow() - timedelta(days=days)).isoformat()
                 cur = conn.execute(
-                    """SELECT pattern, COUNT(*), SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END), SUM(pnl)
+                    """SELECT pattern,
+                              SUM(CASE WHEN is_partial=0 THEN 1 ELSE 0 END),
+                              SUM(CASE WHEN is_partial=0 AND pnl>0 THEN 1 ELSE 0 END),
+                              SUM(pnl)
                        FROM trades WHERE closed_at >= ? AND pattern != ''
-                       GROUP BY pattern ORDER BY COUNT(*) DESC""",
+                       GROUP BY pattern
+                       ORDER BY SUM(CASE WHEN is_partial=0 THEN 1 ELSE 0 END) DESC""",
                     (since,),
                 )
             else:
                 cur = conn.execute(
-                    """SELECT pattern, COUNT(*), SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END), SUM(pnl)
+                    """SELECT pattern,
+                              SUM(CASE WHEN is_partial=0 THEN 1 ELSE 0 END),
+                              SUM(CASE WHEN is_partial=0 AND pnl>0 THEN 1 ELSE 0 END),
+                              SUM(pnl)
                        FROM trades WHERE pattern != ''
-                       GROUP BY pattern ORDER BY COUNT(*) DESC"""
+                       GROUP BY pattern
+                       ORDER BY SUM(CASE WHEN is_partial=0 THEN 1 ELSE 0 END) DESC"""
                 )
             rows = cur.fetchall()
-        return [(r[0], r[1], r[2] or 0, round(r[3] or 0, 2)) for r in rows]
+        return [(r[0], r[1] or 0, r[2] or 0, round(r[3] or 0, 2)) for r in rows]
     except Exception as e:
         log.error(f"get_stats_by_pattern: {e}")
         return []
 
 
 def get_today_stats() -> dict:
-    """Stats for today (UTC) — used to restore state.day after restart."""
+    """Stats for today (UTC) — used to restore state.day after restart.
+    Counts only final closes; PnL includes all records (partials + final)."""
     try:
         today = datetime.utcnow().date().isoformat() + "T00:00:00"
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.execute(
-                """SELECT COUNT(*), SUM(pnl),
-                          SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)
+                """SELECT
+                      SUM(CASE WHEN is_partial=0 THEN 1 ELSE 0 END),
+                      SUM(pnl),
+                      SUM(CASE WHEN is_partial=0 AND pnl>0 THEN 1 ELSE 0 END)
                    FROM trades WHERE closed_at >= ?""",
                 (today,),
             )
@@ -306,3 +326,22 @@ def load_open_positions() -> list:
         except Exception as e:
             log.error(f"load_open_positions backup: {e}")
     return result
+
+
+# ── Async wrappers (non-blocking for asyncio event loop) ─────────────────────
+
+async def async_save_trade(pos, exit_price: float, pnl: float, result: str,
+                           is_partial: bool = False) -> None:
+    await asyncio.to_thread(save_trade, pos, exit_price, pnl, result, is_partial)
+
+
+async def async_save_kv(key: str, value) -> None:
+    await asyncio.to_thread(save_kv, key, value)
+
+
+async def async_save_open_position(pos) -> None:
+    await asyncio.to_thread(save_open_position, pos)
+
+
+async def async_delete_open_position(symbol: str) -> None:
+    await asyncio.to_thread(delete_open_position, symbol)

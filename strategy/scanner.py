@@ -79,6 +79,49 @@ class Scanner:
         return (price - pos.entry) * pos.qty if pos.side == "LONG" \
                else (pos.entry - price) * pos.qty
 
+    async def _get_close_price(self, pos) -> float:
+        """Return actual fill price for a closed position.
+
+        Checks the known SL/TP order IDs first (fast path), then falls back to
+        recent order history, and finally to the current ticker.
+        """
+        for order_id in (pos.sl_order_id, pos.tp_order_id):
+            if not order_id:
+                continue
+            try:
+                info = await self.ex.get_order(pos.symbol, order_id)
+                if info.get("status") == "FILLED":
+                    avg = float(info.get("avgPrice") or info.get("price") or 0)
+                    if avg > 0:
+                        return avg
+            except Exception:
+                pass
+
+        # Fall back to order history
+        try:
+            since_ms = int(pos.opened_at.timestamp() * 1000)
+            orders = await self.ex.get_all_orders(pos.symbol, start_time_ms=since_ms, limit=30)
+            close_side = "SELL" if pos.side == "LONG" else "BUY"
+            for o in sorted(orders, key=lambda x: x.get("updateTime", 0), reverse=True):
+                if (o.get("status") == "FILLED"
+                        and o.get("side") == close_side
+                        and o.get("positionSide") == pos.side):
+                    avg = float(o.get("avgPrice") or o.get("price") or 0)
+                    if avg > 0:
+                        return avg
+        except Exception as e:
+            log.warning(f"_get_close_price {pos.symbol} order history: {e}")
+
+        # Final fallback: last traded price from ticker
+        try:
+            ticker = await self.ex.get_ticker(pos.symbol)
+            p = float(ticker.get("lastPrice", 0)) if ticker else 0
+            if p > 0:
+                return p
+        except Exception:
+            pass
+        return pos.entry
+
     async def _record_close(self, pos, price: float) -> float:
         """Single entry point for all position-close accounting.
 
@@ -105,7 +148,7 @@ class Scanner:
             if total_trade_pnl >= min_profit:
                 state.day.loss_streak = 0
                 state.day.paused_until = None
-                db.save_kv("paused_until", "")
+                await db.async_save_kv("paused_until", "")
         else:
             state.day.losses += 1
             state.day.loss_streak += 1
@@ -120,23 +163,17 @@ class Scanner:
             else:
                 pause_min = cfg.PAUSE_AFTER_LOSS_MIN
             state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
-            db.save_kv("paused_until", state.day.paused_until.isoformat())
-        try:
-            db.save_trade(pos, price, pnl, result)
-        except Exception as e:
-            log.error(f"db.save_trade {symbol}: {e}")
+            await db.async_save_kv("paused_until", state.day.paused_until.isoformat())
+        await db.async_save_trade(pos, price, pnl, result)
         del state.positions[symbol]
-        db.delete_open_position(symbol)
+        await db.async_delete_open_position(symbol)
         self._stale_alerted.discard(symbol)
         self._funding_warned.discard(symbol)
         if total_trade_pnl <= 0:
             self._loss_cooldown(symbol)
         else:
             self._symbol_loss_streak.pop(symbol, None)
-        try:
-            db.save_kv("loss_streak", str(state.day.loss_streak))
-        except Exception:
-            pass
+        await db.async_save_kv("loss_streak", str(state.day.loss_streak))
         return total_trade_pnl
 
     async def _drought_alert(self, diag: str = "") -> None:
@@ -1103,7 +1140,7 @@ class Scanner:
             state.positions[sig.symbol] = pos
             state.day.trades += 1
             state.pending.pop(sig.symbol, None)
-            db.save_open_position(pos)  # persist for restart recovery
+            await db.async_save_open_position(pos)  # persist for restart recovery
 
             icon = "✅" if confirmed else "🤖"
             await self._notify(
@@ -1183,8 +1220,7 @@ class Scanner:
                         log.info(f"Ручная позиция {symbol} закрыта на бирже — убрана из памяти")
                         continue
                     try:
-                        ticker = await self.ex.get_ticker(symbol)
-                        price = float(ticker.get("lastPrice", pos.entry)) if ticker else pos.entry
+                        price = await self._get_close_price(pos)
                     except Exception as e:
                         log.warning(f"{symbol}: ошибка получения цены при закрытии — P&L посчитан по цене входа: {e}")
                         price = pos.entry
@@ -1230,7 +1266,7 @@ class Scanner:
                     # Remove from state to prevent infinite retry storm every 30s
                     if symbol in state.positions:
                         del state.positions[symbol]
-                        db.delete_open_position(symbol)
+                        await db.async_delete_open_position(symbol)
             elif age_h > 48 and symbol not in self._stale_alerted:
                 self._stale_alerted.add(symbol)
                 auto_close_note = (
@@ -1353,7 +1389,7 @@ class Scanner:
             pos.sl          = be_price
             pos.be_moved    = True
             pos.trail_price = be_price
-            db.save_open_position(pos)  # persist BE state change
+            await db.async_save_open_position(pos)  # persist BE state change
 
             trigger_info = (
                 f"+{cfg.BE_TRIGGER_PCT}% от входа"
@@ -1410,7 +1446,7 @@ class Scanner:
             pos.sl = new_sl
             pos.trail_price = new_trail  # update only after exchange confirms
             log.info(f"Trail SL {pos.symbol} → {new_sl:.4f}")
-            db.save_open_position(pos)
+            await db.async_save_open_position(pos)
         except Exception as e:
             log.error(f"trail_sl {pos.symbol}: {e}")
 
@@ -1443,8 +1479,9 @@ class Scanner:
             try:
                 from dataclasses import replace as dc_replace
                 pos_snap = dc_replace(pos, qty=qty)
-                db.save_trade(pos_snap, close_price, round(partial_pnl, 4),
-                              "WIN" if partial_pnl > 0 else "LOSS")
+                await db.async_save_trade(pos_snap, close_price, round(partial_pnl, 4),
+                                          "WIN" if partial_pnl > 0 else "LOSS",
+                                          is_partial=True)
             except Exception as pe:
                 log.error(f"partial_close db.save_trade {pos.symbol}: {pe}")
 
@@ -1455,7 +1492,7 @@ class Scanner:
                 pos.tp2_hit = True
             # Persist partial_pnl_taken, updated qty, and tp_hit flag immediately — before any
             # further awaits so a crash during SL/TP order management doesn't lose these values.
-            db.save_open_position(pos)
+            await db.async_save_open_position(pos)
             sign = "+" if partial_pnl >= 0 else ""
             if label == "TP1":
                 await self._notify(
@@ -1501,7 +1538,7 @@ class Scanner:
                 else:
                     log.error(f"partial_close {pos.symbol}: TP3 не выставился (код {r.get('code')}) — health_check перевыставит")
 
-            db.save_open_position(pos)  # persist updated qty and tp2_hit flag
+            await db.async_save_open_position(pos)  # persist updated qty and tp2_hit flag
         except Exception as e:
             log.error(f"partial_close {pos.symbol}: {e}")
             try:

@@ -1158,7 +1158,7 @@ class Scanner:
         # Sync with BingX: detect positions closed externally (SL/TP hit on exchange)
         try:
             live = await self.ex.get_open_positions()
-            live_syms = {p.get("symbol") for p in live}
+            live_syms = {p.get("symbol") for p in live if abs(float(p.get("positionAmt", 0))) > 0}
             for symbol, pos in list(state.positions.items()):
                 age = (datetime.utcnow() - pos.opened_at).total_seconds()
                 if age > 60 and symbol not in live_syms:

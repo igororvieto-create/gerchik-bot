@@ -47,6 +47,7 @@ class Scanner:
         self._last_signal_time: datetime | None = None
         self._monitor_count: int = 0
         self._funding_warned: set = set()
+        self._auto_close_failed: set = set()  # symbols where last close_position() failed
         _global_scanner = self
         self._restore_cooldowns()
 
@@ -1226,8 +1227,12 @@ class Scanner:
                     await self.ex.close_position(symbol, pos.qty, pos.side)
                 except Exception as e:
                     log.error(f"{symbol}: ошибка авто-закрытия: {e}")
-                    await self._notify(f"⚠️ Ошибка авто-закрытия {symbol}: {_html.escape(str(e))}")
+                    # Notify only once per failure burst — position stays in state for retry
+                    if symbol not in self._auto_close_failed:
+                        await self._notify(f"⚠️ Ошибка авто-закрытия {symbol}: {_html.escape(str(e))}")
+                        self._auto_close_failed.add(symbol)
                     continue  # позиция остаётся в стейте — следующий цикл повторит попытку
+                self._auto_close_failed.discard(symbol)
                 # close_position succeeded — always record PnL even if notify later fails
                 pnl = await self._record_close(pos, price)
                 sign = "+" if pnl >= 0 else ""
@@ -1663,7 +1668,11 @@ class Scanner:
                                 log.error(f"{symbol}: SL {pos.sl:.4f} за рынком ({mark:.4f}) — аварийное закрытие")
                                 try:
                                     await self.ex.close_position(symbol, pos.qty, pos.side)
-                                    close_px = mark if mark > 0 else pos.entry
+                                    if mark > 0:
+                                        close_px = mark
+                                    else:
+                                        log.warning(f"{symbol}: цена рынка недоступна при аварийном закрытии — PnL приблизительный")
+                                        close_px = pos.entry
                                     pnl = await self._record_close(pos, close_px)
                                     sign = "+" if pnl >= 0 else ""
                                     issues.append(
@@ -1708,7 +1717,11 @@ class Scanner:
                                 log.error(f"{symbol}: SL ОТСУТСТВУЕТ, {pos.sl:.4f} за рынком ({mark:.4f}) — аварийное закрытие")
                                 try:
                                     await self.ex.close_position(symbol, pos.qty, pos.side)
-                                    close_px = mark if mark > 0 else pos.entry
+                                    if mark > 0:
+                                        close_px = mark
+                                    else:
+                                        log.warning(f"{symbol}: цена рынка недоступна при аварийном закрытии — PnL приблизительный")
+                                        close_px = pos.entry
                                     pnl = await self._record_close(pos, close_px)
                                     sign = "+" if pnl >= 0 else ""
                                     issues.append(

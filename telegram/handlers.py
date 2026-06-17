@@ -981,9 +981,16 @@ async def handle_signal_callback(cb: CallbackQuery):
             try:
                 await Scanner(ex, cb.message.bot)._enter(pend["signal"], confirmed=True)
             finally:
-                await ex.close()
+                try:
+                    await ex.close()
+                except Exception:
+                    pass
     except Exception as e:
         log.error(f"confirm callback {symbol}: {e}")
+        try:
+            await cb.message.answer("⚠️ Ошибка входа в позицию", reply_markup=main_keyboard())
+        except Exception:
+            pass
 
 
 # ------------------------------------------------------------------ misc (keyboard buttons + /confirm /skip)
@@ -1067,7 +1074,10 @@ async def handle_misc(msg: Message):
                 try:
                     await Scanner(ex, msg.bot)._enter(pend["signal"], confirmed=True)
                 finally:
-                    await ex.close()
+                    try:
+                        await ex.close()
+                    except Exception:
+                        pass
         except Exception as e:
             log.error(f"confirm {sym}: {e}")
             await msg.answer("⚠️ Ошибка входа в позицию", reply_markup=main_keyboard())

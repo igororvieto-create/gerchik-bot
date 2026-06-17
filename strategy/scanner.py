@@ -50,6 +50,7 @@ class Scanner:
         self._auto_close_failed: set = set()    # symbols where last close_position() failed
         self._auto_close_retries: dict = {}     # symbol → consecutive auto-close failure count
         self._entering: set = set()             # symbols currently in-flight in _enter()
+        self._sl_mark_skip: dict = {}           # symbol → cycles skipped due to mark=0 in health_check
         _global_scanner = self
         self._restore_cooldowns()
 
@@ -82,48 +83,55 @@ class Scanner:
         return (price - pos.entry) * pos.qty if pos.side == "LONG" \
                else (pos.entry - price) * pos.qty
 
-    async def _record_close(self, pos, price: float) -> float:
+    async def _record_close(self, pos, price: float, *, unknown: bool = False) -> float:
         """Single entry point for all position-close accounting.
 
         Updates state, DB, and cooldowns. Returns realised PnL.
         Each call site is responsible only for its own Telegram notification
         and any path-specific logic (e.g. balance refresh, extended-streak alert).
+
+        unknown=True: ticker was unavailable so price is a placeholder (pos.entry).
+        Skip win/loss/loss_streak accounting to prevent phantom stats; save result as UNKNOWN.
         """
         symbol = pos.symbol
         if symbol not in state.positions:
             log.warning(f"_record_close: {symbol} уже удалён из state — двойной вызов предотвращён")
             return 0.0
-        pnl = self._calc_pnl(pos, price)
-        state.total_pnl    += pnl
-        state.day.pnl_usdt += pnl
-        # Use total trade PnL (partials + final) to decide win/loss — prevents a small
-        # SL on the remainder from counting as a loss when TP1+TP2 were already taken.
-        total_trade_pnl = pnl + pos.partial_pnl_taken
-        result = "WIN" if total_trade_pnl > 0 else "LOSS"
-        if total_trade_pnl > 0:
-            state.day.wins += 1
-            # Only reset loss streak on meaningful profit — a breakeven SL (total_pnl ≈ fees)
-            # must not clear the consecutive-loss protection streak.
-            min_profit = max(0.5, pos.risk_usdt * 0.2) if pos.risk_usdt > 0 else 0.5
-            if total_trade_pnl >= min_profit:
-                state.day.loss_streak = 0
-                state.day.paused_until = None
-                db.save_kv("paused_until", "")
-        else:
-            state.day.losses += 1
-            state.day.loss_streak += 1
-            if state.day.loss_streak >= 3:
-                pause_min = cfg.PAUSE_3X_LOSS_MIN
-                if state.day.loss_streak == 3:
-                    await self._notify(
-                        f"⛔ <b>3 убытка подряд</b> — пауза {pause_min} мин\n"
-                        f"Серия: {state.day.loss_streak} | "
-                        f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
-                    )
+        pnl = 0.0
+        total_trade_pnl = 0.0
+        result = "UNKNOWN"
+        if not unknown:
+            pnl = self._calc_pnl(pos, price)
+            state.total_pnl    += pnl
+            state.day.pnl_usdt += pnl
+            # Use total trade PnL (partials + final) to decide win/loss — prevents a small
+            # SL on the remainder from counting as a loss when TP1+TP2 were already taken.
+            total_trade_pnl = pnl + pos.partial_pnl_taken
+            result = "WIN" if total_trade_pnl > 0 else "LOSS"
+            if total_trade_pnl > 0:
+                state.day.wins += 1
+                # Only reset loss streak on meaningful profit — a breakeven SL (total_pnl ≈ fees)
+                # must not clear the consecutive-loss protection streak.
+                min_profit = max(0.5, pos.risk_usdt * 0.2) if pos.risk_usdt > 0 else 0.5
+                if total_trade_pnl >= min_profit:
+                    state.day.loss_streak = 0
+                    state.day.paused_until = None
+                    db.save_kv("paused_until", "")
             else:
-                pause_min = cfg.PAUSE_AFTER_LOSS_MIN
-            state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
-            db.save_kv("paused_until", state.day.paused_until.isoformat())
+                state.day.losses += 1
+                state.day.loss_streak += 1
+                if state.day.loss_streak >= 3:
+                    pause_min = cfg.PAUSE_3X_LOSS_MIN
+                    if state.day.loss_streak == 3:
+                        await self._notify(
+                            f"⛔ <b>3 убытка подряд</b> — пауза {pause_min} мин\n"
+                            f"Серия: {state.day.loss_streak} | "
+                            f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
+                        )
+                else:
+                    pause_min = cfg.PAUSE_AFTER_LOSS_MIN
+                state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
+                db.save_kv("paused_until", state.day.paused_until.isoformat())
         try:
             db.save_trade(pos, price, pnl, result)
         except Exception as e:
@@ -134,14 +142,16 @@ class Scanner:
         self._funding_warned.discard(symbol)
         self._auto_close_failed.discard(symbol)
         self._auto_close_retries.pop(symbol, None)
-        if total_trade_pnl <= 0:
-            self._loss_cooldown(symbol)
-        else:
-            self._symbol_loss_streak.pop(symbol, None)
-        try:
-            db.save_kv("loss_streak", str(state.day.loss_streak))
-        except Exception:
-            pass
+        self._sl_mark_skip.pop(symbol, None)
+        if not unknown:
+            if total_trade_pnl <= 0:
+                self._loss_cooldown(symbol)
+            else:
+                self._symbol_loss_streak.pop(symbol, None)
+            try:
+                db.save_kv("loss_streak", str(state.day.loss_streak))
+            except Exception:
+                pass
         return total_trade_pnl
 
     async def _drought_alert(self, diag: str = "") -> None:
@@ -1227,9 +1237,15 @@ class Scanner:
             age_h = (datetime.utcnow() - pos.opened_at).total_seconds() / 3600
             if cfg.MAX_POSITION_HOURS > 0 and age_h >= cfg.MAX_POSITION_HOURS:
                 log.warning(f"{symbol}: позиция открыта {age_h:.0f}ч — авто-закрытие")
+                _ticker_ok = False
                 try:
                     ticker = await self.ex.get_ticker(symbol)
-                    price = float(ticker.get("lastPrice", pos.entry)) if ticker else pos.entry
+                    _last = float(ticker.get("lastPrice", 0)) if ticker else 0
+                    if _last > 0:
+                        price = _last
+                        _ticker_ok = True
+                    else:
+                        price = pos.entry
                 except Exception as te:
                     log.warning(f"{symbol}: авто-закрытие — тикер недоступен ({te}), PnL по цене входа")
                     price = pos.entry
@@ -1245,13 +1261,21 @@ class Scanner:
                     if retries >= 3:
                         # Exchange keeps refusing — remove from state to free the slot and prevent deadlock.
                         # Position may still be open on exchange; user must close manually.
-                        pnl = await self._record_close(pos, price)
-                        sign = "+" if pnl >= 0 else ""
-                        await self._notify(
-                            f"🚨 <b>Авто-закрытие {symbol} не удалось {retries} раз</b>\n"
-                            f"Позиция удалена из бота — проверь на бирже вручную!\n"
-                            f"PnL приблизительный: <code>{sign}{pnl:.2f} USDT</code>"
-                        )
+                        # When ticker was also unavailable, pass unknown=True to skip phantom loss_streak.
+                        pnl = await self._record_close(pos, price, unknown=not _ticker_ok)
+                        if _ticker_ok:
+                            sign = "+" if pnl >= 0 else ""
+                            await self._notify(
+                                f"🚨 <b>Авто-закрытие {symbol} не удалось {retries} раз</b>\n"
+                                f"Позиция удалена из бота — проверь на бирже вручную!\n"
+                                f"PnL приблизительный: <code>{sign}{pnl:.2f} USDT</code>"
+                            )
+                        else:
+                            await self._notify(
+                                f"🚨 <b>Авто-закрытие {symbol} не удалось {retries} раз</b>\n"
+                                f"Тикер и биржа недоступны — позиция удалена из бота без записи PnL\n"
+                                f"Проверь статус и PnL <b>вручную на бирже</b>!"
+                            )
                     continue  # позиция остаётся в стейте — следующий цикл повторит попытку
                 self._auto_close_failed.discard(symbol)
                 self._auto_close_retries.pop(symbol, None)
@@ -1684,8 +1708,17 @@ class Scanner:
                             mark = float(ticker.get("lastPrice", 0)) if ticker else 0
                             if mark <= 0:
                                 # Ticker unavailable — cannot determine if SL is valid; skip this cycle
-                                log.warning(f"{symbol}: цена недоступна для проверки SL — пропуск до следующего health_check")
-                                issues.append(f"⚠️ {symbol}: не удалось получить цену для проверки SL")
+                                skip_n = self._sl_mark_skip.get(symbol, 0) + 1
+                                self._sl_mark_skip[symbol] = skip_n
+                                log.warning(f"{symbol}: цена недоступна для проверки SL — пропуск {skip_n}")
+                                if skip_n >= 3:
+                                    await self._notify(
+                                        f"🚨 <b>{symbol}: позиция БЕЗ SL уже {skip_n * 15} мин!</b>\n"
+                                        f"Цена BingX недоступна {skip_n} цикла подряд — SL не выставлен\n"
+                                        f"Проверь позицию и SL <b>вручную на бирже</b>!"
+                                    )
+                                else:
+                                    issues.append(f"⚠️ {symbol}: не удалось получить цену для проверки SL (пропуск {skip_n}/3)")
                             elif (pos.side == "LONG" and pos.sl >= mark) or \
                                  (pos.side == "SHORT" and pos.sl <= mark):
                                 log.error(f"{symbol}: SL {pos.sl:.4f} за рынком ({mark:.4f}) — аварийное закрытие")
@@ -1708,6 +1741,7 @@ class Scanner:
                                 if r.get("code") == 0:
                                     pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
                                     db.save_open_position(pos)
+                                    self._sl_mark_skip.pop(symbol, None)
                                     issues.append(f"ℹ️ {symbol}: SL перевыставлен @ {pos.sl:.4f}")
                                 else:
                                     issues.append(
@@ -1729,8 +1763,17 @@ class Scanner:
                             mark = float(ticker.get("lastPrice", 0)) if ticker else 0
                             if mark <= 0:
                                 # Ticker unavailable — cannot determine if SL is valid; skip this cycle
-                                log.warning(f"{symbol}: цена недоступна для проверки SL (пропавший ордер) — пропуск до следующего health_check")
-                                issues.append(f"⚠️ {symbol}: не удалось получить цену для проверки SL (ордер пропал)")
+                                skip_n = self._sl_mark_skip.get(symbol, 0) + 1
+                                self._sl_mark_skip[symbol] = skip_n
+                                log.warning(f"{symbol}: цена недоступна для проверки SL (ордер пропал) — пропуск {skip_n}")
+                                if skip_n >= 3:
+                                    await self._notify(
+                                        f"🚨 <b>{symbol}: SL ордер исчез, цена недоступна уже {skip_n * 15} мин!</b>\n"
+                                        f"BingX не возвращает цену {skip_n} цикла подряд — позиция БЕЗ SL\n"
+                                        f"Проверь позицию и SL <b>вручную на бирже</b>!"
+                                    )
+                                else:
+                                    issues.append(f"⚠️ {symbol}: не удалось получить цену для проверки SL (ордер пропал, пропуск {skip_n}/3)")
                             elif (pos.side == "LONG" and pos.sl >= mark) or \
                                  (pos.side == "SHORT" and pos.sl <= mark):
                                 log.error(f"{symbol}: SL ОТСУТСТВУЕТ, {pos.sl:.4f} за рынком ({mark:.4f}) — аварийное закрытие")
@@ -1753,6 +1796,7 @@ class Scanner:
                                 if r.get("code") == 0:
                                     pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
                                     db.save_open_position(pos)
+                                    self._sl_mark_skip.pop(symbol, None)
                                     issues.append(f"🔄 {symbol}: SL ордер потерялся — перевыставлен @ {pos.sl:.4f}")
                                 else:
                                     issues.append(

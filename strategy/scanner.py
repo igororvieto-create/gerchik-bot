@@ -648,6 +648,9 @@ class Scanner:
     # ------------------------------------------------------------------ enter
 
     async def _enter(self, sig: Signal, confirmed: bool = False, price_checked: bool = False):
+        if sig.symbol in state.positions:
+            log.debug(f"{sig.symbol}: _enter() пропущен — позиция уже открыта")
+            return
         try:
             balance, _avail_margin = await self.ex.get_balance_and_margin()
             if balance <= 0:
@@ -1213,18 +1216,19 @@ class Scanner:
             age_h = (datetime.utcnow() - pos.opened_at).total_seconds() / 3600
             if cfg.MAX_POSITION_HOURS > 0 and age_h >= cfg.MAX_POSITION_HOURS:
                 log.warning(f"{symbol}: позиция открыта {age_h:.0f}ч — авто-закрытие")
-                price = pos.entry
                 try:
                     ticker = await self.ex.get_ticker(symbol)
                     price = float(ticker.get("lastPrice", pos.entry)) if ticker else pos.entry
+                except Exception:
+                    price = pos.entry
+                try:
                     await self.ex.close_position(symbol, pos.qty, pos.side)
                 except Exception as e:
                     log.error(f"{symbol}: ошибка авто-закрытия: {e}")
                     await self._notify(f"⚠️ Ошибка авто-закрытия {symbol}: {_html.escape(str(e))}")
-                    # Remove from state to prevent infinite retry storm every 30s
                     if symbol in state.positions:
                         del state.positions[symbol]
-                        await db.async_delete_open_position(symbol)
+                        db.delete_open_position(symbol)
                     continue
                 # close_position succeeded — always record PnL even if notify later fails
                 pnl = await self._record_close(pos, price)
@@ -1653,7 +1657,7 @@ class Scanner:
                         try:
                             ticker = await self.ex.get_ticker(symbol)
                             mark = float(ticker.get("lastPrice", 0)) if ticker else 0
-                            sl_invalid = mark > 0 and (
+                            sl_invalid = mark <= 0 or (
                                 (pos.side == "LONG" and pos.sl >= mark) or
                                 (pos.side == "SHORT" and pos.sl <= mark)
                             )
@@ -1687,7 +1691,7 @@ class Scanner:
                         try:
                             ticker = await self.ex.get_ticker(symbol)
                             mark = float(ticker.get("lastPrice", 0)) if ticker else 0
-                            sl_invalid = mark > 0 and (
+                            sl_invalid = mark <= 0 or (
                                 (pos.side == "LONG" and pos.sl >= mark) or
                                 (pos.side == "SHORT" and pos.sl <= mark)
                             )

@@ -307,9 +307,11 @@ async def cmd_top(msg: Message):
         return
     await msg.answer("⏳ Получаю топ пары...", reply_markup=main_keyboard())
     from exchange.bingx import BingXClient
-    ex   = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-    syms = await ex.get_top_symbols(20)
-    await ex.close()
+    ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+    try:
+        syms = await ex.get_top_symbols(20)
+    finally:
+        await ex.close()
     lines = ["🏆 <b>Топ 20 пар по объёму:</b>\n"]
     for i, s in enumerate(syms[:20], 1):
         in_bl = "🚫" if s in cfg.BLACKLIST else ""
@@ -627,8 +629,10 @@ async def cmd_setpairs(msg: Message):
             from exchange.bingx import BingXClient
             from strategy.scanner import Scanner
             ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-            await Scanner(ex, msg.bot).update_pairs()
-            await ex.close()
+            try:
+                await Scanner(ex, msg.bot).update_pairs()
+            finally:
+                await ex.close()
         await msg.answer(f"✅ Режим авто, пар: {len(state.pairs)}", reply_markup=main_keyboard())
     else:
         pairs = [p.strip().upper() for p in raw.split(",") if p.strip()]
@@ -732,8 +736,10 @@ async def cmd_scan(msg: Message):
                 from exchange.bingx import BingXClient
                 from strategy.scanner import Scanner
                 ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-                await Scanner(ex, msg.bot).scan_all()
-                await ex.close()
+                try:
+                    await Scanner(ex, msg.bot).scan_all()
+                finally:
+                    await ex.close()
         except Exception as e:
             log.error(f"cmd_scan bg: {e}")
 
@@ -753,6 +759,14 @@ async def _account_manual_close(ex, pos) -> tuple:
     leg_pnl = (close_px - pos.entry) * pos.qty if pos.side == "LONG" \
               else (pos.entry - close_px) * pos.qty
     total_trade_pnl = leg_pnl + pos.partial_pnl_taken
+    result = "WIN" if total_trade_pnl > 0 else "LOSS"
+    # Persist to DB first — if this fails we abort without mutating in-memory state.
+    try:
+        _db.save_trade(pos, close_px, round(leg_pnl, 4), result)
+    except Exception as e:
+        log.warning(f"_account_manual_close db.save_trade {pos.symbol}: {e}")
+        # DB failure — do not update in-memory stats to keep state consistent with DB on restart.
+        return close_px, leg_pnl
     state.total_pnl    += leg_pnl
     state.day.pnl_usdt += leg_pnl
     if total_trade_pnl > 0:
@@ -777,10 +791,6 @@ async def _account_manual_close(ex, pos) -> tuple:
                     )
             except Exception:
                 pass
-    try:
-        _db.save_trade(pos, close_px, round(leg_pnl, 4), "WIN" if total_trade_pnl > 0 else "LOSS")
-    except Exception as e:
-        log.warning(f"_account_manual_close db.save_trade {pos.symbol}: {e}")
     try:
         from strategy.scanner import _global_scanner as _gs
         if _gs:
@@ -825,10 +835,10 @@ async def cmd_closeall(msg: Message):
                         except Exception:
                             pass
             await ex.close_position(sym, amt, side)
-            state.positions.pop(sym, None)  # pop before await — prevents monitor race
             if tracked and tracked.entry > 0:
                 await _account_manual_close(ex, tracked)
-            from core import db as _db; _db.delete_open_position(sym)  # after accounting
+            state.positions.pop(sym, None)
+            from core import db as _db; _db.delete_open_position(sym)
             closed.append(sym)
         except Exception as e:
             log.error(f"closeall {sym}: {e}")
@@ -854,10 +864,10 @@ async def cmd_closeall(msg: Message):
             if not live:
                 # Exchange returned nothing — try to close anyway (position may exist)
                 await ex.close_position(sym, p.qty, p.side)
-            state.positions.pop(sym, None)  # pop before await — prevents monitor race
             if p.entry > 0:
                 await _account_manual_close(ex, p)
-            from core import db as _db; _db.delete_open_position(sym)  # after accounting
+            state.positions.pop(sym, None)
+            from core import db as _db; _db.delete_open_position(sym)
             closed.append(sym)
         except Exception as e:
             log.error(f"closeall ghost {sym}: {e}")

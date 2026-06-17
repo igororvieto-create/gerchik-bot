@@ -453,10 +453,10 @@ class Scanner:
             for _name, _res in (("D1", raw_d1), ("H4", raw_h4), ("H1", raw_h1)):
                 if isinstance(_res, Exception):
                     raise _res
-            # Funding is optional — default to neutral if the endpoint failed
+            # Funding is optional — None means unavailable, skip the filter (pass None to analyze)
             if isinstance(funding, Exception):
-                log.warning(f"{symbol}: funding rate error ({funding!r}) — defaulting 0.0")
-                funding = 0.0
+                log.warning(f"{symbol}: funding rate error ({funding!r}) — funding filter skipped")
+                funding = None
             d1 = parse_klines(raw_d1)
             h4 = parse_klines(raw_h4)
             h1 = parse_klines(raw_h1)
@@ -1162,6 +1162,8 @@ class Scanner:
                 if pos.side not in ("LONG", "SHORT"):
                     continue
                 funding = await self.ex.get_funding_rate(symbol)
+                if funding is None:
+                    continue
                 if pos.side == "LONG" and funding > 0.05:
                     if symbol not in self._funding_warned:
                         self._funding_warned.add(symbol)
@@ -1202,8 +1204,11 @@ class Scanner:
                 if age > 60 and symbol not in live_syms:
                     # Position no longer on exchange — clean up state
                     if pos.sl == 0:
-                        # Manual/synced position — just remove from state, don't track PnL
+                        # Manual/synced position — remove from state and DB, don't track PnL
                         del state.positions[symbol]
+                        db.delete_open_position(symbol)
+                        self._stale_alerted.discard(symbol)
+                        self._funding_warned.discard(symbol)
                         log.info(f"Ручная позиция {symbol} закрыта на бирже — убрана из памяти")
                         continue
                     try:

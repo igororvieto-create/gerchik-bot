@@ -506,12 +506,13 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         return None
 
     # ── Funding rate ──
-    if trend=="LONG"  and funding > cfg.FUNDING_MAX_LONG:
-        _reject("фандинг высокий")
-        return None
-    if trend=="SHORT" and funding < cfg.FUNDING_MAX_SHORT:
-        _reject("фандинг низкий")
-        return None
+    if funding is not None:
+        if trend=="LONG"  and funding > cfg.FUNDING_MAX_LONG:
+            _reject("фандинг высокий")
+            return None
+        if trend=="SHORT" and funding < cfg.FUNDING_MAX_SHORT:
+            _reject("фандинг низкий")
+            return None
 
     buf     = price * cfg.SL_BUFFER_PCT / 100
     atr_sl  = cur_atr * 1.5  # 1.5× ATR gives trade room to breathe vs noise
@@ -574,9 +575,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
                 (trend=="SHORT" and 45 <= cur_rsi <= 58)
     if rsi_ok:    score += 8
     if rsi_ideal: score += 4   # perfect momentum window
-    # Funding
-    if abs(funding) < 0.01:   score += 8
-    elif abs(funding) < 0.02: score += 4
+    # Funding (None when API unavailable — no bonus, no penalty)
+    if funding is not None:
+        if abs(funding) < 0.01:   score += 8
+        elif abs(funding) < 0.02: score += 4
     # D1 slope — aligned with trend direction
     if (trend == "LONG"  and d1_slope > 0.1) or \
        (trend == "SHORT" and d1_slope < -0.1):
@@ -612,7 +614,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         f"🎯 Уровень: <code>{level:.4f}</code> ({touches} кас., свежесть: {touch_age} св.)\n"
         f"📦 Объём: <code>{vrat:.2f}×</code> | RSI: <code>{rsi_str}</code> | "
         f"MACD: {macd_str} | ATR: <code>{atr_str}</code>\n"
-        f"💱 Funding: <code>{funding:.4f}%</code>\n"
+        f"💱 Funding: <code>{funding:.4f}%</code>\n" if funding is not None else "💱 Funding: <code>н/д</code>\n"
         f"🟡 Вход: <code>{price:.4f}</code> | 🔴 SL: <code>{sl:.4f}</code>\n"
         f"🟢 TP2: <code>{tp2:.4f}</code> | TP3: <code>{tp3:.4f}</code>\n"
         f"⚡ R/R: 1:{rr:.1f} | ⭐ Score: {score}/100"
@@ -784,10 +786,11 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         return None
 
     # ── Funding ──
-    if trend == "LONG"  and funding > cfg.FUNDING_MAX_LONG:
-        return None
-    if trend == "SHORT" and funding < cfg.FUNDING_MAX_SHORT:
-        return None
+    if funding is not None:
+        if trend == "LONG"  and funding > cfg.FUNDING_MAX_LONG:
+            return None
+        if trend == "SHORT" and funding < cfg.FUNDING_MAX_SHORT:
+            return None
 
     # ── SL: beyond the false breakout wick extreme ──
     buf = price * cfg.SL_BUFFER_PCT / 100
@@ -1052,10 +1055,11 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         return None
 
     # ── Funding ──
-    if trend == "LONG"  and funding > cfg.FUNDING_MAX_LONG:
-        return None
-    if trend == "SHORT" and funding < cfg.FUNDING_MAX_SHORT:
-        return None
+    if funding is not None:
+        if trend == "LONG"  and funding > cfg.FUNDING_MAX_LONG:
+            return None
+        if trend == "SHORT" and funding < cfg.FUNDING_MAX_SHORT:
+            return None
 
     # ── SL: just inside the broken range boundary ──
     h1_atr_v = atr(h1["high"], h1["low"], h1["close"], 14)
@@ -1250,7 +1254,7 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
 
     # ── Volume: breakout must have 2x+ volume ──
     vm   = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
-    vrat = h1["volume"][-2] / vm[-3] if vm[-3] > 0 else 0
+    vrat = h1["volume"][-2] / vm[-2] if vm[-2] > 0 else 0
     if vrat < 2.0:
         _reject("пробой: объём < 2x")
         return None
@@ -1273,10 +1277,11 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         return None
 
     # ── Funding ──
-    if trend == "LONG"  and funding > cfg.FUNDING_MAX_LONG:
-        return None
-    if trend == "SHORT" and funding < cfg.FUNDING_MAX_SHORT:
-        return None
+    if funding is not None:
+        if trend == "LONG"  and funding > cfg.FUNDING_MAX_LONG:
+            return None
+        if trend == "SHORT" and funding < cfg.FUNDING_MAX_SHORT:
+            return None
 
     # ── SL: just below broken level ──
     buf = price * cfg.SL_BUFFER_PCT / 100

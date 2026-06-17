@@ -139,7 +139,7 @@ class BingXClient:
         try:
             return float(data["data"]["lastFundingRate"]) * 100
         except Exception:
-            return 0.0
+            return None  # None signals "unknown" — callers must skip funding filter, not treat as 0%
 
     async def get_ticker(self, symbol):
         data = await self._get("/openApi/swap/v2/quote/ticker", {"symbol": symbol})

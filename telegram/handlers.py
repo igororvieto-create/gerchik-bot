@@ -969,6 +969,7 @@ async def handle_signal_callback(cb: CallbackQuery):
         pass
     await cb.answer("Входим...")
 
+    state.pending.pop(symbol, None)  # pop before _enter() — prevents duplicate entry on double-tap
     try:
         from strategy.scanner import _global_scanner
         if _global_scanner:
@@ -1052,6 +1053,7 @@ async def handle_misc(msg: Message):
             state.pending.pop(sym, None)
             await msg.answer("⏰ Время подтверждения истекло")
             return
+        state.pending.pop(sym, None)  # pop before _enter() — prevents duplicate entry on double-tap
         from strategy.scanner import _global_scanner
         if _global_scanner:
             await _global_scanner._enter(pend["signal"], confirmed=True)

@@ -1213,24 +1213,27 @@ class Scanner:
             age_h = (datetime.utcnow() - pos.opened_at).total_seconds() / 3600
             if cfg.MAX_POSITION_HOURS > 0 and age_h >= cfg.MAX_POSITION_HOURS:
                 log.warning(f"{symbol}: позиция открыта {age_h:.0f}ч — авто-закрытие")
+                price = pos.entry
                 try:
                     ticker = await self.ex.get_ticker(symbol)
                     price = float(ticker.get("lastPrice", pos.entry)) if ticker else pos.entry
                     await self.ex.close_position(symbol, pos.qty, pos.side)
-                    pnl = await self._record_close(pos, price)
-                    sign = "+" if pnl >= 0 else ""
-                    await self._notify(
-                        f"⏰ {'✅' if pnl > 0 else '❌'} Авто-закрытие | {symbol} {pos.side}\n"
-                        f"Открыта {age_h:.0f}ч (лимит {cfg.MAX_POSITION_HOURS}ч)\n"
-                        f"Цена: <code>{price:.4f}</code> | PnL: <code>{sign}{pnl:.2f} USDT</code>"
-                    )
                 except Exception as e:
                     log.error(f"{symbol}: ошибка авто-закрытия: {e}")
                     await self._notify(f"⚠️ Ошибка авто-закрытия {symbol}: {_html.escape(str(e))}")
                     # Remove from state to prevent infinite retry storm every 30s
                     if symbol in state.positions:
                         del state.positions[symbol]
-                        db.delete_open_position(symbol)
+                        await db.async_delete_open_position(symbol)
+                    continue
+                # close_position succeeded — always record PnL even if notify later fails
+                pnl = await self._record_close(pos, price)
+                sign = "+" if pnl >= 0 else ""
+                await self._notify(
+                    f"⏰ {'✅' if pnl > 0 else '❌'} Авто-закрытие | {symbol} {pos.side}\n"
+                    f"Открыта {age_h:.0f}ч (лимит {cfg.MAX_POSITION_HOURS}ч)\n"
+                    f"Цена: <code>{price:.4f}</code> | PnL: <code>{sign}{pnl:.2f} USDT</code>"
+                )
             elif age_h > 48 and symbol not in self._stale_alerted:
                 self._stale_alerted.add(symbol)
                 auto_close_note = (
@@ -1648,17 +1651,29 @@ class Scanner:
                         # Has SL price but no order ID — try to re-place
                         log.warning(f"{symbol}: нет sl_order_id, перевыставляем SL @ {pos.sl}")
                         try:
-                            side_str = "BUY" if pos.side == "LONG" else "SELL"
-                            r = await self.ex.place_stop_loss(symbol, side_str, pos.qty, pos.sl)
-                            if r.get("code") == 0:
-                                pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
-                                db.save_open_position(pos)
-                                issues.append(f"ℹ️ {symbol}: SL перевыставлен @ {pos.sl:.4f}")
-                            else:
+                            ticker = await self.ex.get_ticker(symbol)
+                            mark = float(ticker.get("lastPrice", 0)) if ticker else 0
+                            sl_invalid = mark > 0 and (
+                                (pos.side == "LONG" and pos.sl >= mark) or
+                                (pos.side == "SHORT" and pos.sl <= mark)
+                            )
+                            if sl_invalid:
                                 issues.append(
-                                    f"⚠️ {symbol}: не удалось перевыставить SL "
-                                    f"(код {r.get('code')})"
+                                    f"⚠️ {symbol}: SL {pos.sl:.4f} за ценой {mark:.4f} — "
+                                    f"перевыставление невозможно, нужна ручная проверка"
                                 )
+                            else:
+                                side_str = "BUY" if pos.side == "LONG" else "SELL"
+                                r = await self.ex.place_stop_loss(symbol, side_str, pos.qty, pos.sl)
+                                if r.get("code") == 0:
+                                    pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
+                                    db.save_open_position(pos)
+                                    issues.append(f"ℹ️ {symbol}: SL перевыставлен @ {pos.sl:.4f}")
+                                else:
+                                    issues.append(
+                                        f"⚠️ {symbol}: не удалось перевыставить SL "
+                                        f"(код {r.get('code')})"
+                                    )
                         except Exception as se:
                             issues.append(f"⚠️ {symbol}: ошибка SL re-place: {_html.escape(str(se))}")
                     continue
@@ -1669,17 +1684,32 @@ class Scanner:
                     if pos.sl_order_id and pos.sl_order_id not in order_ids:
                         # SL order is gone — re-place it
                         log.warning(f"{symbol}: SL ордер {pos.sl_order_id} исчез, перевыставляем")
-                        side_str = "BUY" if pos.side == "LONG" else "SELL"
-                        r = await self.ex.place_stop_loss(symbol, side_str, pos.qty, pos.sl)
-                        if r.get("code") == 0:
-                            pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
-                            db.save_open_position(pos)
-                            issues.append(f"🔄 {symbol}: SL ордер потерялся — перевыставлен @ {pos.sl:.4f}")
-                        else:
-                            issues.append(
-                                f"🚨 {symbol}: SL ОТСУТСТВУЕТ на бирже! "
-                                f"Ошибка перевыставления: код {r.get('code')}"
+                        try:
+                            ticker = await self.ex.get_ticker(symbol)
+                            mark = float(ticker.get("lastPrice", 0)) if ticker else 0
+                            sl_invalid = mark > 0 and (
+                                (pos.side == "LONG" and pos.sl >= mark) or
+                                (pos.side == "SHORT" and pos.sl <= mark)
                             )
+                            if sl_invalid:
+                                issues.append(
+                                    f"🚨 {symbol}: SL ОТСУТСТВУЕТ! SL {pos.sl:.4f} за ценой {mark:.4f} — "
+                                    f"перевыставление невозможно, нужна ручная проверка"
+                                )
+                            else:
+                                side_str = "BUY" if pos.side == "LONG" else "SELL"
+                                r = await self.ex.place_stop_loss(symbol, side_str, pos.qty, pos.sl)
+                                if r.get("code") == 0:
+                                    pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
+                                    db.save_open_position(pos)
+                                    issues.append(f"🔄 {symbol}: SL ордер потерялся — перевыставлен @ {pos.sl:.4f}")
+                                else:
+                                    issues.append(
+                                        f"🚨 {symbol}: SL ОТСУТСТВУЕТ на бирже! "
+                                        f"Ошибка перевыставления: код {r.get('code')}"
+                                    )
+                        except Exception as se:
+                            issues.append(f"⚠️ {symbol}: ошибка проверки SL: {_html.escape(str(se))}")
                 except Exception as oe:
                     log.warning(f"health SL check {symbol}: {oe}")
 

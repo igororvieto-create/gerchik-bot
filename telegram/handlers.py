@@ -987,8 +987,10 @@ async def handle_signal_callback(cb: CallbackQuery):
                     pass
     except Exception as e:
         log.error(f"confirm callback {symbol}: {e}")
+        # Restore pending so user can retry within the expiry window
+        state.pending.setdefault(symbol, pend)
         try:
-            await cb.message.answer("⚠️ Ошибка входа в позицию", reply_markup=main_keyboard())
+            await cb.message.answer("⚠️ Ошибка входа в позицию — попробуй ещё раз", reply_markup=main_keyboard())
         except Exception:
             pass
 
@@ -1080,7 +1082,9 @@ async def handle_misc(msg: Message):
                         pass
         except Exception as e:
             log.error(f"confirm {sym}: {e}")
-            await msg.answer("⚠️ Ошибка входа в позицию", reply_markup=main_keyboard())
+            # Restore pending so user can retry within the expiry window
+            state.pending.setdefault(sym, pend)
+            await msg.answer("⚠️ Ошибка входа в позицию — попробуй ещё раз", reply_markup=main_keyboard())
         return
 
     if text.startswith("/skip_"):

@@ -47,7 +47,9 @@ class Scanner:
         self._last_signal_time: datetime | None = None
         self._monitor_count: int = 0
         self._funding_warned: set = set()
-        self._auto_close_failed: set = set()  # symbols where last close_position() failed
+        self._auto_close_failed: set = set()    # symbols where last close_position() failed
+        self._auto_close_retries: dict = {}     # symbol → consecutive auto-close failure count
+        self._entering: set = set()             # symbols currently in-flight in _enter()
         _global_scanner = self
         self._restore_cooldowns()
 
@@ -130,6 +132,8 @@ class Scanner:
         db.delete_open_position(symbol)
         self._stale_alerted.discard(symbol)
         self._funding_warned.discard(symbol)
+        self._auto_close_failed.discard(symbol)
+        self._auto_close_retries.pop(symbol, None)
         if total_trade_pnl <= 0:
             self._loss_cooldown(symbol)
         else:
@@ -652,6 +656,10 @@ class Scanner:
         if sig.symbol in state.positions:
             log.debug(f"{sig.symbol}: _enter() пропущен — позиция уже открыта")
             return
+        if sig.symbol in self._entering:
+            log.debug(f"{sig.symbol}: _enter() пропущен — параллельный вход уже выполняется")
+            return
+        self._entering.add(sig.symbol)
         try:
             balance, _avail_margin = await self.ex.get_balance_and_margin()
             if balance <= 0:
@@ -1122,6 +1130,8 @@ class Scanner:
         except Exception as e:
             log.error(f"enter {sig.symbol}: {e}")
             await self._notify(f"❌ Ошибка входа {sig.symbol}: {_html.escape(str(e))}")
+        finally:
+            self._entering.discard(sig.symbol)
 
     # ------------------------------------------------------------------ monitor
 
@@ -1227,12 +1237,24 @@ class Scanner:
                     await self.ex.close_position(symbol, pos.qty, pos.side)
                 except Exception as e:
                     log.error(f"{symbol}: ошибка авто-закрытия: {e}")
-                    # Notify only once per failure burst — position stays in state for retry
+                    retries = self._auto_close_retries.get(symbol, 0) + 1
+                    self._auto_close_retries[symbol] = retries
                     if symbol not in self._auto_close_failed:
                         await self._notify(f"⚠️ Ошибка авто-закрытия {symbol}: {_html.escape(str(e))}")
                         self._auto_close_failed.add(symbol)
+                    if retries >= 3:
+                        # Exchange keeps refusing — remove from state to free the slot and prevent deadlock.
+                        # Position may still be open on exchange; user must close manually.
+                        pnl = await self._record_close(pos, price)
+                        sign = "+" if pnl >= 0 else ""
+                        await self._notify(
+                            f"🚨 <b>Авто-закрытие {symbol} не удалось {retries} раз</b>\n"
+                            f"Позиция удалена из бота — проверь на бирже вручную!\n"
+                            f"PnL приблизительный: <code>{sign}{pnl:.2f} USDT</code>"
+                        )
                     continue  # позиция остаётся в стейте — следующий цикл повторит попытку
                 self._auto_close_failed.discard(symbol)
+                self._auto_close_retries.pop(symbol, None)
                 # close_position succeeded — always record PnL even if notify later fails
                 pnl = await self._record_close(pos, price)
                 sign = "+" if pnl >= 0 else ""
@@ -1660,20 +1682,16 @@ class Scanner:
                         try:
                             ticker = await self.ex.get_ticker(symbol)
                             mark = float(ticker.get("lastPrice", 0)) if ticker else 0
-                            sl_invalid = mark <= 0 or (
-                                (pos.side == "LONG" and pos.sl >= mark) or
-                                (pos.side == "SHORT" and pos.sl <= mark)
-                            )
-                            if sl_invalid:
+                            if mark <= 0:
+                                # Ticker unavailable — cannot determine if SL is valid; skip this cycle
+                                log.warning(f"{symbol}: цена недоступна для проверки SL — пропуск до следующего health_check")
+                                issues.append(f"⚠️ {symbol}: не удалось получить цену для проверки SL")
+                            elif (pos.side == "LONG" and pos.sl >= mark) or \
+                                 (pos.side == "SHORT" and pos.sl <= mark):
                                 log.error(f"{symbol}: SL {pos.sl:.4f} за рынком ({mark:.4f}) — аварийное закрытие")
                                 try:
                                     await self.ex.close_position(symbol, pos.qty, pos.side)
-                                    if mark > 0:
-                                        close_px = mark
-                                    else:
-                                        log.warning(f"{symbol}: цена рынка недоступна при аварийном закрытии — PnL приблизительный")
-                                        close_px = pos.entry
-                                    pnl = await self._record_close(pos, close_px)
+                                    pnl = await self._record_close(pos, mark)
                                     sign = "+" if pnl >= 0 else ""
                                     issues.append(
                                         f"🚨 {symbol}: SL за рынком — аварийно закрыто | "
@@ -1709,20 +1727,16 @@ class Scanner:
                         try:
                             ticker = await self.ex.get_ticker(symbol)
                             mark = float(ticker.get("lastPrice", 0)) if ticker else 0
-                            sl_invalid = mark <= 0 or (
-                                (pos.side == "LONG" and pos.sl >= mark) or
-                                (pos.side == "SHORT" and pos.sl <= mark)
-                            )
-                            if sl_invalid:
+                            if mark <= 0:
+                                # Ticker unavailable — cannot determine if SL is valid; skip this cycle
+                                log.warning(f"{symbol}: цена недоступна для проверки SL (пропавший ордер) — пропуск до следующего health_check")
+                                issues.append(f"⚠️ {symbol}: не удалось получить цену для проверки SL (ордер пропал)")
+                            elif (pos.side == "LONG" and pos.sl >= mark) or \
+                                 (pos.side == "SHORT" and pos.sl <= mark):
                                 log.error(f"{symbol}: SL ОТСУТСТВУЕТ, {pos.sl:.4f} за рынком ({mark:.4f}) — аварийное закрытие")
                                 try:
                                     await self.ex.close_position(symbol, pos.qty, pos.side)
-                                    if mark > 0:
-                                        close_px = mark
-                                    else:
-                                        log.warning(f"{symbol}: цена рынка недоступна при аварийном закрытии — PnL приблизительный")
-                                        close_px = pos.entry
-                                    pnl = await self._record_close(pos, close_px)
+                                    pnl = await self._record_close(pos, mark)
                                     sign = "+" if pnl >= 0 else ""
                                     issues.append(
                                         f"🚨 {symbol}: SL ОТСУТСТВУЕТ, цена за SL — аварийно закрыто | "

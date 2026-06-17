@@ -1279,14 +1279,22 @@ class Scanner:
                     continue  # позиция остаётся в стейте — следующий цикл повторит попытку
                 self._auto_close_failed.discard(symbol)
                 self._auto_close_retries.pop(symbol, None)
-                # close_position succeeded — always record PnL even if notify later fails
-                pnl = await self._record_close(pos, price)
-                sign = "+" if pnl >= 0 else ""
-                await self._notify(
-                    f"⏰ {'✅' if pnl > 0 else '❌'} Авто-закрытие | {symbol} {pos.side}\n"
-                    f"Открыта {age_h:.0f}ч (лимит {cfg.MAX_POSITION_HOURS}ч)\n"
-                    f"Цена: <code>{price:.4f}</code> | PnL: <code>{sign}{pnl:.2f} USDT</code>"
-                )
+                # close_position succeeded — pass unknown=True when ticker was unavailable
+                # to prevent phantom loss_streak (price=pos.entry → pnl=0 → spurious LOSS).
+                pnl = await self._record_close(pos, price, unknown=not _ticker_ok)
+                if _ticker_ok:
+                    sign = "+" if pnl >= 0 else ""
+                    await self._notify(
+                        f"⏰ {'✅' if pnl > 0 else '❌'} Авто-закрытие | {symbol} {pos.side}\n"
+                        f"Открыта {age_h:.0f}ч (лимит {cfg.MAX_POSITION_HOURS}ч)\n"
+                        f"Цена: <code>{price:.4f}</code> | PnL: <code>{sign}{pnl:.2f} USDT</code>"
+                    )
+                else:
+                    await self._notify(
+                        f"⏰ Авто-закрытие | {symbol} {pos.side}\n"
+                        f"Открыта {age_h:.0f}ч (лимит {cfg.MAX_POSITION_HOURS}ч)\n"
+                        f"Цена закрытия неизвестна — PnL не записан. Проверь на бирже вручную"
+                    )
             elif age_h > 48 and symbol not in self._stale_alerted:
                 self._stale_alerted.add(symbol)
                 auto_close_note = (
@@ -1711,7 +1719,7 @@ class Scanner:
                                 skip_n = self._sl_mark_skip.get(symbol, 0) + 1
                                 self._sl_mark_skip[symbol] = skip_n
                                 log.warning(f"{symbol}: цена недоступна для проверки SL — пропуск {skip_n}")
-                                if skip_n >= 3:
+                                if skip_n == 3:
                                     await self._notify(
                                         f"🚨 <b>{symbol}: позиция БЕЗ SL уже {skip_n * 15} мин!</b>\n"
                                         f"Цена BingX недоступна {skip_n} цикла подряд — SL не выставлен\n"
@@ -1766,7 +1774,7 @@ class Scanner:
                                 skip_n = self._sl_mark_skip.get(symbol, 0) + 1
                                 self._sl_mark_skip[symbol] = skip_n
                                 log.warning(f"{symbol}: цена недоступна для проверки SL (ордер пропал) — пропуск {skip_n}")
-                                if skip_n >= 3:
+                                if skip_n == 3:
                                     await self._notify(
                                         f"🚨 <b>{symbol}: SL ордер исчез, цена недоступна уже {skip_n * 15} мин!</b>\n"
                                         f"BingX не возвращает цену {skip_n} цикла подряд — позиция БЕЗ SL\n"

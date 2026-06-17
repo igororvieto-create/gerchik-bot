@@ -1219,17 +1219,15 @@ class Scanner:
                 try:
                     ticker = await self.ex.get_ticker(symbol)
                     price = float(ticker.get("lastPrice", pos.entry)) if ticker else pos.entry
-                except Exception:
+                except Exception as te:
+                    log.warning(f"{symbol}: авто-закрытие — тикер недоступен ({te}), PnL по цене входа")
                     price = pos.entry
                 try:
                     await self.ex.close_position(symbol, pos.qty, pos.side)
                 except Exception as e:
                     log.error(f"{symbol}: ошибка авто-закрытия: {e}")
                     await self._notify(f"⚠️ Ошибка авто-закрытия {symbol}: {_html.escape(str(e))}")
-                    if symbol in state.positions:
-                        del state.positions[symbol]
-                        db.delete_open_position(symbol)
-                    continue
+                    continue  # позиция остаётся в стейте — следующий цикл повторит попытку
                 # close_position succeeded — always record PnL even if notify later fails
                 pnl = await self._record_close(pos, price)
                 sign = "+" if pnl >= 0 else ""
@@ -1662,10 +1660,21 @@ class Scanner:
                                 (pos.side == "SHORT" and pos.sl <= mark)
                             )
                             if sl_invalid:
-                                issues.append(
-                                    f"⚠️ {symbol}: SL {pos.sl:.4f} за ценой {mark:.4f} — "
-                                    f"перевыставление невозможно, нужна ручная проверка"
-                                )
+                                log.error(f"{symbol}: SL {pos.sl:.4f} за рынком ({mark:.4f}) — аварийное закрытие")
+                                try:
+                                    await self.ex.close_position(symbol, pos.qty, pos.side)
+                                    close_px = mark if mark > 0 else pos.entry
+                                    pnl = await self._record_close(pos, close_px)
+                                    sign = "+" if pnl >= 0 else ""
+                                    issues.append(
+                                        f"🚨 {symbol}: SL за рынком — аварийно закрыто | "
+                                        f"PnL: <code>{sign}{pnl:.2f} USDT</code>"
+                                    )
+                                except Exception as ce:
+                                    issues.append(
+                                        f"🚨 {symbol}: SL за рынком, аварийное закрытие не удалось: "
+                                        f"{_html.escape(str(ce))}"
+                                    )
                             else:
                                 side_str = "BUY" if pos.side == "LONG" else "SELL"
                                 r = await self.ex.place_stop_loss(symbol, side_str, pos.qty, pos.sl)
@@ -1696,10 +1705,21 @@ class Scanner:
                                 (pos.side == "SHORT" and pos.sl <= mark)
                             )
                             if sl_invalid:
-                                issues.append(
-                                    f"🚨 {symbol}: SL ОТСУТСТВУЕТ! SL {pos.sl:.4f} за ценой {mark:.4f} — "
-                                    f"перевыставление невозможно, нужна ручная проверка"
-                                )
+                                log.error(f"{symbol}: SL ОТСУТСТВУЕТ, {pos.sl:.4f} за рынком ({mark:.4f}) — аварийное закрытие")
+                                try:
+                                    await self.ex.close_position(symbol, pos.qty, pos.side)
+                                    close_px = mark if mark > 0 else pos.entry
+                                    pnl = await self._record_close(pos, close_px)
+                                    sign = "+" if pnl >= 0 else ""
+                                    issues.append(
+                                        f"🚨 {symbol}: SL ОТСУТСТВУЕТ, цена за SL — аварийно закрыто | "
+                                        f"PnL: <code>{sign}{pnl:.2f} USDT</code>"
+                                    )
+                                except Exception as ce:
+                                    issues.append(
+                                        f"🚨 {symbol}: SL ОТСУТСТВУЕТ, цена за SL, аварийное закрытие не удалось: "
+                                        f"{_html.escape(str(ce))}"
+                                    )
                             else:
                                 side_str = "BUY" if pos.side == "LONG" else "SELL"
                                 r = await self.ex.place_stop_loss(symbol, side_str, pos.qty, pos.sl)

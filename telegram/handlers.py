@@ -978,8 +978,10 @@ async def handle_signal_callback(cb: CallbackQuery):
             from exchange.bingx import BingXClient
             from strategy.scanner import Scanner
             ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-            await Scanner(ex, cb.message.bot)._enter(pend["signal"], confirmed=True)
-            await ex.close()
+            try:
+                await Scanner(ex, cb.message.bot)._enter(pend["signal"], confirmed=True)
+            finally:
+                await ex.close()
     except Exception as e:
         log.error(f"confirm callback {symbol}: {e}")
 
@@ -1054,15 +1056,21 @@ async def handle_misc(msg: Message):
             await msg.answer("⏰ Время подтверждения истекло")
             return
         state.pending.pop(sym, None)  # pop before _enter() — prevents duplicate entry on double-tap
-        from strategy.scanner import _global_scanner
-        if _global_scanner:
-            await _global_scanner._enter(pend["signal"], confirmed=True)
-        else:
-            from exchange.bingx import BingXClient
-            from strategy.scanner import Scanner
-            ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-            await Scanner(ex, msg.bot)._enter(pend["signal"], confirmed=True)
-            await ex.close()
+        try:
+            from strategy.scanner import _global_scanner
+            if _global_scanner:
+                await _global_scanner._enter(pend["signal"], confirmed=True)
+            else:
+                from exchange.bingx import BingXClient
+                from strategy.scanner import Scanner
+                ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+                try:
+                    await Scanner(ex, msg.bot)._enter(pend["signal"], confirmed=True)
+                finally:
+                    await ex.close()
+        except Exception as e:
+            log.error(f"confirm {sym}: {e}")
+            await msg.answer("⚠️ Ошибка входа в позицию", reply_markup=main_keyboard())
         return
 
     if text.startswith("/skip_"):

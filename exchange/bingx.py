@@ -3,7 +3,7 @@ import hashlib
 import hmac
 import logging
 import time
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 import aiohttp
@@ -17,12 +17,12 @@ _RETRIES = 3
 
 
 class BingXClient:
-    def __init__(self, api_key, secret):
+    def __init__(self, api_key: str, secret: str) -> None:
         self.api_key = api_key
         self.secret  = secret
         self._session: Optional[aiohttp.ClientSession] = None
 
-    async def _sess(self):
+    async def _sess(self) -> aiohttp.ClientSession:
         if self._session and not self._session.closed:
             return self._session
         if self._session:
@@ -33,14 +33,16 @@ class BingXClient:
         self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
         return self._session
 
-    def _sign(self, params):
+    def _sign(self, params: Dict[str, Any]) -> str:
         params["timestamp"] = int(time.time() * 1000)
         query = urlencode(sorted(params.items()))
         sig = hmac.new(self.secret.encode(), query.encode(), hashlib.sha256).hexdigest()
         return query + "&signature=" + sig
 
-    async def _get(self, path, params=None, signed=False):
+    async def _get(self, path: str, params: Optional[Dict[str, Any]] = None,
+                   signed: bool = False) -> Dict[str, Any]:
         params = params or {}
+        url = ""
         if not signed:
             url = f"{BASE}{path}" + ("?" + urlencode(params) if params else "")
         headers = {"X-BX-APIKEY": self.api_key}
@@ -61,15 +63,16 @@ class BingXClient:
                     data = await r.json()
                     if data.get("code") != 0:
                         log.error(f"GET {path}: {data}")
-                    return data
+                    return data  # type: ignore[no-any-return]
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 if attempt == _RETRIES - 1:
                     raise
                 log.warning(f"GET {path} attempt {attempt+1} failed: {e}, retry in {delay}s")
                 await asyncio.sleep(delay)
                 delay *= 2
+        return {}
 
-    async def _post(self, path, params):
+    async def _post(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         headers = {
             "X-BX-APIKEY": self.api_key,
             "Content-Type": "application/x-www-form-urlencoded",
@@ -90,22 +93,23 @@ class BingXClient:
                     data = await r.json()
                     if data.get("code") != 0:
                         log.error(f"POST {path}: {data}")
-                    return data
+                    return data  # type: ignore[no-any-return]
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 if attempt == _RETRIES - 1:
                     raise
                 log.warning(f"POST {path} attempt {attempt+1} failed: {e}, retry in {delay}s")
                 await asyncio.sleep(delay)
                 delay *= 2
+        return {}
 
-    async def get_top_symbols(self, n=0):
+    async def get_top_symbols(self, n: int = 0) -> List[str]:
         data = await self._get("/openApi/swap/v2/quote/ticker", {"symbol": ""})
         tickers = data.get("data", [])
         if isinstance(tickers, dict):
             tickers = [tickers]
 
         MIN_VOLUME_USDT = 5_000_000  # skip illiquid coins (< $5M/day)
-        scored = []
+        scored: List[Tuple[str, float]] = []
         for t in tickers:
             sym = t.get("symbol", "")
             if "USDT" not in sym:
@@ -129,29 +133,30 @@ class BingXClient:
         symbols = [s for s, _ in scored]
         return symbols[:n] if n > 0 else symbols
 
-    async def get_klines(self, symbol, interval, limit=200):
+    async def get_klines(self, symbol: str, interval: str,
+                         limit: int = 200) -> List[Any]:
         data = await self._get("/openApi/swap/v3/quote/klines",
                                {"symbol": symbol, "interval": interval, "limit": limit})
         return data.get("data", []) or []
 
-    async def get_funding_rate(self, symbol):
+    async def get_funding_rate(self, symbol: str) -> Optional[float]:
         data = await self._get("/openApi/swap/v2/quote/premiumIndex", {"symbol": symbol})
         try:
             return float(data["data"]["lastFundingRate"]) * 100
         except Exception:
             return None  # None signals "unknown" — callers must skip funding filter, not treat as 0%
 
-    async def get_ticker(self, symbol):
+    async def get_ticker(self, symbol: str) -> Dict[str, Any]:
         data = await self._get("/openApi/swap/v2/quote/ticker", {"symbol": symbol})
         tickers = data.get("data", [])
         if isinstance(tickers, list):
             for t in tickers:
                 if t.get("symbol") == symbol:
-                    return t
-        return tickers if isinstance(tickers, dict) else {}
+                    return t  # type: ignore[no-any-return]
+        return tickers if isinstance(tickers, dict) else {}  # type: ignore[return-value]
 
     @staticmethod
-    def _parse_balance_data(d: dict) -> tuple:
+    def _parse_balance_data(d: Dict[str, Any]) -> Tuple[float, float]:
         """Parse BingX /user/balance data dict → (balance, available_margin).
 
         Handles all 3 API response shapes:
@@ -201,7 +206,7 @@ class BingXClient:
 
         return balance, avail
 
-    async def get_balance(self):
+    async def get_balance(self) -> float:
         data = await self._get("/openApi/swap/v2/user/balance", {}, signed=True)
         try:
             balance, _ = self._parse_balance_data(data.get("data", {}))
@@ -210,11 +215,11 @@ class BingXClient:
             log.error(f"get_balance parse error: {e} | response: {data}")
         return 0.0
 
-    async def get_balance_raw(self):
+    async def get_balance_raw(self) -> Dict[str, Any]:
         """Returns the raw API response for debugging."""
         return await self._get("/openApi/swap/v2/user/balance", {}, signed=True)
 
-    async def get_balance_and_margin(self) -> tuple:
+    async def get_balance_and_margin(self) -> Tuple[float, float]:
         """Returns (equity/balance, available_margin) in a single API call."""
         data = await self._get("/openApi/swap/v2/user/balance", {}, signed=True)
         try:
@@ -223,7 +228,7 @@ class BingXClient:
             log.error(f"get_balance_and_margin parse error: {e} | response: {data}")
         return 0.0, 0.0
 
-    async def get_available_margin(self):
+    async def get_available_margin(self) -> float:
         """Returns available (free) margin for new positions."""
         data = await self._get("/openApi/swap/v2/user/balance", {}, signed=True)
         try:
@@ -233,7 +238,7 @@ class BingXClient:
             log.error(f"get_available_margin error: {e}")
         return 0.0
 
-    async def get_open_positions(self):
+    async def get_open_positions(self) -> List[Dict[str, Any]]:
         data = await self._get("/openApi/swap/v2/user/positions", {}, signed=True)
         try:
             positions = data.get("data", [])
@@ -244,10 +249,11 @@ class BingXClient:
             log.error(f"get_open_positions error: {e}")
             return []
 
-    async def place_order(self, symbol, side, qty, price=0,
-                          order_type="MARKET", position_side="LONG",
-                          stop_price=0, reduce_only=False):
-        params = {
+    async def place_order(self, symbol: str, side: str, qty: float,
+                          price: float = 0, order_type: str = "MARKET",
+                          position_side: str = "LONG", stop_price: float = 0,
+                          reduce_only: bool = False) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
             "symbol": symbol, "side": side,
             "positionSide": position_side, "type": order_type, "quantity": qty,
         }
@@ -260,7 +266,7 @@ class BingXClient:
             params["reduceOnly"] = "true"
         return await self._post("/openApi/swap/v2/trade/order", params)
 
-    async def get_order(self, symbol: str, order_id: str) -> dict:
+    async def get_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
         """Return order status dict. Fields: status, executedQty, avgPrice."""
         data = await self._get(
             "/openApi/swap/v2/trade/order",
@@ -270,12 +276,13 @@ class BingXClient:
         try:
             inner = data.get("data", {})
             if isinstance(inner, dict):
-                return inner.get("order", inner)
+                return inner.get("order", inner)  # type: ignore[return-value]
             return {}
         except Exception:
             return {}
 
-    async def place_stop_loss(self, symbol, side, qty, stop_price):
+    async def place_stop_loss(self, symbol: str, side: str, qty: float,
+                              stop_price: float) -> Dict[str, Any]:
         ps = "LONG" if side == "BUY" else "SHORT"
         cs = "SELL" if ps == "LONG" else "BUY"
         return await self._post("/openApi/swap/v2/trade/order", {
@@ -284,7 +291,8 @@ class BingXClient:
             "stopPrice": stop_price, "workingType": "MARK_PRICE",
         })
 
-    async def place_take_profit(self, symbol, side, qty, tp_price):
+    async def place_take_profit(self, symbol: str, side: str, qty: float,
+                                tp_price: float) -> Dict[str, Any]:
         ps = "LONG" if side == "BUY" else "SHORT"
         cs = "SELL" if ps == "LONG" else "BUY"
         return await self._post("/openApi/swap/v2/trade/order", {
@@ -293,11 +301,12 @@ class BingXClient:
             "stopPrice": tp_price, "workingType": "MARK_PRICE",
         })
 
-    async def cancel_order(self, symbol, order_id):
+    async def cancel_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
         return await self._post("/openApi/swap/v2/trade/cancelOrder",
                                 {"symbol": symbol, "orderId": order_id})
 
-    async def close_position(self, symbol, qty, side):
+    async def close_position(self, symbol: str, qty: float,
+                             side: str) -> Dict[str, Any]:
         cs = "SELL" if side == "LONG" else "BUY"
         ps = side if side in ("LONG", "SHORT") else "LONG"
         # В hedge mode (positionSide=LONG/SHORT) reduceOnly не нужен
@@ -309,7 +318,7 @@ class BingXClient:
             raise RuntimeError(f"close_position failed: {result}")
         return result
 
-    async def set_leverage(self, symbol, leverage) -> bool:
+    async def set_leverage(self, symbol: str, leverage: int) -> bool:
         """Returns True if leverage was set successfully on both sides."""
         ok = True
         for side in ("LONG", "SHORT"):
@@ -322,7 +331,7 @@ class BingXClient:
                     ok = False
         return ok
 
-    async def set_margin_type(self, symbol):
+    async def set_margin_type(self, symbol: str) -> None:
         """Set isolated margin mode for both sides."""
         for side in ("LONG", "SHORT"):
             try:
@@ -331,7 +340,7 @@ class BingXClient:
             except Exception as e:
                 log.debug(f"set_margin_type {symbol} {side}: {e}")
 
-    async def get_orderbook(self, symbol: str, limit: int = 100) -> dict:
+    async def get_orderbook(self, symbol: str, limit: int = 100) -> Dict[str, Any]:
         """Fetch order book snapshot. Public endpoint, no auth required."""
         allowed = {5, 10, 20, 50, 100, 500, 1000}
         if limit not in allowed:
@@ -339,7 +348,7 @@ class BingXClient:
         return await self._get("/openApi/swap/v2/quote/depth",
                                {"symbol": symbol, "limit": limit})
 
-    async def get_open_orders(self, symbol: str) -> list:
+    async def get_open_orders(self, symbol: str) -> List[Dict[str, Any]]:
         """Returns list of open orders for a symbol (pending SL/TP on exchange)."""
         data = await self._get("/openApi/swap/v2/trade/openOrders",
                                {"symbol": symbol}, signed=True)
@@ -352,6 +361,6 @@ class BingXClient:
             log.error(f"get_open_orders {symbol}: {e}")
             return []
 
-    async def close(self):
+    async def close(self) -> None:
         if self._session:
             await self._session.close()

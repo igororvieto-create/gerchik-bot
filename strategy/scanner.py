@@ -461,7 +461,7 @@ class Scanner:
             h4 = parse_klines(raw_h4)
             h1 = parse_klines(raw_h1)
 
-            if funding > 0.1 or funding < -0.1:
+            if funding is not None and (funding > 0.1 or funding < -0.1):
                 log.warning(f"⚠️ Экстремальный фандинг {symbol}: {funding:.4f}%")
 
             # Pre-compute D1 levels once — reused by all 4 analyze functions
@@ -1209,6 +1209,8 @@ class Scanner:
                         db.delete_open_position(symbol)
                         self._stale_alerted.discard(symbol)
                         self._funding_warned.discard(symbol)
+                        self._auto_close_failed.discard(symbol)
+                        self._auto_close_retries.pop(symbol, None)
                         log.info(f"Ручная позиция {symbol} закрыта на бирже — убрана из памяти")
                         continue
                     try:
@@ -1997,6 +1999,8 @@ class Scanner:
         async def _fetch(symbol):
             try:
                 rate = await self.ex.get_funding_rate(symbol)
+                if rate is None:
+                    return None
                 return (symbol, rate)
             except Exception:
                 return None

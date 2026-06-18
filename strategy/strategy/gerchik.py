@@ -606,6 +606,8 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     rsi_str  = f"{cur_rsi:.0f}"
     atr_str  = f"{cur_atr:.4f}"
     macd_str = "🟢" if macd_aligned else "⚪"
+    funding_line = (f"💱 Funding: <code>{funding:.4f}%</code>\n"
+                    if funding is not None else "💱 Funding: <code>н/д</code>\n")
     reason  = (
         f"📊 <b>{symbol}</b> | {trend}\n"
         f"🕯 H1: {pname} | H4: {h4p if h4ok else '—'}\n"
@@ -614,8 +616,8 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         f"🎯 Уровень: <code>{level:.4f}</code> ({touches} кас., свежесть: {touch_age} св.)\n"
         f"📦 Объём: <code>{vrat:.2f}×</code> | RSI: <code>{rsi_str}</code> | "
         f"MACD: {macd_str} | ATR: <code>{atr_str}</code>\n"
-        f"💱 Funding: <code>{funding:.4f}%</code>\n" if funding is not None else "💱 Funding: <code>н/д</code>\n"
-        f"🟡 Вход: <code>{price:.4f}</code> | 🔴 SL: <code>{sl:.4f}</code>\n"
+        + funding_line
+        + f"🟡 Вход: <code>{price:.4f}</code> | 🔴 SL: <code>{sl:.4f}</code>\n"
         f"🟢 TP2: <code>{tp2:.4f}</code> | TP3: <code>{tp3:.4f}</code>\n"
         f"⚡ R/R: 1:{rr:.1f} | ⭐ Score: {score}/100"
     )

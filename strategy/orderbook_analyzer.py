@@ -162,6 +162,15 @@ def compute_metrics(
         )
 
     mid = snapshot.mid_price
+    if mid is None or snapshot.best_ask is None or snapshot.best_bid is None:
+        return OrderbookMetrics(
+            symbol=snapshot.symbol,
+            mid_price=0, spread_bps=0,
+            imbalance_1pct=0, imbalance_3pct=0,
+            depth_bids_1pct_usdt=0, depth_asks_1pct_usdt=0,
+            depth_total_1pct_usdt=0,
+            is_valid=False,
+        )
     spread_bps = (snapshot.best_ask - snapshot.best_bid) / mid * 10_000
 
     bids_1pct = _depth_in_range(snapshot.bids, mid, 1.0, "bid")

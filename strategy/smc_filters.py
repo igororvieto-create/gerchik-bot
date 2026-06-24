@@ -286,7 +286,7 @@ def evaluate_smc(
     details["htf_ob"] = (
         {"high": ob.high, "low": ob.low, "ts": ob.ts, "in_zone": ob_in_zone} if ob else None
     )
-    if ob_in_zone:
+    if ob_in_zone and ob is not None:
         score_bonus += SCORE_HTF_OB_CONFLUENCE
         reasons.append(f"D1 OB [{ob.low:.6g}–{ob.high:.6g}] +{SCORE_HTF_OB_CONFLUENCE}")
 

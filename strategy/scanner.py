@@ -2088,7 +2088,7 @@ class Scanner:
             except Exception:
                 return None
 
-        results = []
+        results: list[tuple[str, float]] = []
         for i in range(0, len(pairs), BATCH):
             batch = pairs[i:i + BATCH]
             fetched = await asyncio.gather(*[_fetch(s) for s in batch])

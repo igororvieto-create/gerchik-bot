@@ -5,6 +5,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 log = logging.getLogger("db")
 DB_PATH = Path(os.getenv("DB_PATH", "data/gerchik.db"))
@@ -108,7 +109,7 @@ def get_history(limit: int = 15):
         return []
 
 
-def get_stats(days: int = None):
+def get_stats(days: Optional[int] = None):
     """Aggregate stats. days=None → all time.
     Trade counts/wins exclude partial closes; PnL sums include all records."""
     try:
@@ -146,7 +147,7 @@ def load_total_pnl() -> float:
     return get_stats()["pnl"]
 
 
-def get_stats_by_pattern(days: int = None) -> list:
+def get_stats_by_pattern(days: Optional[int] = None) -> list:
     """Returns list of (pattern, total, wins, pnl) sorted by total trades.
     Counts only final closes; PnL sums all records for each pattern."""
     try:

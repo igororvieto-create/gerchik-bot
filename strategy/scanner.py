@@ -51,6 +51,7 @@ class Scanner:
         self._auto_close_retries: dict = {}     # symbol → consecutive auto-close failure count
         self._entering: set = set()             # symbols currently in-flight in _enter()
         self._sl_mark_skip: dict = {}           # symbol → cycles skipped due to mark=0 in health_check
+        self._being_closed: set = set()         # symbols for which close_position is in-flight (dedup guard)
         _global_scanner = self
         self._restore_cooldowns()
 
@@ -198,6 +199,7 @@ class Scanner:
         self._auto_close_failed.discard(symbol)
         self._auto_close_retries.pop(symbol, None)
         self._sl_mark_skip.pop(symbol, None)
+        self._being_closed.discard(symbol)
         if not unknown:
             if total_trade_pnl <= 0:
                 await self._loss_cooldown(symbol)
@@ -879,6 +881,8 @@ class Scanner:
                 try:
                     ticker = await self.ex.get_ticker(sig.symbol)
                     cur_price = float(ticker.get("lastPrice", sig.entry))
+                    if cur_price <= 0:
+                        cur_price = sig.entry
                     drift = abs(cur_price - sig.entry) / sig.entry * 100
                     _drift_mul = cfg.PRICE_DRIFT_PCT / 100
                     against = (sig.side == "LONG"  and cur_price < sig.entry * (1 - _drift_mul)) or \
@@ -1307,9 +1311,13 @@ class Scanner:
                 except Exception as te:
                     log.warning(f"{symbol}: авто-закрытие — тикер недоступен ({te}), PnL по цене входа")
                     price = pos.entry
+                if symbol in self._being_closed:
+                    continue
+                self._being_closed.add(symbol)
                 try:
                     await self.ex.close_position(symbol, pos.qty, pos.side)
                 except Exception as e:
+                    self._being_closed.discard(symbol)
                     log.error(f"{symbol}: ошибка авто-закрытия: {e}")
                     retries = self._auto_close_retries.get(symbol, 0) + 1
                     self._auto_close_retries[symbol] = retries
@@ -1602,8 +1610,11 @@ class Scanner:
                 pos.sl_order_id = ""
                 try:
                     await self.ex.cancel_order(pos.symbol, old_sl_id)
-                except Exception:
-                    pass  # already filled or cancelled
+                except Exception as e:
+                    # Log the failure: if old SL is still live + new SL is placed below,
+                    # there will be two concurrent SL orders on the exchange.
+                    log.warning(f"{pos.symbol}: cancel old SL ({old_sl_id}) failed in _partial_close: {e} — "
+                                f"placing new SL anyway; health_check will verify open orders")
                 try:
                     r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, pos.sl)
                     pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
@@ -1789,6 +1800,10 @@ class Scanner:
                             elif (pos.side == "LONG" and pos.sl >= mark) or \
                                  (pos.side == "SHORT" and pos.sl <= mark):
                                 log.error(f"{symbol}: SL {pos.sl:.4f} за рынком ({mark:.4f}) — аварийное закрытие")
+                                if symbol in self._being_closed:
+                                    issues.append(f"ℹ️ {symbol}: закрытие уже выполняется — пропуск дублирования")
+                                    continue
+                                self._being_closed.add(symbol)
                                 try:
                                     await self.ex.close_position(symbol, pos.qty, pos.side)
                                     pnl = await self._record_close(pos, mark)
@@ -1844,6 +1859,10 @@ class Scanner:
                             elif (pos.side == "LONG" and pos.sl >= mark) or \
                                  (pos.side == "SHORT" and pos.sl <= mark):
                                 log.error(f"{symbol}: SL ОТСУТСТВУЕТ, {pos.sl:.4f} за рынком ({mark:.4f}) — аварийное закрытие")
+                                if symbol in self._being_closed:
+                                    issues.append(f"ℹ️ {symbol}: закрытие уже выполняется — пропуск дублирования")
+                                    continue
+                                self._being_closed.add(symbol)
                                 try:
                                     await self.ex.close_position(symbol, pos.qty, pos.side)
                                     pnl = await self._record_close(pos, mark)
@@ -1954,16 +1973,23 @@ class Scanner:
             log.error(f"periodic_report: {e}")
 
     async def daily_report(self):
-        state.reset_day()  # ensure we report on the correct UTC day
-        d  = state.day
-        wr = round(d.wins / d.trades * 100) if d.trades else 0
-        sign = "+" if d.pnl_usdt >= 0 else ""
+        # Snapshot yesterday's stats BEFORE reset_day() zeroes the counters
+        d_prev     = state.day
+        wins       = d_prev.wins
+        losses     = d_prev.losses
+        trades     = d_prev.trades
+        pnl_usdt   = d_prev.pnl_usdt
+        report_date = d_prev.date
+        total_pnl_snap = state.total_pnl
+        state.reset_day()  # advance to new day
+        wr   = round(wins / trades * 100) if trades else 0
+        sign = "+" if pnl_usdt >= 0 else ""
         await self._notify(
-            f"📋 <b>Дневной отчёт</b> {d.date}\n\n"
-            f"Сделок: {d.trades}  |  WR: {wr}%\n"
-            f"Прибыльных: {d.wins}  |  Убыточных: {d.losses}\n"
-            f"PnL: <code>{sign}{d.pnl_usdt:.2f} USDT</code>\n"
-            f"Итого всего: <code>{'+' if state.total_pnl >= 0 else ''}{state.total_pnl:.2f} USDT</code>"
+            f"📋 <b>Дневной отчёт</b> {report_date}\n\n"
+            f"Сделок: {trades}  |  WR: {wr}%\n"
+            f"Прибыльных: {wins}  |  Убыточных: {losses}\n"
+            f"PnL: <code>{sign}{pnl_usdt:.2f} USDT</code>\n"
+            f"Итого всего: <code>{'+' if total_pnl_snap >= 0 else ''}{total_pnl_snap:.2f} USDT</code>"
         )
 
     async def weekly_report(self):

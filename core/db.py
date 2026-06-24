@@ -349,6 +349,10 @@ async def async_save_kv(key: str, value) -> None:
     await asyncio.to_thread(save_kv, key, value)
 
 
+async def async_save_cfg_value(key: str, value) -> None:
+    await asyncio.to_thread(save_cfg_value, key, value)
+
+
 async def async_save_open_position(pos) -> None:
     await asyncio.to_thread(save_open_position, pos)
 

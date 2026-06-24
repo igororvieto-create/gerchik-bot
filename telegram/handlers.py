@@ -12,6 +12,7 @@ from aiogram.types import (
     KeyboardButton,
 )
 
+from core import db
 from core.config import cfg
 from core.state import state
 
@@ -72,7 +73,7 @@ async def cmd_debug(msg: Message):
             f"🔧 <b>Диагностика баланса</b>\n\n"
             f"Распознанный баланс: <code>{bal:.4f} USDT</code>\n\n"
             f"Сырой ответ API:\n"
-            f"<pre>{json.dumps(raw, ensure_ascii=False, indent=2)[:1000]}</pre>"
+            f"<pre>{_html.escape(json.dumps(raw, ensure_ascii=False, indent=2)[:1000])}</pre>"
         )
     except Exception as e:
         text = f"❌ Ошибка API: <code>{_html.escape(str(e))}</code>"
@@ -155,7 +156,7 @@ async def cmd_status(msg: Message):
             be_tag  = " ✅BE" if pos.be_moved else ""
             t1_tag  = " 🎯TP1" if pos.tp1_hit else ""
             text += (
-                f"<b>{sym}</b> {pos.side}{be_tag}{t1_tag} | ⭐{pos.score} | {pos.pattern}\n"
+                f"<b>{_html.escape(sym)}</b> {_html.escape(pos.side)}{be_tag}{t1_tag} | ⭐{pos.score} | {_html.escape(pos.pattern)}\n"
                 f"Вход: <code>{pos.entry:.4f}</code> | {age_h}ч\n"
                 f"🔴 SL: <code>{pos.sl:.4f}</code> ({sl_dist} до стопа)\n"
                 f"🟡 TP2: <code>{pos.tp2:.4f}</code> ({tp_dist} до TP2)\n"
@@ -341,7 +342,7 @@ async def cmd_setminpos(msg: Message):
         if v < 1 or v > 10000:
             raise ValueError
         cfg.MIN_POSITION_USDT = v
-        from core import db; db.save_cfg_value("MIN_POSITION_USDT", v)
+        await db.async_save_cfg_value("MIN_POSITION_USDT", v)
         await msg.answer(
             f"✅ Мин. позиция: <code>{v} USDT</code>",
             parse_mode="HTML",
@@ -367,7 +368,7 @@ async def cmd_setmaxpos(msg: Message):
         if v < 1 or v > 20:
             raise ValueError
         cfg.MAX_POSITIONS = v
-        from core import db; db.save_cfg_value("MAX_POSITIONS", v)
+        await db.async_save_cfg_value("MAX_POSITIONS", v)
         await msg.answer(
             f"✅ Макс. позиций: <code>{v}</code>",
             parse_mode="HTML",
@@ -394,7 +395,7 @@ async def cmd_settrail(msg: Message):
         if v < 0.1 or v > 10:
             raise ValueError
         cfg.TRAIL_PCT = v
-        from core import db; db.save_cfg_value("TRAIL_PCT", v)
+        await db.async_save_cfg_value("TRAIL_PCT", v)
         await msg.answer(
             f"✅ Трейлинг стоп: <code>{v}%</code>",
             parse_mode="HTML",
@@ -426,7 +427,7 @@ async def cmd_setbe(msg: Message):
         if v < 0 or v > 10:
             raise ValueError
         cfg.BE_TRIGGER_PCT = v
-        from core import db; db.save_cfg_value("BE_TRIGGER_PCT", v)
+        await db.async_save_cfg_value("BE_TRIGGER_PCT", v)
         mode = f"+{v}% от входа" if v > 0 else "TP1"
         await msg.answer(
             f"✅ Безубыток теперь переставляется при {mode}",
@@ -453,7 +454,7 @@ async def cmd_setmaxrisk(msg: Message):
         if v < 1 or v > 10000:
             raise ValueError
         cfg.MAX_RISK_USDT = v
-        from core import db; db.save_cfg_value("MAX_RISK_USDT", v)
+        await db.async_save_cfg_value("MAX_RISK_USDT", v)
         await msg.answer(
             f"✅ Макс. риск: <code>{v} USDT</code> на сделку",
             parse_mode="HTML",
@@ -480,7 +481,7 @@ async def cmd_setminscore(msg: Message):
         if v < 40 or v > 95:
             raise ValueError
         cfg.MIN_SCORE = v
-        from core import db; db.save_cfg_value("MIN_SCORE", v)
+        await db.async_save_cfg_value("MIN_SCORE", v)
         await msg.answer(
             f"✅ Мин. оценка: <code>{v}</code>",
             parse_mode="HTML",
@@ -507,7 +508,7 @@ async def cmd_setmaxloss(msg: Message):
         if v < 0.5 or v > 20:
             raise ValueError
         cfg.MAX_DAILY_LOSS = v
-        from core import db; db.save_cfg_value("MAX_DAILY_LOSS", v)
+        await db.async_save_cfg_value("MAX_DAILY_LOSS", v)
         await msg.answer(
             f"✅ Макс. дневной убыток: <code>{v}%</code>",
             parse_mode="HTML",
@@ -533,7 +534,7 @@ async def cmd_setmaxdaily(msg: Message):
         if v < 1 or v > 50:
             raise ValueError
         cfg.MAX_DAILY_TRADES = v
-        from core import db; db.save_cfg_value("MAX_DAILY_TRADES", v)
+        await db.async_save_cfg_value("MAX_DAILY_TRADES", v)
         await msg.answer(
             f"✅ Макс. сделок/день: <code>{v}</code>",
             parse_mode="HTML",
@@ -562,7 +563,7 @@ async def cmd_setmaxsl(msg: Message):
         if v < 0 or v > 100:
             raise ValueError
         cfg.MAX_SL_PCT = v
-        from core import db; db.save_cfg_value("MAX_SL_PCT", v)
+        await db.async_save_cfg_value("MAX_SL_PCT", v)
         label = f"{v}%" if v > 0 else "выкл"
         await msg.answer(
             f"✅ Макс. SL: <code>{label}</code> от входа",
@@ -593,11 +594,11 @@ async def cmd_setautolev(msg: Message):
     v = args[1].lower()
     if v in ("on", "1", "true", "вкл"):
         cfg.AUTO_LEVERAGE = True
-        from core import db; db.save_cfg_value("AUTO_LEVERAGE", "true")
+        await db.async_save_cfg_value("AUTO_LEVERAGE", "true")
         await msg.answer("✅ Авто-плечо включено", reply_markup=main_keyboard())
     elif v in ("off", "0", "false", "выкл"):
         cfg.AUTO_LEVERAGE = False
-        from core import db; db.save_cfg_value("AUTO_LEVERAGE", "false")
+        await db.async_save_cfg_value("AUTO_LEVERAGE", "false")
         await msg.answer(
             f"❌ Авто-плечо выключено. Используется фиксированное плечо x{cfg.LEVERAGE}.\n"
             f"Изменить: <code>/setlev 5</code>",
@@ -655,7 +656,7 @@ async def cmd_pause(msg: Message):
         return
     from core import db
     state.paused = True
-    db.save_kv("paused", "1")
+    await db.async_save_kv("paused", "1")
     await msg.answer("⏸ Торговля на паузе. /resume — возобновить", reply_markup=main_keyboard())
 
 
@@ -665,8 +666,8 @@ async def cmd_resume(msg: Message):
     from core import db
     state.paused           = False
     state.day.paused_until = None
-    db.save_kv("paused", "0")
-    db.save_kv("paused_until", "")
+    await db.async_save_kv("paused", "0")
+    await db.async_save_kv("paused_until", "")
     await msg.answer("▶️ Торговля возобновлена", reply_markup=main_keyboard())
 
 
@@ -678,7 +679,7 @@ async def cmd_setmode(msg: Message):
         await msg.answer("/setmode auto | /setmode manual")
         return
     cfg.MODE = args[1]
-    from core import db; db.save_cfg_value("MODE", cfg.MODE)
+    await db.async_save_cfg_value("MODE", cfg.MODE)
     await msg.answer(f"✅ Режим: <code>{cfg.MODE}</code>", parse_mode="HTML",
                      reply_markup=main_keyboard())
 
@@ -695,7 +696,7 @@ async def cmd_setrisk(msg: Message):
         if not 0.1 <= v <= 3.0:
             raise ValueError
         cfg.RISK_PER_TRADE = v
-        from core import db; db.save_cfg_value("RISK_PER_TRADE", v)
+        await db.async_save_cfg_value("RISK_PER_TRADE", v)
         await msg.answer(f"✅ Риск: <code>{v}%</code>", parse_mode="HTML",
                          reply_markup=main_keyboard())
     except Exception:
@@ -714,7 +715,7 @@ async def cmd_setlev(msg: Message):
         if not 1 <= v <= 50:
             raise ValueError
         cfg.LEVERAGE = v
-        from core import db; db.save_cfg_value("LEVERAGE", v)
+        await db.async_save_cfg_value("LEVERAGE", v)
         await msg.answer(f"✅ Плечо: <code>x{v}</code>", parse_mode="HTML",
                          reply_markup=main_keyboard())
     except Exception:
@@ -753,7 +754,6 @@ async def cmd_scan(msg: Message):
 # ── Shared accounting helper for manual position closes ─────────────
 async def _account_manual_close(ex, pos) -> tuple:
     """Fetch close price, update PnL state, and save trade record for a manually closed position."""
-    from core import db as _db
     from datetime import timedelta
     try:
         ticker = await ex.get_ticker(pos.symbol)
@@ -765,7 +765,7 @@ async def _account_manual_close(ex, pos) -> tuple:
     total_trade_pnl = leg_pnl + pos.partial_pnl_taken
     result = "WIN" if total_trade_pnl > 0 else "LOSS"
     try:
-        _db.save_trade(pos, close_px, round(leg_pnl, 4), result)
+        await db.async_save_trade(pos, close_px, round(leg_pnl, 4), result)
     except Exception as e:
         log.warning(f"_account_manual_close db.save_trade {pos.symbol}: {e}")
     state.total_pnl    += leg_pnl
@@ -774,13 +774,13 @@ async def _account_manual_close(ex, pos) -> tuple:
         state.day.wins += 1
         state.day.loss_streak = 0
         state.day.paused_until = None
-        _db.save_kv("paused_until", "")
+        await db.async_save_kv("paused_until", "")
     else:
         state.day.losses += 1
         state.day.loss_streak += 1
         pause_min = cfg.PAUSE_3X_LOSS_MIN if state.day.loss_streak >= 3 else cfg.PAUSE_AFTER_LOSS_MIN
         state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
-        _db.save_kv("paused_until", state.day.paused_until.isoformat())
+        await db.async_save_kv("paused_until", state.day.paused_until.isoformat())
         if state.day.loss_streak == 3:
             try:
                 from strategy.scanner import _global_scanner as _gs
@@ -839,7 +839,7 @@ async def cmd_closeall(msg: Message):
             if tracked and tracked.entry > 0:
                 await _account_manual_close(ex, tracked)
             state.positions.pop(sym, None)
-            from core import db as _db; _db.delete_open_position(sym)
+            await db.async_delete_open_position(sym)
             closed.append(sym)
         except Exception as e:
             log.error(f"closeall {sym}: {e}")
@@ -868,7 +868,7 @@ async def cmd_closeall(msg: Message):
             if p.entry > 0:
                 await _account_manual_close(ex, p)
             state.positions.pop(sym, None)
-            from core import db as _db; _db.delete_open_position(sym)
+            await db.async_delete_open_position(sym)
             closed.append(sym)
         except Exception as e:
             log.error(f"closeall ghost {sym}: {e}")
@@ -911,7 +911,7 @@ async def cmd_close_symbol(msg: Message):
         await ex.close_position(symbol, pos.qty, pos.side)
         state.positions.pop(symbol, None)  # pop before await — prevents monitor race
         close_px, leg_pnl = await _account_manual_close(ex, pos)
-        from core import db as _db; _db.delete_open_position(symbol)  # after accounting
+        await db.async_delete_open_position(symbol)  # after accounting
         sign = "+" if leg_pnl >= 0 else ""
         await msg.answer(
             f"✅ Позиция {symbol} закрыта\n"
@@ -1054,13 +1054,13 @@ async def handle_misc(msg: Message):
 
     if text == "🤖 Авто":
         cfg.MODE = "auto"
-        from core import db as _db; _db.save_cfg_value("MODE", "auto")
+        await db.async_save_cfg_value("MODE", "auto")
         await msg.answer("✅ Режим: <code>auto</code>", parse_mode="HTML",
                          reply_markup=main_keyboard())
         return
     if text == "✋ Ручной":
         cfg.MODE = "manual"
-        from core import db as _db; _db.save_cfg_value("MODE", "manual")
+        await db.async_save_cfg_value("MODE", "manual")
         await msg.answer("✅ Режим: <code>manual</code>", parse_mode="HTML",
                          reply_markup=main_keyboard())
         return

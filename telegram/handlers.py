@@ -2,6 +2,7 @@ import asyncio
 import html as _html
 import logging
 from datetime import datetime
+from typing import Optional
 
 from aiogram import Dispatcher, F
 from aiogram.filters import Command
@@ -14,7 +15,7 @@ from aiogram.types import (
 
 from core import db
 from core.config import cfg
-from core.state import state
+from core.state import state, Position
 
 log = logging.getLogger("handlers")
 
@@ -149,14 +150,14 @@ async def cmd_status(msg: Message):
         sign  = "+" if upnl >= 0 else ""
         emoji = "🟢" if upnl >= 0 else "🔴"
 
-        if hasattr(pos, "entry"):
+        if isinstance(pos, Position):
             age_h = int((datetime.utcnow() - pos.opened_at).total_seconds() / 3600)
             sl_dist = f"{abs(cur - pos.sl) / pos.entry * 100:.1f}%" if cur > 0 and pos.sl > 0 and pos.entry > 0 else "?"
             tp_dist = f"{abs(pos.tp2 - cur) / pos.entry * 100:.1f}%" if cur > 0 and pos.tp2 > 0 and pos.entry > 0 else "?"
             be_tag  = " ✅BE" if pos.be_moved else ""
             t1_tag  = " 🎯TP1" if pos.tp1_hit else ""
             text += (
-                f"<b>{_html.escape(sym)}</b> {_html.escape(pos.side)}{be_tag}{t1_tag} | ⭐{pos.score} | {_html.escape(pos.pattern)}\n"
+                f"<b>{_html.escape(str(sym or ''))}</b> {_html.escape(str(pos.side))}{be_tag}{t1_tag} | ⭐{pos.score} | {_html.escape(str(pos.pattern))}\n"
                 f"Вход: <code>{pos.entry:.4f}</code> | {age_h}ч\n"
                 f"🔴 SL: <code>{pos.sl:.4f}</code> ({sl_dist} до стопа)\n"
                 f"🟡 TP2: <code>{pos.tp2:.4f}</code> ({tp_dist} до TP2)\n"
@@ -329,7 +330,7 @@ async def cmd_top(msg: Message):
 async def cmd_setminpos(msg: Message):
     if not _auth(msg):
         return
-    args = msg.text.split()
+    args = (msg.text or "").split()
     if len(args) < 2:
         await msg.answer(
             f"📐 <b>Мин. размер позиции:</b> <code>{cfg.MIN_POSITION_USDT} USDT</code>\n\n"
@@ -355,7 +356,7 @@ async def cmd_setminpos(msg: Message):
 async def cmd_setmaxpos(msg: Message):
     if not _auth(msg):
         return
-    args = msg.text.split()
+    args = (msg.text or "").split()
     if len(args) < 2:
         await msg.answer(
             f"📊 <b>Макс. позиций:</b> <code>{cfg.MAX_POSITIONS}</code>\n\n"
@@ -381,7 +382,7 @@ async def cmd_setmaxpos(msg: Message):
 async def cmd_settrail(msg: Message):
     if not _auth(msg):
         return
-    args = msg.text.split()
+    args = (msg.text or "").split()
     if len(args) < 2:
         await msg.answer(
             f"📉 <b>Трейлинг стоп:</b> <code>{cfg.TRAIL_PCT}%</code>\n\n"
@@ -408,7 +409,7 @@ async def cmd_settrail(msg: Message):
 async def cmd_setbe(msg: Message):
     if not _auth(msg):
         return
-    args = msg.text.split()
+    args = (msg.text or "").split()
     if len(args) < 2:
         mode = f"+{cfg.BE_TRIGGER_PCT}% от входа" if cfg.BE_TRIGGER_PCT > 0 else "TP1 (выкл.)"
         await msg.answer(
@@ -440,7 +441,7 @@ async def cmd_setbe(msg: Message):
 async def cmd_setmaxrisk(msg: Message):
     if not _auth(msg):
         return
-    args = msg.text.split()
+    args = (msg.text or "").split()
     if len(args) < 2:
         await msg.answer(
             f"🛡 <b>Макс. риск на сделку:</b> <code>{cfg.MAX_RISK_USDT} USDT</code>\n\n"
@@ -467,7 +468,7 @@ async def cmd_setmaxrisk(msg: Message):
 async def cmd_setminscore(msg: Message):
     if not _auth(msg):
         return
-    args = msg.text.split()
+    args = (msg.text or "").split()
     if len(args) < 2:
         await msg.answer(
             f"⭐ <b>Мин. оценка сигнала:</b> <code>{cfg.MIN_SCORE}</code>\n\n"
@@ -494,7 +495,7 @@ async def cmd_setminscore(msg: Message):
 async def cmd_setmaxloss(msg: Message):
     if not _auth(msg):
         return
-    args = msg.text.split()
+    args = (msg.text or "").split()
     if len(args) < 2:
         await msg.answer(
             f"🛑 <b>Макс. дневной убыток:</b> <code>{cfg.MAX_DAILY_LOSS}%</code>\n\n"
@@ -521,7 +522,7 @@ async def cmd_setmaxloss(msg: Message):
 async def cmd_setmaxdaily(msg: Message):
     if not _auth(msg):
         return
-    args = msg.text.split()
+    args = (msg.text or "").split()
     if len(args) < 2:
         await msg.answer(
             f"📅 <b>Макс. сделок в день:</b> <code>{cfg.MAX_DAILY_TRADES}</code>\n\n"
@@ -547,7 +548,7 @@ async def cmd_setmaxdaily(msg: Message):
 async def cmd_setmaxsl(msg: Message):
     if not _auth(msg):
         return
-    args = msg.text.split()
+    args = (msg.text or "").split()
     if len(args) < 2:
         current = f"{cfg.MAX_SL_PCT}%" if cfg.MAX_SL_PCT > 0 else "выкл"
         await msg.answer(
@@ -577,7 +578,7 @@ async def cmd_setmaxsl(msg: Message):
 async def cmd_setautolev(msg: Message):
     if not _auth(msg):
         return
-    args = msg.text.split()
+    args = (msg.text or "").split()
     if len(args) < 2:
         status = "✅ вкл" if cfg.AUTO_LEVERAGE else "❌ выкл"
         await msg.answer(
@@ -612,7 +613,7 @@ async def cmd_setautolev(msg: Message):
 async def cmd_setpairs(msg: Message):
     if not _auth(msg):
         return
-    args = msg.text.split(maxsplit=1)
+    args = (msg.text or "").split(maxsplit=1)
     if len(args) < 2 or not args[1].strip():
         current = ", ".join(state.pairs[:10]) or "нет"
         await msg.answer(
@@ -635,7 +636,9 @@ async def cmd_setpairs(msg: Message):
             from strategy.scanner import Scanner
             ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
             try:
-                await Scanner(ex, msg.bot).update_pairs()
+                bot = msg.bot
+                if bot is not None:
+                    await Scanner(ex, bot).update_pairs()
             finally:
                 await ex.close()
         await msg.answer(f"✅ Режим авто, пар: {len(state.pairs)}", reply_markup=main_keyboard())
@@ -674,7 +677,7 @@ async def cmd_resume(msg: Message):
 async def cmd_setmode(msg: Message):
     if not _auth(msg):
         return
-    args = msg.text.split()
+    args = (msg.text or "").split()
     if len(args) < 2 or args[1] not in ("auto", "manual"):
         await msg.answer("/setmode auto | /setmode manual")
         return
@@ -687,7 +690,7 @@ async def cmd_setmode(msg: Message):
 async def cmd_setrisk(msg: Message):
     if not _auth(msg):
         return
-    args = msg.text.split()
+    args = (msg.text or "").split()
     if len(args) < 2:
         await msg.answer(f"Текущий риск: {cfg.RISK_PER_TRADE}%\nПример: /setrisk 0.5")
         return
@@ -706,7 +709,7 @@ async def cmd_setrisk(msg: Message):
 async def cmd_setlev(msg: Message):
     if not _auth(msg):
         return
-    args = msg.text.split()
+    args = (msg.text or "").split()
     if len(args) < 2:
         await msg.answer(f"Текущее плечо: x{cfg.LEVERAGE}\nПример: /setlev 10")
         return
@@ -823,11 +826,14 @@ async def cmd_closeall(msg: Message):
         await ex.close()
         await msg.answer("Нет открытых позиций", reply_markup=main_keyboard())
         return
-    closed, errors = [], []
-    live_syms = set()
+    closed: list[str] = []
+    errors: list[str] = []
+    live_syms: set[str] = set()
     for p in live:
-        sym  = p.get("symbol")
-        side = p.get("positionSide", "LONG")
+        sym  = str(p.get("symbol") or "")
+        if not sym:
+            continue
+        side = str(p.get("positionSide", "LONG"))
         amt  = abs(float(p.get("positionAmt", 0)))
         if amt == 0:
             continue
@@ -855,27 +861,27 @@ async def cmd_closeall(msg: Message):
     # Close positions tracked in state but absent from exchange (ghost state or API returned none)
     ghost_syms = [sym for sym in list(state.positions.keys()) if sym not in live_syms]
     for sym in ghost_syms:
-        p = state.positions.get(sym)
-        if not p:
+        gpos: Optional[Position] = state.positions.get(sym)
+        if not gpos:
             continue
         try:
-            if p.sl_order_id:
+            if gpos.sl_order_id:
                 try:
-                    await ex.cancel_order(sym, p.sl_order_id)
+                    await ex.cancel_order(sym, gpos.sl_order_id)
                 except Exception:
                     pass
-            if p.tp_order_id:
+            if gpos.tp_order_id:
                 try:
-                    await ex.cancel_order(sym, p.tp_order_id)
+                    await ex.cancel_order(sym, gpos.tp_order_id)
                 except Exception:
                     pass
             if not live:
                 # Exchange returned nothing — try to close anyway (position may exist)
-                await ex.close_position(sym, p.qty, p.side)
+                await ex.close_position(sym, gpos.qty, gpos.side)
             state.positions.pop(sym, None)  # pop before await — prevents monitor race
             await db.async_delete_open_position(sym)
-            if p.entry > 0:
-                await _account_manual_close(ex, p)
+            if gpos.entry > 0:
+                await _account_manual_close(ex, gpos)
             closed.append(sym)
         except Exception as e:
             log.error(f"closeall ghost {sym}: {e}")
@@ -893,7 +899,7 @@ async def cmd_close_symbol(msg: Message):
     if not _auth(msg):
         return
     # Accept /close_BTC_USDT or /close BTC-USDT
-    text = msg.text.strip()
+    text = (msg.text or "").strip()
     if text.startswith("/close_"):
         raw = text[len("/close_"):]
     elif " " in text:
@@ -939,7 +945,7 @@ async def handle_signal_callback(cb: CallbackQuery):
     if not _auth_cb(cb):
         await cb.answer("Нет доступа", show_alert=True)
         return
-    parts = cb.data.split(":", 1)
+    parts = (cb.data or "").split(":", 1)
     if len(parts) != 2:
         await cb.answer("Некорректные данные", show_alert=True)
         return
@@ -947,16 +953,18 @@ async def handle_signal_callback(cb: CallbackQuery):
     if action == "skip":
         state.pending.pop(symbol, None)
         try:
-            if cb.message.photo:
-                await cb.message.edit_caption(
-                    caption=(cb.message.caption or "") + "\n\n⏭ <b>Пропущено</b>",
-                    parse_mode="HTML",
-                )
-            else:
-                await cb.message.edit_text(
-                    text=(cb.message.text or "") + "\n\n⏭ <b>Пропущено</b>",
-                    parse_mode="HTML",
-                )
+            cbm = cb.message
+            if isinstance(cbm, Message):
+                if cbm.photo:
+                    await cbm.edit_caption(
+                        caption=(cbm.caption or "") + "\n\n⏭ <b>Пропущено</b>",
+                        parse_mode="HTML",
+                    )
+                else:
+                    await cbm.edit_text(
+                        text=(cbm.text or "") + "\n\n⏭ <b>Пропущено</b>",
+                        parse_mode="HTML",
+                    )
         except Exception:
             pass
         await cb.answer("Пропущено")
@@ -973,16 +981,18 @@ async def handle_signal_callback(cb: CallbackQuery):
         return
 
     try:
-        if cb.message.photo:
-            await cb.message.edit_caption(
-                caption=(cb.message.caption or "") + "\n\n⏳ <b>Входим...</b>",
-                parse_mode="HTML",
-            )
-        else:
-            await cb.message.edit_text(
-                text=(cb.message.text or "") + "\n\n⏳ <b>Входим...</b>",
-                parse_mode="HTML",
-            )
+        cbm = cb.message
+        if isinstance(cbm, Message):
+            if cbm.photo:
+                await cbm.edit_caption(
+                    caption=(cbm.caption or "") + "\n\n⏳ <b>Входим...</b>",
+                    parse_mode="HTML",
+                )
+            else:
+                await cbm.edit_text(
+                    text=(cbm.text or "") + "\n\n⏳ <b>Входим...</b>",
+                    parse_mode="HTML",
+                )
     except Exception:
         pass
     await cb.answer("Входим...")
@@ -996,8 +1006,11 @@ async def handle_signal_callback(cb: CallbackQuery):
             from exchange.bingx import BingXClient
             from strategy.scanner import Scanner
             ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+            cbm2 = cb.message
+            bot2 = cbm2.bot if isinstance(cbm2, Message) else None
             try:
-                await Scanner(ex, cb.message.bot)._enter(pend["signal"], confirmed=True)
+                if bot2:
+                    await Scanner(ex, bot2)._enter(pend["signal"], confirmed=True)
             finally:
                 try:
                     await ex.close()
@@ -1008,7 +1021,9 @@ async def handle_signal_callback(cb: CallbackQuery):
         # Restore pending so user can retry within the expiry window
         state.pending.setdefault(symbol, pend)
         try:
-            await cb.message.answer("⚠️ Ошибка входа в позицию — попробуй ещё раз", reply_markup=main_keyboard())
+            cbm3 = cb.message
+            if isinstance(cbm3, Message):
+                await cbm3.answer("⚠️ Ошибка входа в позицию — попробуй ещё раз", reply_markup=main_keyboard())
         except Exception:
             pass
 
@@ -1092,7 +1107,8 @@ async def handle_misc(msg: Message):
                 from strategy.scanner import Scanner
                 ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
                 try:
-                    await Scanner(ex, msg.bot)._enter(pend["signal"], confirmed=True)
+                    if msg.bot is not None:
+                        await Scanner(ex, msg.bot)._enter(pend["signal"], confirmed=True)
                 finally:
                     try:
                         await ex.close()

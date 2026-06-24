@@ -1280,7 +1280,7 @@ class Scanner:
                         state.current_balance = await self.ex.get_balance()
                     except Exception:
                         pass
-                    sign = "+" if pnl >= 0 else ""
+                    sign = "+" if pnl > 0 else ""
                     await self._notify(
                         f"{'✅ WIN' if pnl > 0 else '❌ LOSS'} | {symbol} {pos.side}\n"
                         f"Закрыто на бирже | Цена: <code>{price:.4f}</code>\n"
@@ -1426,15 +1426,18 @@ class Scanner:
                 # TP1 → partial close 25% (lock early profit)
                 # Skip if BE just fired in the same cycle via the TP1-fallback path —
                 # _move_be already placed SL at BE; re-firing would cause a double SL churn.
+                _tp1_just_fired = False
                 if not pos.tp1_hit and pos.tp1 > 0 and not _be_just_fired:
                     tp1_triggered = (pos.side == "LONG" and price >= pos.tp1) or \
                                     (pos.side == "SHORT" and price <= pos.tp1)
                     if tp1_triggered:
                         await self._partial_close(pos, cfg.TP1_CLOSE_PCT, "TP1")
+                        _tp1_just_fired = True
 
                 # TP2 → partial close TP2_CLOSE_PCT% of remaining qty — skip if tp2 unknown
                 # Attempt BE first (best-effort) so remainder is protected even if BE failed earlier
-                if not pos.tp2_hit and pos.tp2 > 0:
+                # Skip if TP1 just fired in the same cycle to avoid double SL churn
+                if not pos.tp2_hit and pos.tp2 > 0 and not _tp1_just_fired:
                     tp2_hit = (pos.side == "LONG" and price >= pos.tp2) or \
                               (pos.side == "SHORT" and price <= pos.tp2)
                     if tp2_hit:
@@ -1813,6 +1816,7 @@ class Scanner:
                                         f"PnL: <code>{sign}{pnl:.2f} USDT</code>"
                                     )
                                 except Exception as ce:
+                                    self._being_closed.discard(symbol)
                                     issues.append(
                                         f"🚨 {symbol}: SL за рынком, аварийное закрытие не удалось: "
                                         f"{_html.escape(str(ce))}"
@@ -1872,6 +1876,7 @@ class Scanner:
                                         f"PnL: <code>{sign}{pnl:.2f} USDT</code>"
                                     )
                                 except Exception as ce:
+                                    self._being_closed.discard(symbol)
                                     issues.append(
                                         f"🚨 {symbol}: SL ОТСУТСТВУЕТ, цена за SL, аварийное закрытие не удалось: "
                                         f"{_html.escape(str(ce))}"

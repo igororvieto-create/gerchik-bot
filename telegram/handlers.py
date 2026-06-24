@@ -775,12 +775,14 @@ async def _account_manual_close(ex, pos) -> tuple:
         state.day.loss_streak = 0
         state.day.paused_until = None
         await db.async_save_kv("paused_until", "")
+        await db.async_save_kv("loss_streak", "0")
     else:
         state.day.losses += 1
         state.day.loss_streak += 1
         pause_min = cfg.PAUSE_3X_LOSS_MIN if state.day.loss_streak >= 3 else cfg.PAUSE_AFTER_LOSS_MIN
         state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
         await db.async_save_kv("paused_until", state.day.paused_until.isoformat())
+        await db.async_save_kv("loss_streak", str(state.day.loss_streak))
         if state.day.loss_streak == 3:
             try:
                 from strategy.scanner import _global_scanner as _gs
@@ -810,8 +812,13 @@ async def cmd_closeall(msg: Message):
     if not _auth(msg):
         return
     from exchange.bingx import BingXClient
-    ex   = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-    live = await ex.get_open_positions()
+    ex = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
+    try:
+        live = await ex.get_open_positions()
+    except Exception as e:
+        await ex.close()
+        await msg.answer(f"❌ Ошибка получения позиций: {e}", reply_markup=main_keyboard())
+        return
     if not live and not state.positions:
         await ex.close()
         await msg.answer("Нет открытых позиций", reply_markup=main_keyboard())
@@ -836,10 +843,10 @@ async def cmd_closeall(msg: Message):
                         except Exception:
                             pass
             await ex.close_position(sym, amt, side)
+            state.positions.pop(sym, None)  # pop before await — prevents monitor race
+            await db.async_delete_open_position(sym)
             if tracked and tracked.entry > 0:
                 await _account_manual_close(ex, tracked)
-            state.positions.pop(sym, None)
-            await db.async_delete_open_position(sym)
             closed.append(sym)
         except Exception as e:
             log.error(f"closeall {sym}: {e}")
@@ -865,10 +872,10 @@ async def cmd_closeall(msg: Message):
             if not live:
                 # Exchange returned nothing — try to close anyway (position may exist)
                 await ex.close_position(sym, p.qty, p.side)
+            state.positions.pop(sym, None)  # pop before await — prevents monitor race
+            await db.async_delete_open_position(sym)
             if p.entry > 0:
                 await _account_manual_close(ex, p)
-            state.positions.pop(sym, None)
-            await db.async_delete_open_position(sym)
             closed.append(sym)
         except Exception as e:
             log.error(f"closeall ghost {sym}: {e}")

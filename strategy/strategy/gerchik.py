@@ -397,10 +397,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # ── RSI filter ──
     h1_rsi  = rsi(h1["close"], 14)
     cur_rsi = h1_rsi[-1]
-    if trend == "LONG"  and cur_rsi > 60:
+    if trend == "LONG"  and cur_rsi > 75:
         _reject("RSI перекуплен")
         return None
-    if trend == "SHORT" and cur_rsi < 40:
+    if trend == "SHORT" and cur_rsi < 25:
         _reject("RSI перепродан")
         return None
 

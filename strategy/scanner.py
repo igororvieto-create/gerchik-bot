@@ -79,8 +79,11 @@ class Scanner:
         return (price - pos.entry) * pos.qty if pos.side == "LONG" \
                else (pos.entry - price) * pos.qty
 
-    async def _get_close_price(self, pos) -> float:
-        """Return actual fill price for a closed position.
+    async def _get_close_price(self, pos) -> tuple:
+        """Return (price, is_known) for a closed position.
+
+        is_known=True  — price retrieved from an actual filled order or ticker.
+        is_known=False — all methods unavailable; price falls back to entry (PnL = 0).
 
         Checks the known SL/TP order IDs first (fast path), then falls back to
         recent order history, and finally to the current ticker.
@@ -93,7 +96,7 @@ class Scanner:
                 if info.get("status") == "FILLED":
                     avg = float(info.get("avgPrice") or info.get("price") or 0)
                     if avg > 0:
-                        return avg
+                        return avg, True
             except Exception:
                 pass
 
@@ -108,7 +111,7 @@ class Scanner:
                         and o.get("positionSide") == pos.side):
                     avg = float(o.get("avgPrice") or o.get("price") or 0)
                     if avg > 0:
-                        return avg
+                        return avg, True
         except Exception as e:
             log.warning(f"_get_close_price {pos.symbol} order history: {e}")
 
@@ -121,21 +124,25 @@ class Scanner:
                     f"_get_close_price {pos.symbol}: ордера не найдены — "
                     f"PnL по цене тикера {p:.6f} (может отличаться от реального исполнения)"
                 )
-                return p
+                return p, True
         except Exception as e:
             log.warning(f"_get_close_price {pos.symbol}: тикер недоступен ({e})")
         log.warning(
             f"_get_close_price {pos.symbol}: все методы недоступны — "
             f"PnL по цене входа {pos.entry:.6f}"
         )
-        return pos.entry
+        return pos.entry, False
 
-    async def _record_close(self, pos, price: float) -> float:
+    async def _record_close(self, pos, price: float, unknown: bool = False) -> float:
         """Single entry point for all position-close accounting.
 
         Updates state, DB, and cooldowns. Returns realised PnL.
         Each call site is responsible only for its own Telegram notification
         and any path-specific logic (e.g. balance refresh, extended-streak alert).
+
+        unknown=True means the fill price could not be determined (all fallbacks
+        returned entry price). In that case win/loss accounting and loss streak
+        are skipped to avoid phantom penalties.
         """
         symbol = pos.symbol
         if symbol not in state.positions:
@@ -147,8 +154,13 @@ class Scanner:
         # Use total trade PnL (partials + final) to decide win/loss — prevents a small
         # SL on the remainder from counting as a loss when TP1+TP2 were already taken.
         total_trade_pnl = pnl + pos.partial_pnl_taken
-        result = "WIN" if total_trade_pnl > 0 else "LOSS"
-        if total_trade_pnl > 0:
+        if unknown:
+            # Cannot determine actual close price — skip win/loss accounting to avoid
+            # phantom loss streak. Position is removed from state; DB records PnL as 0.
+            result = "UNKNOWN"
+            log.warning(f"_record_close {symbol}: цена закрытия неизвестна — streak/пауза не применяются")
+        elif total_trade_pnl > 0:
+            result = "WIN"
             state.day.wins += 1
             # Only reset loss streak on meaningful profit — a breakeven SL (total_pnl ≈ fees)
             # must not clear the consecutive-loss protection streak.
@@ -158,6 +170,7 @@ class Scanner:
                 state.day.paused_until = None
                 await db.async_save_kv("paused_until", "")
         else:
+            result = "LOSS"
             state.day.losses += 1
             state.day.loss_streak += 1
             if state.day.loss_streak >= 3:
@@ -172,14 +185,18 @@ class Scanner:
                 pause_min = cfg.PAUSE_AFTER_LOSS_MIN
             state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
             await db.async_save_kv("paused_until", state.day.paused_until.isoformat())
-        await db.async_save_trade(pos, price, pnl, result)
+        # Guard: ensure position is removed from state even if DB write fails or is cancelled
+        try:
+            await db.async_save_trade(pos, price, pnl, result)
+        except Exception as e:
+            log.error(f"db.async_save_trade {symbol}: {e}")
         del state.positions[symbol]
         await db.async_delete_open_position(symbol)
         self._stale_alerted.discard(symbol)
         self._funding_warned.discard(symbol)
-        if total_trade_pnl <= 0:
+        if not unknown and total_trade_pnl <= 0:
             self._loss_cooldown(symbol)
-        else:
+        elif total_trade_pnl > 0:
             self._symbol_loss_streak.pop(symbol, None)
         await db.async_save_kv("loss_streak", str(state.day.loss_streak))
         return total_trade_pnl
@@ -1014,7 +1031,7 @@ class Scanner:
                         _orphan = Position(symbol=sig.symbol, side=sig.side, entry=sig.entry,
                                           sl=0.0, tp1=0.0, tp2=0.0, tp3=0.0, qty=qty, risk_usdt=0.0)
                         state.positions[sig.symbol] = _orphan
-                        db.save_open_position(_orphan)
+                        await db.async_save_open_position(_orphan)
                         await self._notify(f"🚨 <b>{sig.symbol}</b>: аварийное закрытие не удалось — позиция добавлена без SL для мониторинга")
                     self._loss_cooldown(sig.symbol)
                     return
@@ -1041,7 +1058,7 @@ class Scanner:
                             _orphan = Position(symbol=sig.symbol, side=sig.side, entry=sig.entry,
                                               sl=0.0, tp1=0.0, tp2=0.0, tp3=0.0, qty=qty, risk_usdt=0.0)
                             state.positions[sig.symbol] = _orphan
-                            db.save_open_position(_orphan)
+                            await db.async_save_open_position(_orphan)
                             await self._notify(f"🚨 <b>{sig.symbol}</b>: аварийное закрытие не удалось — позиция добавлена без SL для мониторинга")
                         self._loss_cooldown(sig.symbol)
                         return
@@ -1065,7 +1082,7 @@ class Scanner:
                             _orphan = Position(symbol=sig.symbol, side=sig.side, entry=sig.entry,
                                               sl=0.0, tp1=0.0, tp2=0.0, tp3=0.0, qty=qty, risk_usdt=0.0)
                             state.positions[sig.symbol] = _orphan
-                            db.save_open_position(_orphan)
+                            await db.async_save_open_position(_orphan)
                             await self._notify(f"🚨 <b>{sig.symbol}</b>: аварийное закрытие не удалось — позиция добавлена без SL для мониторинга")
                         self._loss_cooldown(sig.symbol)
                         return
@@ -1090,7 +1107,7 @@ class Scanner:
                         qty=qty, risk_usdt=0.0,
                     )
                     state.positions[sig.symbol] = _orphan
-                    db.save_open_position(_orphan)
+                    await db.async_save_open_position(_orphan)
                     await self._notify(
                         f"🚨 <b>{sig.symbol}</b>: аварийное закрытие не удалось — "
                         f"позиция добавлена без SL для мониторинга"
@@ -1117,7 +1134,7 @@ class Scanner:
                     _orphan = Position(symbol=sig.symbol, side=sig.side, entry=sig.entry,
                                       sl=0.0, tp1=0.0, tp2=0.0, tp3=0.0, qty=qty, risk_usdt=0.0)
                     state.positions[sig.symbol] = _orphan
-                    db.save_open_position(_orphan)
+                    await db.async_save_open_position(_orphan)
                     await self._notify(f"🚨 <b>{sig.symbol}</b>: аварийное закрытие не удалось — позиция добавлена без SL для мониторинга")
                 self._loss_cooldown(sig.symbol)  # позиция открылась без SL = реальная потеря
                 return
@@ -1228,11 +1245,11 @@ class Scanner:
                         log.info(f"Ручная позиция {symbol} закрыта на бирже — убрана из памяти")
                         continue
                     try:
-                        price = await self._get_close_price(pos)
+                        price, price_known = await self._get_close_price(pos)
                     except Exception as e:
                         log.warning(f"{symbol}: ошибка получения цены при закрытии — P&L посчитан по цене входа: {e}")
-                        price = pos.entry
-                    pnl = await self._record_close(pos, price)
+                        price, price_known = pos.entry, False
+                    pnl = await self._record_close(pos, price, unknown=not price_known)
                     # Refresh balance so next position sizing uses real balance
                     try:
                         state.current_balance = await self.ex.get_balance()
@@ -1616,13 +1633,13 @@ class Scanner:
                     # Track peak balance (persist to DB)
                     if balance > state.peak_balance:
                         state.peak_balance = balance
-                        db.save_kv("peak_balance", str(balance))
+                        await db.async_save_kv("peak_balance", str(balance))
                     # Check drawdown from peak
                     if cfg.MAX_DRAWDOWN_PCT > 0 and state.peak_balance > 0:
                         drawdown = (state.peak_balance - balance) / state.peak_balance * 100
                         if drawdown >= cfg.MAX_DRAWDOWN_PCT and not state.paused:
                             state.paused = True
-                            db.save_kv("paused", "1")
+                            await db.async_save_kv("paused", "1")
                             await self._notify(
                                 f"🚨 <b>Drawdown protection</b>\n"
                                 f"Баланс упал на <code>{drawdown:.1f}%</code> от пика\n"
@@ -1672,7 +1689,7 @@ class Scanner:
                                 if r.get("code") == 0:
                                     pos.sl = emergency_sl
                                     pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
-                                    db.save_open_position(pos)
+                                    await db.async_save_open_position(pos)
                                     issues.append(
                                         f"🔧 {symbol}: аварийный SL выставлен @ "
                                         f"<code>{emergency_sl:.4f}</code> (5% от входа)"
@@ -1697,7 +1714,7 @@ class Scanner:
                             r = await self.ex.place_stop_loss(symbol, side_str, pos.qty, pos.sl)
                             if r.get("code") == 0:
                                 pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
-                                db.save_open_position(pos)
+                                await db.async_save_open_position(pos)
                                 issues.append(f"ℹ️ {symbol}: SL перевыставлен @ {pos.sl:.4f}")
                             else:
                                 issues.append(
@@ -1718,7 +1735,7 @@ class Scanner:
                         r = await self.ex.place_stop_loss(symbol, side_str, pos.qty, pos.sl)
                         if r.get("code") == 0:
                             pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
-                            db.save_open_position(pos)
+                            await db.async_save_open_position(pos)
                             issues.append(f"🔄 {symbol}: SL ордер потерялся — перевыставлен @ {pos.sl:.4f}")
                         else:
                             issues.append(

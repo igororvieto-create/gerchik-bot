@@ -132,7 +132,7 @@ class BingXClient:
     async def get_klines(self, symbol, interval, limit=200):
         data = await self._get("/openApi/swap/v3/quote/klines",
                                {"symbol": symbol, "interval": interval, "limit": limit})
-        return data.get("data", [])
+        return data.get("data", []) or []
 
     async def get_funding_rate(self, symbol):
         data = await self._get("/openApi/swap/v2/quote/premiumIndex", {"symbol": symbol})

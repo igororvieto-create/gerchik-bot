@@ -151,6 +151,7 @@ class Scanner:
         symbol = pos.symbol
         if symbol not in state.positions:
             log.warning(f"_record_close: {symbol} уже удалён из state — двойной вызов предотвращён")
+            self._being_closed.discard(symbol)
             return 0.0
         pnl = 0.0
         total_trade_pnl = 0.0
@@ -1219,6 +1220,9 @@ class Scanner:
                     continue
                 funding = await self.ex.get_funding_rate(symbol)
                 if funding is None:
+                    # API unavailable — conservatively reset the warned flag so we re-notify
+                    # when the API recovers and funding may have spiked again.
+                    self._funding_warned.discard(symbol)
                     continue
                 if pos.side == "LONG" and funding > 0.05:
                     if symbol not in self._funding_warned:
@@ -1280,12 +1284,19 @@ class Scanner:
                         state.current_balance = await self.ex.get_balance()
                     except Exception:
                         pass
-                    sign = "+" if pnl > 0 else ""
-                    await self._notify(
-                        f"{'✅ WIN' if pnl > 0 else '❌ LOSS'} | {symbol} {pos.side}\n"
-                        f"Закрыто на бирже | Цена: <code>{price:.4f}</code>\n"
-                        f"PnL: <code>{sign}{pnl:.2f} USDT</code>"
-                    )
+                    if price_known:
+                        sign = "+" if pnl > 0 else ""
+                        await self._notify(
+                            f"{'✅ WIN' if pnl > 0 else '❌ LOSS'} | {symbol} {pos.side}\n"
+                            f"Закрыто на бирже | Цена: <code>{price:.4f}</code>\n"
+                            f"PnL: <code>{sign}{pnl:.2f} USDT</code>"
+                        )
+                    else:
+                        await self._notify(
+                            f"❓ ЗАКРЫТО | {symbol} {pos.side}\n"
+                            f"Закрыто на бирже | Цена неизвестна\n"
+                            f"PnL не посчитан (цена входа: <code>{pos.entry:.4f}</code>)"
+                        )
         except Exception as e:
             log.error(f"monitor sync: {e}")
 

@@ -1,7 +1,7 @@
 import asyncio
 import html as _html
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from aiogram import Dispatcher, F
@@ -657,7 +657,6 @@ async def cmd_setpairs(msg: Message):
 async def cmd_pause(msg: Message):
     if not _auth(msg):
         return
-    from core import db
     state.paused = True
     await db.async_save_kv("paused", "1")
     await msg.answer("⏸ Торговля на паузе. /resume — возобновить", reply_markup=main_keyboard())
@@ -666,7 +665,6 @@ async def cmd_pause(msg: Message):
 async def cmd_resume(msg: Message):
     if not _auth(msg):
         return
-    from core import db
     state.paused           = False
     state.day.paused_until = None
     await db.async_save_kv("paused", "0")
@@ -757,7 +755,6 @@ async def cmd_scan(msg: Message):
 # ── Shared accounting helper for manual position closes ─────────────
 async def _account_manual_close(ex, pos) -> tuple:
     """Fetch close price, update PnL state, and save trade record for a manually closed position."""
-    from datetime import timedelta
     try:
         ticker = await ex.get_ticker(pos.symbol)
         close_px = float(ticker.get("lastPrice", pos.entry)) if ticker else pos.entry
@@ -852,7 +849,10 @@ async def cmd_closeall(msg: Message):
             state.positions.pop(sym, None)  # pop before await — prevents monitor race
             await db.async_delete_open_position(sym)
             if tracked and tracked.entry > 0:
-                await _account_manual_close(ex, tracked)
+                try:
+                    await _account_manual_close(ex, tracked)
+                except Exception as ae:
+                    log.warning(f"closeall account {sym}: {ae}")
             closed.append(sym)
         except Exception as e:
             log.error(f"closeall {sym}: {e}")
@@ -881,7 +881,10 @@ async def cmd_closeall(msg: Message):
             state.positions.pop(sym, None)  # pop before await — prevents monitor race
             await db.async_delete_open_position(sym)
             if gpos.entry > 0:
-                await _account_manual_close(ex, gpos)
+                try:
+                    await _account_manual_close(ex, gpos)
+                except Exception as ae:
+                    log.warning(f"closeall ghost account {sym}: {ae}")
             closed.append(sym)
         except Exception as e:
             log.error(f"closeall ghost {sym}: {e}")

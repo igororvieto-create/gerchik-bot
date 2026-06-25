@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import ssl
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
@@ -14,6 +15,12 @@ log = logging.getLogger("bingx")
 BASE = _os.getenv("BINGX_BASE_URL", "https://open-api.bingx.com").rstrip("/")
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
 _RETRIES = 3
+
+# Trust the proxy CA bundle if present (Claude Code on the web environment)
+_CA_BUNDLE = _os.getenv("SSL_CERT_FILE") or _os.getenv("REQUESTS_CA_BUNDLE")
+_SSL_CTX: Optional[ssl.SSLContext] = None
+if _CA_BUNDLE and _os.path.exists(_CA_BUNDLE):
+    _SSL_CTX = ssl.create_default_context(cafile=_CA_BUNDLE)
 
 
 class BingXClient:
@@ -30,7 +37,12 @@ class BingXClient:
                 await self._session.close()
             except Exception:
                 pass
-        self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
+        connector = aiohttp.TCPConnector(ssl=_SSL_CTX) if _SSL_CTX else None
+        self._session = aiohttp.ClientSession(
+            timeout=_TIMEOUT,
+            connector=connector,
+            trust_env=True,  # read HTTPS_PROXY from environment
+        )
         return self._session
 
     def _sign(self, params: Dict[str, Any]) -> str:

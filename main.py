@@ -1,8 +1,11 @@
 import asyncio
 import logging
+import os
+import ssl
 from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import aiohttp
 
 from core import db
 from core.config import cfg
@@ -110,7 +113,16 @@ async def main():
         except Exception:
             pass
 
-    bot = Bot(token=cfg.TELEGRAM_TOKEN)
+    # Configure proxy-aware SSL for Telegram (Claude Code on the web uses a proxy CA)
+    _ca = os.getenv("SSL_CERT_FILE") or os.getenv("REQUESTS_CA_BUNDLE")
+    if _ca and os.path.exists(_ca):
+        from aiogram.client.session.aiohttp import AiohttpSession
+        _ssl_ctx = ssl.create_default_context(cafile=_ca)
+        _tg_session = AiohttpSession()
+        _tg_session._connector_init = {"ssl": _ssl_ctx}
+        bot = Bot(token=cfg.TELEGRAM_TOKEN, session=_tg_session)
+    else:
+        bot = Bot(token=cfg.TELEGRAM_TOKEN)
     dp  = Dispatcher()
     register_handlers(dp)
 

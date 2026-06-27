@@ -64,7 +64,7 @@ class Config:
     ADX_MIN:              float = float(os.getenv("ADX_MIN", "25.0").strip())
     # D1 EMA slope threshold: LONG blocked if slope < -D1_SLOPE_MIN%, SHORT if > +D1_SLOPE_MIN%
     # Set to 0.0 to disable slope filter entirely; lower value = less restrictive
-    D1_SLOPE_MIN:         float = float(os.getenv("D1_SLOPE_MIN", "0.05").strip())
+    D1_SLOPE_MIN:         float = float(os.getenv("D1_SLOPE_MIN", "0.02").strip())
     # Auto-close positions older than this many hours (0 = disabled)
     MAX_POSITION_HOURS:      int   = int(os.getenv("MAX_POSITION_HOURS", "72").strip())
     # Orderbook filter

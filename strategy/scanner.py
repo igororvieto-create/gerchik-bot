@@ -404,8 +404,7 @@ class Scanner:
 
         if not signals:
             log.info(f"Сигналов нет. Причины: {diag}")
-            # Notify every scan during diagnostics (TODO: restore % 4 == 1 after debug)
-            if True:
+            if self._scan_count % 4 == 1:
                 await self._notify(
                     f"🔍 Скан: {len(state.pairs)} пар — сигналов нет\n"
                     f"📊 Фильтры: {diag}\n"
@@ -436,7 +435,7 @@ class Scanner:
                 qualified = [s for s in qualified if s not in wide_sl]
         if not qualified:
             log.info(f"Нет сигналов с достаточным score. Причины отсева: {diag}")
-            if True:
+            if self._scan_count % 4 == 1:
                 await self._notify(
                     f"🔍 Скан: {len(state.pairs)} пар — {len(signals)} сигналов ниже MIN_SCORE {effective_min_score}\n"
                     f"📊 Фильтры: {diag}\n"
@@ -728,6 +727,7 @@ class Scanner:
             log.debug(f"{sig.symbol}: _enter() пропущен — параллельный вход уже выполняется")
             return
         self._entering.add(sig.symbol)
+        _pre_pos = None  # set after market order is placed; guards finally from deleting live position
         try:
             balance, _avail_margin = await self.ex.get_balance_and_margin()
             if balance <= 0:
@@ -1220,7 +1220,10 @@ class Scanner:
             await self._notify(f"❌ Ошибка входа {sig.symbol}: {_html.escape(str(e))}")
         finally:
             self._entering.discard(sig.symbol)
-            if sig.symbol not in state.positions:
+            # Only clean up DB if market order was never placed (_pre_pos is None).
+            # When _pre_pos is set but position not in state, the market order landed on the
+            # exchange; health_check will detect the missing SL and recover — don't delete.
+            if sig.symbol not in state.positions and _pre_pos is None:
                 asyncio.ensure_future(db.async_delete_open_position(sig.symbol))
 
     # ------------------------------------------------------------------ monitor

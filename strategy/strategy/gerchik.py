@@ -784,8 +784,8 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         return None
 
     # ── Volume minimum ──
-    if fb_vrat < cfg.VOLUME_MULT:
-        _reject(f"ложный пробой: объём < {cfg.VOLUME_MULT}x")
+    if fb_vrat < cfg.FB_VOLUME_MULT:
+        _reject(f"ложный пробой: объём < {cfg.FB_VOLUME_MULT}x")
         return None
 
     # ── Funding ──
@@ -1030,8 +1030,8 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     h4_vm   = vol_ma(h4["volume"], cfg.VOLUME_MA_PERIOD)
     vm_ref  = h4_vm[brk_idx - 1]
     h4_vrat = h4["volume"][brk_idx] / vm_ref if vm_ref > 0 else 0
-    if h4_vrat < cfg.VOLUME_MULT:
-        _reject(f"накопление: объём H4 < {cfg.VOLUME_MULT}x")
+    if h4_vrat < cfg.BRK_VOLUME_MULT:
+        _reject(f"накопление: объём H4 < {cfg.BRK_VOLUME_MULT}x")
         return None
 
     # ── ADX ──
@@ -1043,9 +1043,10 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if not adx_rising:
         _reject("накопление: ADX не растёт")
         return None
-    # Hard floor — avoid extremely flat markets
-    if cur_adx < cfg.ADX_MIN:
-        _reject(f"накопление: ADX < {cfg.ADX_MIN} (боковик)")
+    # Hard floor — range breakouts start with ADX 15-19 (rising from low base),
+    # so use a lower floor than the trend-following strategies.
+    if cur_adx < 15:
+        _reject("накопление: ADX < 15 (слишком плоский)")
         return None
 
     # ── RSI ──
@@ -1259,8 +1260,8 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # ── Volume: breakout must have 2x+ volume ──
     vm   = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
     vrat = h1["volume"][-2] / vm[-2] if vm[-2] > 0 else 0
-    if vrat < cfg.VOLUME_MULT:
-        _reject(f"пробой: объём < {cfg.VOLUME_MULT}x")
+    if vrat < cfg.BRK_VOLUME_MULT:
+        _reject(f"пробой: объём < {cfg.BRK_VOLUME_MULT}x")
         return None
 
     # ── ADX: must be trending ──

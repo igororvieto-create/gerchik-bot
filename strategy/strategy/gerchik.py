@@ -344,7 +344,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     h4_up   = h4["close"][-1] > ema50[-1]
     h4_dn   = h4["close"][-1] < ema50[-1]
     h4_aligned = (trend=="LONG" and h4_up) or (trend=="SHORT" and h4_dn)
-    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 1.0
+    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 2.0
     if not h4_aligned and not h4_near:
         _reject("H4 против тренда")
         return None
@@ -385,10 +385,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         if h4["close"][i] > h4["open"][i]
         and (h4["close"][i] - h4["open"][i]) >= _h4_body_min
     )
-    if trend == "LONG"  and h4_bear_cnt >= 3:
+    if trend == "LONG"  and h4_bear_cnt >= 4:
         _reject("H4 медвежий импульс")
         return None
-    if trend == "SHORT" and h4_bull_cnt >= 3:
+    if trend == "SHORT" and h4_bull_cnt >= 4:
         _reject("H4 бычий импульс")
         return None
 
@@ -665,21 +665,22 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         _reject("ложный пробой: D1 разворот вверх")
         return None
 
-    # ── H4 filter — must be aligned with D1 trend ──
+    # ── H4 filter — must be aligned with D1 trend (tolerance 2%) ──
     ema50_h4  = ema(h4["close"], cfg.TREND_EMA_H4)
     h4_up     = h4["close"][-1] > ema50_h4[-1]
     h4_aligned = (trend == "LONG" and h4_up) or (trend == "SHORT" and not h4_up)
-    if not h4_aligned:
+    h4_near_fb = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < 2.0
+    if not h4_aligned and not h4_near_fb:
         _reject("ложный пробой: H4 против тренда")
         return None
 
-    # H4 impulse guard: 3+ of last 4 candles against signal direction → skip
+    # H4 impulse guard: 4 of last 4 candles against signal direction → skip
     h4_bear_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] < h4["open"][i])
     h4_bull_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] > h4["open"][i])
-    if trend == "LONG"  and h4_bear_cnt >= 3:
+    if trend == "LONG"  and h4_bear_cnt >= 4:
         _reject("ложный пробой: H4 медвежий импульс")
         return None
-    if trend == "SHORT" and h4_bull_cnt >= 3:
+    if trend == "SHORT" and h4_bull_cnt >= 4:
         _reject("ложный пробой: H4 бычий импульс")
         return None
 
@@ -931,23 +932,24 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         _reject("накопление: D1 разворот вверх")
         return None
 
-    # H4 EMA50 alignment — must be in trend direction
-    ema50_h4 = ema(h4["close"], cfg.TREND_EMA_H4)
-    h4_up    = h4["close"][-1] > ema50_h4[-1]
-    if trend == "LONG" and not h4_up:
+    # H4 EMA50 alignment — must be in trend direction (tolerance 2%)
+    ema50_h4   = ema(h4["close"], cfg.TREND_EMA_H4)
+    h4_up      = h4["close"][-1] > ema50_h4[-1]
+    h4_near_rb = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < 2.0
+    if trend == "LONG" and not h4_up and not h4_near_rb:
         _reject("накопление: H4 против тренда")
         return None
-    if trend == "SHORT" and h4_up:
+    if trend == "SHORT" and h4_up and not h4_near_rb:
         _reject("накопление: H4 против тренда")
         return None
 
     # H4 impulse guard
     h4_bear_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] < h4["open"][i])
     h4_bull_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] > h4["open"][i])
-    if trend == "LONG"  and h4_bear_cnt >= 3:
+    if trend == "LONG"  and h4_bear_cnt >= 4:
         _reject("накопление: H4 медвежий импульс")
         return None
-    if trend == "SHORT" and h4_bull_cnt >= 3:
+    if trend == "SHORT" and h4_bull_cnt >= 4:
         _reject("накопление: H4 бычий импульс")
         return None
 
@@ -1190,10 +1192,10 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # H4 impulse guard: 3+ of last 4 candles against direction
     h4_bear_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] < h4["open"][i])
     h4_bull_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] > h4["open"][i])
-    if trend == "LONG"  and h4_bear_cnt >= 3:
+    if trend == "LONG"  and h4_bear_cnt >= 4:
         _reject("пробой: H4 медвежий импульс")
         return None
-    if trend == "SHORT" and h4_bull_cnt >= 3:
+    if trend == "SHORT" and h4_bull_cnt >= 4:
         _reject("пробой: H4 бычий импульс")
         return None
 

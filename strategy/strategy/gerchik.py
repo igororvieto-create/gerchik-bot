@@ -332,10 +332,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         return None
 
     # Mandatory slope filter: price above EMA200 but falling = no LONG (correction phase)
-    if trend == "LONG"  and d1_slope < -0.05:
+    if trend == "LONG"  and d1_slope < -cfg.D1_SLOPE_MIN:
         _reject("D1 разворот вниз")
         return None
-    if trend == "SHORT" and d1_slope > 0.05:
+    if trend == "SHORT" and d1_slope > cfg.D1_SLOPE_MIN:
         _reject("D1 разворот вверх")
         return None
 
@@ -658,10 +658,10 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         return None
 
     # Mandatory D1 slope filter — same as analyze()
-    if trend == "LONG"  and d1_slope < -0.05:
+    if trend == "LONG"  and d1_slope < -cfg.D1_SLOPE_MIN:
         _reject("ложный пробой: D1 разворот вниз")
         return None
-    if trend == "SHORT" and d1_slope > 0.05:
+    if trend == "SHORT" and d1_slope > cfg.D1_SLOPE_MIN:
         _reject("ложный пробой: D1 разворот вверх")
         return None
 
@@ -924,10 +924,10 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         return None
 
     # Mandatory D1 slope filter — same as analyze() and analyze_false_breakout()
-    if trend == "LONG"  and d1_slope < -0.05:
+    if trend == "LONG"  and d1_slope < -cfg.D1_SLOPE_MIN:
         _reject("накопление: D1 разворот вниз")
         return None
-    if trend == "SHORT" and d1_slope > 0.05:
+    if trend == "SHORT" and d1_slope > cfg.D1_SLOPE_MIN:
         _reject("накопление: D1 разворот вверх")
         return None
 
@@ -1169,10 +1169,10 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     d1_slope = trend_slope(d1["close"], 10)
 
     # Breakout requires D1 momentum aligned with direction
-    if trend == "LONG"  and d1_slope < 0.05:
+    if trend == "LONG"  and d1_slope < cfg.D1_SLOPE_MIN:
         _reject("пробой: D1 нет роста")
         return None
-    if trend == "SHORT" and d1_slope > -0.05:
+    if trend == "SHORT" and d1_slope > -cfg.D1_SLOPE_MIN:
         _reject("пробой: D1 нет падения")
         return None
 

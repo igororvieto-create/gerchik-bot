@@ -556,11 +556,9 @@ class Scanner:
                     # Auto-leverage for orderbook validation (same tier logic)
                     ob_lev = cfg.LEVERAGE
                     if cfg.AUTO_LEVERAGE:
-                        try:
-                            bal = state.current_balance or await self.ex.get_balance()
+                        bal = state.current_balance  # already fetched at scan start; avoid concurrent API calls
+                        if bal > 0:
                             ob_lev = 5 if bal < 1000 else 3
-                        except Exception:
-                            pass
                     ob_val = await validate_signal_with_orderbook(
                         sig, self.ex, ob_lev, ob_cfg,
                         log_only=cfg.ORDERBOOK_LOG_ONLY,
@@ -1222,6 +1220,8 @@ class Scanner:
             await self._notify(f"❌ Ошибка входа {sig.symbol}: {_html.escape(str(e))}")
         finally:
             self._entering.discard(sig.symbol)
+            if sig.symbol not in state.positions:
+                asyncio.ensure_future(db.async_delete_open_position(sig.symbol))
 
     # ------------------------------------------------------------------ monitor
 
@@ -1515,6 +1515,7 @@ class Scanner:
                         if o.get("type") in ("STOP_MARKET", "STOP") and o.get("orderId"):
                             try:
                                 await self.ex.cancel_order(pos.symbol, str(o["orderId"]))
+                                log.info(f"_move_be: отменён висячий SL-ордер {pos.symbol} {o['orderId']}")
                             except Exception as _ce:
                                 log.warning(f"_move_be cancel orphan SL {pos.symbol} {o['orderId']}: {_ce}")
                 except Exception as _oe:
@@ -1587,6 +1588,7 @@ class Scanner:
                         if o.get("type") in ("STOP_MARKET", "STOP") and o.get("orderId"):
                             try:
                                 await self.ex.cancel_order(pos.symbol, str(o["orderId"]))
+                                log.info(f"_trail_sl: отменён висячий SL-ордер {pos.symbol} {o['orderId']}")
                             except Exception as _ce:
                                 log.warning(f"_trail_sl cancel orphan SL {pos.symbol} {o['orderId']}: {_ce}")
                 except Exception as _oe:

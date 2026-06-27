@@ -567,8 +567,41 @@ class Scanner:
                             from strategy.strategy.gerchik import _reject as _rej
                             _rej(f"OB:{r}")
                         sig = None
-                    elif ob_val.suggested_leverage is not None:
-                        sig._ob_suggested_leverage = ob_val.suggested_leverage
+                    else:
+                        if ob_val.suggested_leverage is not None:
+                            sig._ob_suggested_leverage = ob_val.suggested_leverage
+                        # Score bonus: order book actively confirms the signal direction
+                        m = ob_val.metrics
+                        if m and m.is_valid:
+                            imb = m.imbalance_3pct
+                            strong = cfg.OB_SCORE_STRONG_IMBALANCE
+                            weak   = cfg.OB_SCORE_WEAK_IMBALANCE
+                            if (sig.side == "LONG" and imb >= strong) or \
+                               (sig.side == "SHORT" and imb <= -strong):
+                                sig.score = min(100, sig.score + 8)
+                                sig.reason += f"\n📊 <b>Стакан</b>: сильный перевес {imb:+.1%} +8"
+                                log.info(f"{symbol}: OB сильный дисбаланс {imb:+.1%} → +8 к скору")
+                            elif (sig.side == "LONG" and imb >= weak) or \
+                                 (sig.side == "SHORT" and imb <= -weak):
+                                sig.score = min(100, sig.score + 4)
+                                sig.reason += f"\n📊 <b>Стакан</b>: перевес {imb:+.1%} +4"
+                            # Protecting wall behind SL (stops stop-hunt from clearing position)
+                            if sig.side == "LONG" and m.nearest_bid_wall \
+                               and sig.sl > 0 and m.nearest_bid_wall.price <= sig.sl:
+                                sig.score = min(100, sig.score + 5)
+                                sig.reason += (
+                                    f"\n🧱 <b>Защитная стена</b> "
+                                    f"{m.nearest_bid_wall.price:.4f} "
+                                    f"({m.nearest_bid_wall.size_usdt/1000:.0f}k) +5"
+                                )
+                            elif sig.side == "SHORT" and m.nearest_ask_wall \
+                               and sig.sl > 0 and m.nearest_ask_wall.price >= sig.sl:
+                                sig.score = min(100, sig.score + 5)
+                                sig.reason += (
+                                    f"\n🧱 <b>Защитная стена</b> "
+                                    f"{m.nearest_ask_wall.price:.4f} "
+                                    f"({m.nearest_ask_wall.size_usdt/1000:.0f}k) +5"
+                                )
                 except Exception as obe:
                     log.warning(f"orderbook filter {symbol}: {obe}")
 

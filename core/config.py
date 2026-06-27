@@ -61,7 +61,7 @@ class Config:
     BTC_FILTER:           bool  = os.getenv("BTC_FILTER", "true").strip().lower() == "true"
     BTC_FILTER_PCT:       float = float(os.getenv("BTC_FILTER_PCT", "3.0").strip())
     # ADX minimum — below this value market is ranging, skip signal
-    ADX_MIN:              float = float(os.getenv("ADX_MIN", "25.0").strip())
+    ADX_MIN:              float = float(os.getenv("ADX_MIN", "20.0").strip())
     # D1 slope for breakout strategy: require at least this % positive momentum (LONG) or negative (SHORT)
     D1_SLOPE_MIN:         float = float(os.getenv("D1_SLOPE_MIN", "0.02").strip())
     # D1 slope for entry/reversal strategies: block LONG only when slope falls more than this % over 10 days

@@ -775,16 +775,16 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # ── RSI ──
     h1_rsi  = rsi(h1["close"], 14)
     cur_rsi = h1_rsi[-1]
-    if trend == "LONG"  and cur_rsi > 68:
+    if trend == "LONG"  and cur_rsi > 75:
         _reject("ложный пробой: RSI перекуплен")
         return None
-    if trend == "SHORT" and cur_rsi < 32:
+    if trend == "SHORT" and cur_rsi < 25:
         _reject("ложный пробой: RSI перепродан")
         return None
 
-    # ── Volume minimum — check early to avoid wasted SL/TP math ──
-    if fb_vrat < 1.5:
-        _reject("ложный пробой: объём < 1.5x")
+    # ── Volume minimum ──
+    if fb_vrat < cfg.VOLUME_MULT:
+        _reject(f"ложный пробой: объём < {cfg.VOLUME_MULT}x")
         return None
 
     # ── Funding ──
@@ -1028,8 +1028,8 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     h4_vm   = vol_ma(h4["volume"], cfg.VOLUME_MA_PERIOD)
     vm_ref  = h4_vm[brk_idx - 1]
     h4_vrat = h4["volume"][brk_idx] / vm_ref if vm_ref > 0 else 0
-    if h4_vrat < 2.0:
-        _reject("накопление: объём H4 < 2.0x")
+    if h4_vrat < cfg.VOLUME_MULT:
+        _reject(f"накопление: объём H4 < {cfg.VOLUME_MULT}x")
         return None
 
     # ── ADX ──
@@ -1042,8 +1042,8 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         _reject("накопление: ADX не растёт")
         return None
     # Hard floor — avoid extremely flat markets
-    if cur_adx < 15:
-        _reject("накопление: ADX критически низкий")
+    if cur_adx < cfg.ADX_MIN:
+        _reject(f"накопление: ADX < {cfg.ADX_MIN} (боковик)")
         return None
 
     # ── RSI ──
@@ -1257,8 +1257,8 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # ── Volume: breakout must have 2x+ volume ──
     vm   = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
     vrat = h1["volume"][-2] / vm[-2] if vm[-2] > 0 else 0
-    if vrat < 2.0:
-        _reject("пробой: объём < 2x")
+    if vrat < cfg.VOLUME_MULT:
+        _reject(f"пробой: объём < {cfg.VOLUME_MULT}x")
         return None
 
     # ── ADX: must be trending ──

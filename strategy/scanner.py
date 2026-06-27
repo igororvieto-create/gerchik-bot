@@ -399,13 +399,13 @@ class Scanner:
 
         self._scan_count += 1
         scan_stats = get_stats()
-        top_reasons = sorted(scan_stats.items(), key=lambda x: x[1], reverse=True)[:4]
+        top_reasons = sorted(scan_stats.items(), key=lambda x: x[1], reverse=True)[:10]
         diag = " | ".join(f"{r}: {n}" for r, n in top_reasons) if top_reasons else "—"
 
         if not signals:
             log.info(f"Сигналов нет. Причины: {diag}")
-            # Notify only every 4th scan (~1 hour) to avoid spam
-            if self._scan_count % 4 == 1:
+            # Notify every scan during diagnostics (TODO: restore % 4 == 1 after debug)
+            if True:
                 await self._notify(
                     f"🔍 Скан: {len(state.pairs)} пар — сигналов нет\n"
                     f"📊 Фильтры: {diag}\n"
@@ -436,7 +436,7 @@ class Scanner:
                 qualified = [s for s in qualified if s not in wide_sl]
         if not qualified:
             log.info(f"Нет сигналов с достаточным score. Причины отсева: {diag}")
-            if self._scan_count % 4 == 1:
+            if True:
                 await self._notify(
                     f"🔍 Скан: {len(state.pairs)} пар — {len(signals)} сигналов ниже MIN_SCORE {effective_min_score}\n"
                     f"📊 Фильтры: {diag}\n"

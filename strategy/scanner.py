@@ -348,6 +348,11 @@ class Scanner:
 
         if not state.pairs:
             await self.update_pairs()
+        if state.current_balance == 0:
+            try:
+                state.current_balance = await self.ex.get_balance()
+            except Exception as _be:
+                log.warning(f"scan: не удалось получить баланс для can_trade(): {_be}")
         can, reason = state.can_trade(cfg.MAX_DAILY_LOSS, cfg.MAX_POSITIONS, cfg.MAX_DAILY_TRADES)
         if not can:
             log.info(f"Пропуск скана: {reason}")
@@ -394,12 +399,11 @@ class Scanner:
 
         self._scan_count += 1
         scan_stats = get_stats()
-        top_reasons = sorted(scan_stats.items(), key=lambda x: x[1], reverse=True)[:4]
+        top_reasons = sorted(scan_stats.items(), key=lambda x: x[1], reverse=True)[:10]
         diag = " | ".join(f"{r}: {n}" for r, n in top_reasons) if top_reasons else "—"
 
         if not signals:
             log.info(f"Сигналов нет. Причины: {diag}")
-            # Notify only every 4th scan (~1 hour) to avoid spam
             if self._scan_count % 4 == 1:
                 await self._notify(
                     f"🔍 Скан: {len(state.pairs)} пар — сигналов нет\n"
@@ -551,11 +555,9 @@ class Scanner:
                     # Auto-leverage for orderbook validation (same tier logic)
                     ob_lev = cfg.LEVERAGE
                     if cfg.AUTO_LEVERAGE:
-                        try:
-                            bal = state.current_balance or await self.ex.get_balance()
+                        bal = state.current_balance  # already fetched at scan start; avoid concurrent API calls
+                        if bal > 0:
                             ob_lev = 5 if bal < 1000 else 3
-                        except Exception:
-                            pass
                     ob_val = await validate_signal_with_orderbook(
                         sig, self.ex, ob_lev, ob_cfg,
                         log_only=cfg.ORDERBOOK_LOG_ONLY,
@@ -725,6 +727,7 @@ class Scanner:
             log.debug(f"{sig.symbol}: _enter() пропущен — параллельный вход уже выполняется")
             return
         self._entering.add(sig.symbol)
+        _pre_pos = None  # set after market order is placed; guards finally from deleting live position
         try:
             balance, _avail_margin = await self.ex.get_balance_and_margin()
             if balance <= 0:
@@ -1026,6 +1029,19 @@ class Scanner:
             except Exception as pe:
                 log.warning(f"Не удалось получить реальный qty {sig.symbol}: {pe}")
 
+            # Persist to DB early so a process crash between here and SL/TP placement doesn't
+            # leave an untracked exchange position. State is not updated yet — that happens after
+            # SL/TP confirm. On restart, health_check detects missing sl_order_id and re-places SL.
+            _pre_pos = Position(
+                symbol=sig.symbol, side=sig.side,
+                entry=sig.entry, sl=sig.sl,
+                tp1=sig.tp1, tp2=sig.tp2, tp3=sig.tp3,
+                qty=qty, risk_usdt=risk_usdt,
+                order_id=order_id,
+                pattern=sig.pattern, tf=sig.tf, rr=sig.rr, score=sig.score,
+            )
+            await db.async_save_open_position(_pre_pos)
+
             # Pre-validate SL price vs current mark price (avoids error 110411)
             # For LONG: SL (SELL stop) must be below current price
             # For SHORT: SL (BUY stop) must be above current price
@@ -1050,6 +1066,8 @@ class Scanner:
                         state.positions[sig.symbol] = _orphan
                         await db.async_save_open_position(_orphan)
                         await self._notify(f"🚨 <b>{sig.symbol}</b>: аварийное закрытие не удалось — позиция добавлена без SL для мониторинга")
+                    if sig.symbol not in state.positions:
+                        await db.async_delete_open_position(sig.symbol)
                     await self._loss_cooldown(sig.symbol)
                     return
                 # Liquidation check: SL must be inside the margin safety zone
@@ -1077,6 +1095,8 @@ class Scanner:
                             state.positions[sig.symbol] = _orphan
                             await db.async_save_open_position(_orphan)
                             await self._notify(f"🚨 <b>{sig.symbol}</b>: аварийное закрытие не удалось — позиция добавлена без SL для мониторинга")
+                        if sig.symbol not in state.positions:
+                            await db.async_delete_open_position(sig.symbol)
                         await self._loss_cooldown(sig.symbol)
                         return
                 else:
@@ -1101,6 +1121,8 @@ class Scanner:
                             state.positions[sig.symbol] = _orphan
                             await db.async_save_open_position(_orphan)
                             await self._notify(f"🚨 <b>{sig.symbol}</b>: аварийное закрытие не удалось — позиция добавлена без SL для мониторинга")
+                        if sig.symbol not in state.positions:
+                            await db.async_delete_open_position(sig.symbol)
                         await self._loss_cooldown(sig.symbol)
                         return
             except Exception as e:
@@ -1129,6 +1151,8 @@ class Scanner:
                         f"🚨 <b>{sig.symbol}</b>: аварийное закрытие не удалось — "
                         f"позиция добавлена без SL для мониторинга"
                     )
+                if sig.symbol not in state.positions:
+                    await db.async_delete_open_position(sig.symbol)
                 await self._loss_cooldown(sig.symbol)
                 return
             sl_id    = str(sl_order.get("data", {}).get("orderId", ""))
@@ -1153,6 +1177,8 @@ class Scanner:
                     state.positions[sig.symbol] = _orphan
                     await db.async_save_open_position(_orphan)
                     await self._notify(f"🚨 <b>{sig.symbol}</b>: аварийное закрытие не удалось — позиция добавлена без SL для мониторинга")
+                if sig.symbol not in state.positions:
+                    await db.async_delete_open_position(sig.symbol)
                 await self._loss_cooldown(sig.symbol)  # позиция открылась без SL = реальная потеря
                 return
             if not sl_id:
@@ -1171,18 +1197,13 @@ class Scanner:
                         f"При достижении TP3 <code>{sig.tp3:.4f}</code> закрой вручную"
                     )
 
-            pos = Position(
-                symbol=sig.symbol, side=sig.side,
-                entry=sig.entry, sl=sig.sl,
-                tp1=sig.tp1, tp2=sig.tp2, tp3=sig.tp3,
-                qty=qty, risk_usdt=risk_usdt,
-                order_id=order_id, sl_order_id=sl_id, tp_order_id=tp_id,
-                pattern=sig.pattern, tf=sig.tf, rr=sig.rr, score=sig.score,
-            )
+            _pre_pos.sl_order_id = sl_id
+            _pre_pos.tp_order_id = tp_id
+            pos = _pre_pos
             state.positions[sig.symbol] = pos
             state.day.trades += 1
             state.pending.pop(sig.symbol, None)
-            await db.async_save_open_position(pos)  # persist for restart recovery
+            await db.async_save_open_position(pos)
 
             icon = "✅" if confirmed else "🤖"
             await self._notify(
@@ -1199,6 +1220,11 @@ class Scanner:
             await self._notify(f"❌ Ошибка входа {sig.symbol}: {_html.escape(str(e))}")
         finally:
             self._entering.discard(sig.symbol)
+            # Only clean up DB if market order was never placed (_pre_pos is None).
+            # When _pre_pos is set but position not in state, the market order landed on the
+            # exchange; health_check will detect the missing SL and recover — don't delete.
+            if sig.symbol not in state.positions and _pre_pos is None:
+                asyncio.ensure_future(db.async_delete_open_position(sig.symbol))
 
     # ------------------------------------------------------------------ monitor
 
@@ -1484,6 +1510,19 @@ class Scanner:
                     pos.sl_order_id = old_sl_id
                     log.warning(f"_move_be {pos.symbol}: cancel failed, retrying next cycle")
                     return
+            else:
+                # No tracked SL order — cancel any lingering STOP orders to avoid duplicates
+                try:
+                    open_orders = await self.ex.get_open_orders(pos.symbol)
+                    for o in open_orders:
+                        if o.get("type") in ("STOP_MARKET", "STOP") and o.get("orderId"):
+                            try:
+                                await self.ex.cancel_order(pos.symbol, str(o["orderId"]))
+                                log.info(f"_move_be: отменён висячий SL-ордер {pos.symbol} {o['orderId']}")
+                            except Exception as _ce:
+                                log.warning(f"_move_be cancel orphan SL {pos.symbol} {o['orderId']}: {_ce}")
+                except Exception as _oe:
+                    log.warning(f"_move_be {pos.symbol}: не удалось получить открытые ордера: {_oe}")
             side = "BUY" if pos.side == "LONG" else "SELL"
             r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, be_price)
             if r.get("code") != 0:
@@ -1544,6 +1583,19 @@ class Scanner:
                     pos.sl_order_id = old_sl_id
                     log.warning(f"_trail_sl {pos.symbol}: cancel failed, retrying next cycle")
                     return
+            else:
+                # No tracked SL order — cancel any lingering STOP orders to avoid duplicates
+                try:
+                    open_orders = await self.ex.get_open_orders(pos.symbol)
+                    for o in open_orders:
+                        if o.get("type") in ("STOP_MARKET", "STOP") and o.get("orderId"):
+                            try:
+                                await self.ex.cancel_order(pos.symbol, str(o["orderId"]))
+                                log.info(f"_trail_sl: отменён висячий SL-ордер {pos.symbol} {o['orderId']}")
+                            except Exception as _ce:
+                                log.warning(f"_trail_sl cancel orphan SL {pos.symbol} {o['orderId']}: {_ce}")
+                except Exception as _oe:
+                    log.warning(f"_trail_sl {pos.symbol}: не удалось получить открытые ордера: {_oe}")
             side = "BUY" if pos.side == "LONG" else "SELL"
             r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, new_sl)
             new_id = str(r.get("data", {}).get("orderId", ""))
@@ -1803,7 +1855,7 @@ class Scanner:
                                 skip_n = self._sl_mark_skip.get(symbol, 0) + 1
                                 self._sl_mark_skip[symbol] = skip_n
                                 log.warning(f"{symbol}: цена недоступна для проверки SL — пропуск {skip_n}")
-                                if skip_n == 3:
+                                if skip_n >= 3 and (skip_n - 3) % 4 == 0:
                                     await self._notify(
                                         f"🚨 <b>{symbol}: позиция БЕЗ SL уже {skip_n * 15} мин!</b>\n"
                                         f"Цена BingX недоступна {skip_n} цикла подряд — SL не выставлен\n"

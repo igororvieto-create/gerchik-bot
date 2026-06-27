@@ -331,11 +331,11 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         _reject("D1 у EMA200 (зона неопределённости)")
         return None
 
-    # Mandatory slope filter: price above EMA200 but falling = no LONG (correction phase)
-    if trend == "LONG"  and d1_slope < -0.05:
+    # Slope filter: block only strong reversals (> D1_SLOPE_MAX_DECLINE% over 10 days)
+    if trend == "LONG"  and d1_slope < -cfg.D1_SLOPE_MAX_DECLINE:
         _reject("D1 разворот вниз")
         return None
-    if trend == "SHORT" and d1_slope > 0.05:
+    if trend == "SHORT" and d1_slope > cfg.D1_SLOPE_MAX_DECLINE:
         _reject("D1 разворот вверх")
         return None
 
@@ -344,7 +344,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     h4_up   = h4["close"][-1] > ema50[-1]
     h4_dn   = h4["close"][-1] < ema50[-1]
     h4_aligned = (trend=="LONG" and h4_up) or (trend=="SHORT" and h4_dn)
-    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 1.0
+    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 2.0
     if not h4_aligned and not h4_near:
         _reject("H4 против тренда")
         return None
@@ -385,10 +385,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         if h4["close"][i] > h4["open"][i]
         and (h4["close"][i] - h4["open"][i]) >= _h4_body_min
     )
-    if trend == "LONG"  and h4_bear_cnt >= 3:
+    if trend == "LONG"  and h4_bear_cnt >= 4:
         _reject("H4 медвежий импульс")
         return None
-    if trend == "SHORT" and h4_bull_cnt >= 3:
+    if trend == "SHORT" and h4_bull_cnt >= 4:
         _reject("H4 бычий импульс")
         return None
 
@@ -657,29 +657,30 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         _reject("ложный пробой: D1 у EMA200 (зона неопределённости)")
         return None
 
-    # Mandatory D1 slope filter — same as analyze()
-    if trend == "LONG"  and d1_slope < -0.05:
+    # Slope filter — same threshold as analyze()
+    if trend == "LONG"  and d1_slope < -cfg.D1_SLOPE_MAX_DECLINE:
         _reject("ложный пробой: D1 разворот вниз")
         return None
-    if trend == "SHORT" and d1_slope > 0.05:
+    if trend == "SHORT" and d1_slope > cfg.D1_SLOPE_MAX_DECLINE:
         _reject("ложный пробой: D1 разворот вверх")
         return None
 
-    # ── H4 filter — must be aligned with D1 trend ──
+    # ── H4 filter — must be aligned with D1 trend (tolerance 2%) ──
     ema50_h4  = ema(h4["close"], cfg.TREND_EMA_H4)
     h4_up     = h4["close"][-1] > ema50_h4[-1]
     h4_aligned = (trend == "LONG" and h4_up) or (trend == "SHORT" and not h4_up)
-    if not h4_aligned:
+    h4_near_fb = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < 2.0
+    if not h4_aligned and not h4_near_fb:
         _reject("ложный пробой: H4 против тренда")
         return None
 
-    # H4 impulse guard: 3+ of last 4 candles against signal direction → skip
+    # H4 impulse guard: 4 of last 4 candles against signal direction → skip
     h4_bear_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] < h4["open"][i])
     h4_bull_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] > h4["open"][i])
-    if trend == "LONG"  and h4_bear_cnt >= 3:
+    if trend == "LONG"  and h4_bear_cnt >= 4:
         _reject("ложный пробой: H4 медвежий импульс")
         return None
-    if trend == "SHORT" and h4_bull_cnt >= 3:
+    if trend == "SHORT" and h4_bull_cnt >= 4:
         _reject("ложный пробой: H4 бычий импульс")
         return None
 
@@ -775,16 +776,16 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # ── RSI ──
     h1_rsi  = rsi(h1["close"], 14)
     cur_rsi = h1_rsi[-1]
-    if trend == "LONG"  and cur_rsi > 68:
+    if trend == "LONG"  and cur_rsi > 75:
         _reject("ложный пробой: RSI перекуплен")
         return None
-    if trend == "SHORT" and cur_rsi < 32:
+    if trend == "SHORT" and cur_rsi < 25:
         _reject("ложный пробой: RSI перепродан")
         return None
 
-    # ── Volume minimum — check early to avoid wasted SL/TP math ──
-    if fb_vrat < 1.5:
-        _reject("ложный пробой: объём < 1.5x")
+    # ── Volume minimum ──
+    if fb_vrat < cfg.FB_VOLUME_MULT:
+        _reject(f"ложный пробой: объём < {cfg.FB_VOLUME_MULT}x")
         return None
 
     # ── Funding ──
@@ -923,31 +924,32 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         _reject("накопление: D1 у EMA200 (зона неопределённости)")
         return None
 
-    # Mandatory D1 slope filter — same as analyze() and analyze_false_breakout()
-    if trend == "LONG"  and d1_slope < -0.05:
+    # Slope filter — same threshold as analyze() and analyze_false_breakout()
+    if trend == "LONG"  and d1_slope < -cfg.D1_SLOPE_MAX_DECLINE:
         _reject("накопление: D1 разворот вниз")
         return None
-    if trend == "SHORT" and d1_slope > 0.05:
+    if trend == "SHORT" and d1_slope > cfg.D1_SLOPE_MAX_DECLINE:
         _reject("накопление: D1 разворот вверх")
         return None
 
-    # H4 EMA50 alignment — must be in trend direction
-    ema50_h4 = ema(h4["close"], cfg.TREND_EMA_H4)
-    h4_up    = h4["close"][-1] > ema50_h4[-1]
-    if trend == "LONG" and not h4_up:
+    # H4 EMA50 alignment — must be in trend direction (tolerance 2%)
+    ema50_h4   = ema(h4["close"], cfg.TREND_EMA_H4)
+    h4_up      = h4["close"][-1] > ema50_h4[-1]
+    h4_near_rb = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < 2.0
+    if trend == "LONG" and not h4_up and not h4_near_rb:
         _reject("накопление: H4 против тренда")
         return None
-    if trend == "SHORT" and h4_up:
+    if trend == "SHORT" and h4_up and not h4_near_rb:
         _reject("накопление: H4 против тренда")
         return None
 
     # H4 impulse guard
     h4_bear_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] < h4["open"][i])
     h4_bull_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] > h4["open"][i])
-    if trend == "LONG"  and h4_bear_cnt >= 3:
+    if trend == "LONG"  and h4_bear_cnt >= 4:
         _reject("накопление: H4 медвежий импульс")
         return None
-    if trend == "SHORT" and h4_bull_cnt >= 3:
+    if trend == "SHORT" and h4_bull_cnt >= 4:
         _reject("накопление: H4 бычий импульс")
         return None
 
@@ -1028,8 +1030,8 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     h4_vm   = vol_ma(h4["volume"], cfg.VOLUME_MA_PERIOD)
     vm_ref  = h4_vm[brk_idx - 1]
     h4_vrat = h4["volume"][brk_idx] / vm_ref if vm_ref > 0 else 0
-    if h4_vrat < 2.0:
-        _reject("накопление: объём H4 < 2.0x")
+    if h4_vrat < cfg.BRK_VOLUME_MULT:
+        _reject(f"накопление: объём H4 < {cfg.BRK_VOLUME_MULT}x")
         return None
 
     # ── ADX ──
@@ -1041,9 +1043,10 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if not adx_rising:
         _reject("накопление: ADX не растёт")
         return None
-    # Hard floor — avoid extremely flat markets
+    # Hard floor — range breakouts start with ADX 15-19 (rising from low base),
+    # so use a lower floor than the trend-following strategies.
     if cur_adx < 15:
-        _reject("накопление: ADX критически низкий")
+        _reject("накопление: ADX < 15 (слишком плоский)")
         return None
 
     # ── RSI ──
@@ -1169,10 +1172,10 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     d1_slope = trend_slope(d1["close"], 10)
 
     # Breakout requires D1 momentum aligned with direction
-    if trend == "LONG"  and d1_slope < 0.05:
+    if trend == "LONG"  and d1_slope < cfg.D1_SLOPE_MIN:
         _reject("пробой: D1 нет роста")
         return None
-    if trend == "SHORT" and d1_slope > -0.05:
+    if trend == "SHORT" and d1_slope > -cfg.D1_SLOPE_MIN:
         _reject("пробой: D1 нет падения")
         return None
 
@@ -1190,10 +1193,10 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # H4 impulse guard: 3+ of last 4 candles against direction
     h4_bear_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] < h4["open"][i])
     h4_bull_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] > h4["open"][i])
-    if trend == "LONG"  and h4_bear_cnt >= 3:
+    if trend == "LONG"  and h4_bear_cnt >= 4:
         _reject("пробой: H4 медвежий импульс")
         return None
-    if trend == "SHORT" and h4_bull_cnt >= 3:
+    if trend == "SHORT" and h4_bull_cnt >= 4:
         _reject("пробой: H4 бычий импульс")
         return None
 
@@ -1257,8 +1260,8 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # ── Volume: breakout must have 2x+ volume ──
     vm   = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
     vrat = h1["volume"][-2] / vm[-2] if vm[-2] > 0 else 0
-    if vrat < 2.0:
-        _reject("пробой: объём < 2x")
+    if vrat < cfg.BRK_VOLUME_MULT:
+        _reject(f"пробой: объём < {cfg.BRK_VOLUME_MULT}x")
         return None
 
     # ── ADX: must be trending ──

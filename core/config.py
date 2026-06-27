@@ -62,9 +62,11 @@ class Config:
     BTC_FILTER_PCT:       float = float(os.getenv("BTC_FILTER_PCT", "3.0").strip())
     # ADX minimum — below this value market is ranging, skip signal
     ADX_MIN:              float = float(os.getenv("ADX_MIN", "25.0").strip())
-    # D1 EMA slope threshold: LONG blocked if slope < -D1_SLOPE_MIN%, SHORT if > +D1_SLOPE_MIN%
-    # Set to 0.0 to disable slope filter entirely; lower value = less restrictive
+    # D1 slope for breakout strategy: require at least this % positive momentum (LONG) or negative (SHORT)
     D1_SLOPE_MIN:         float = float(os.getenv("D1_SLOPE_MIN", "0.02").strip())
+    # D1 slope for entry/reversal strategies: block LONG only when slope falls more than this % over 10 days
+    # 0.5% = only block in strong reversals; 0.0 = disable filter
+    D1_SLOPE_MAX_DECLINE: float = float(os.getenv("D1_SLOPE_MAX_DECLINE", "0.5").strip())
     # Auto-close positions older than this many hours (0 = disabled)
     MAX_POSITION_HOURS:      int   = int(os.getenv("MAX_POSITION_HOURS", "72").strip())
     # Orderbook filter

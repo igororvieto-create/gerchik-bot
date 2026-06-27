@@ -331,11 +331,11 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         _reject("D1 у EMA200 (зона неопределённости)")
         return None
 
-    # Mandatory slope filter: price above EMA200 but falling = no LONG (correction phase)
-    if trend == "LONG"  and d1_slope < -cfg.D1_SLOPE_MIN:
+    # Slope filter: block only strong reversals (> D1_SLOPE_MAX_DECLINE% over 10 days)
+    if trend == "LONG"  and d1_slope < -cfg.D1_SLOPE_MAX_DECLINE:
         _reject("D1 разворот вниз")
         return None
-    if trend == "SHORT" and d1_slope > cfg.D1_SLOPE_MIN:
+    if trend == "SHORT" and d1_slope > cfg.D1_SLOPE_MAX_DECLINE:
         _reject("D1 разворот вверх")
         return None
 
@@ -657,11 +657,11 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         _reject("ложный пробой: D1 у EMA200 (зона неопределённости)")
         return None
 
-    # Mandatory D1 slope filter — same as analyze()
-    if trend == "LONG"  and d1_slope < -cfg.D1_SLOPE_MIN:
+    # Slope filter — same threshold as analyze()
+    if trend == "LONG"  and d1_slope < -cfg.D1_SLOPE_MAX_DECLINE:
         _reject("ложный пробой: D1 разворот вниз")
         return None
-    if trend == "SHORT" and d1_slope > cfg.D1_SLOPE_MIN:
+    if trend == "SHORT" and d1_slope > cfg.D1_SLOPE_MAX_DECLINE:
         _reject("ложный пробой: D1 разворот вверх")
         return None
 
@@ -923,11 +923,11 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         _reject("накопление: D1 у EMA200 (зона неопределённости)")
         return None
 
-    # Mandatory D1 slope filter — same as analyze() and analyze_false_breakout()
-    if trend == "LONG"  and d1_slope < -cfg.D1_SLOPE_MIN:
+    # Slope filter — same threshold as analyze() and analyze_false_breakout()
+    if trend == "LONG"  and d1_slope < -cfg.D1_SLOPE_MAX_DECLINE:
         _reject("накопление: D1 разворот вниз")
         return None
-    if trend == "SHORT" and d1_slope > cfg.D1_SLOPE_MIN:
+    if trend == "SHORT" and d1_slope > cfg.D1_SLOPE_MAX_DECLINE:
         _reject("накопление: D1 разворот вверх")
         return None
 

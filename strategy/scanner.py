@@ -32,9 +32,6 @@ def _px(p: float) -> float:
     return round(p, 6)
 
 
-SL_COOLDOWN_MIN = cfg.SL_COOLDOWN_MIN  # loaded from config / env
-
-
 class Scanner:
     def __init__(self, exchange: BingXClient, bot: Bot):
         global _global_scanner
@@ -227,7 +224,7 @@ class Scanner:
     def _cooldown_minutes(self, symbol: str) -> int:
         """Return active cooldown duration in minutes for symbol (extended on loss streak)."""
         streak = self._symbol_loss_streak.get(symbol, 0)
-        return cfg.SYMBOL_LOSS_COOLDOWN_MIN if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT else SL_COOLDOWN_MIN
+        return cfg.SYMBOL_LOSS_COOLDOWN_MIN if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT else cfg.SL_COOLDOWN_MIN
 
     def _in_cooldown(self, symbol: str) -> bool:
         """Check in-memory cooldown. Uses extended duration on loss streak."""
@@ -1992,8 +1989,30 @@ class Scanner:
                                     )
                         except Exception as se:
                             issues.append(f"⚠️ {symbol}: ошибка проверки SL: {_html.escape(str(se))}")
+
+                    # TP3 order health check: re-place if order disappeared from exchange
+                    if pos.tp3 > 0 and pos.qty > 0:
+                        side_str = "BUY" if pos.side == "LONG" else "SELL"
+                        if pos.tp_order_id and pos.tp_order_id not in order_ids:
+                            log.warning(f"{symbol}: TP3 ордер {pos.tp_order_id} исчез, перевыставляем")
+                            pos.tp_order_id = ""
+                            r = await self.ex.place_take_profit(symbol, side_str, pos.qty, pos.tp3)
+                            if r.get("code") == 0:
+                                pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))
+                                await db.async_save_open_position(pos)
+                                issues.append(f"🔄 {symbol}: TP3 ордер потерялся — перевыставлен @ <code>{pos.tp3:.4f}</code>")
+                            else:
+                                issues.append(f"⚠️ {symbol}: TP3 ордер пропал, ошибка перевыставления: код {r.get('code')}")
+                        elif not pos.tp_order_id:
+                            r = await self.ex.place_take_profit(symbol, side_str, pos.qty, pos.tp3)
+                            if r.get("code") == 0:
+                                pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))
+                                await db.async_save_open_position(pos)
+                                issues.append(f"🔄 {symbol}: нет TP3 ордера — выставлен @ <code>{pos.tp3:.4f}</code>")
+                            else:
+                                log.warning(f"{symbol}: не удалось выставить TP3: код {r.get('code')}")
                 except Exception as oe:
-                    log.warning(f"health SL check {symbol}: {oe}")
+                    log.warning(f"health SL/TP check {symbol}: {oe}")
 
             log.info(
                 f"[healthcheck] баланс={balance:.2f} USDT | "

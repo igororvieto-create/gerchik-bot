@@ -1471,6 +1471,9 @@ class Scanner:
                 if not ticker:
                     continue
                 price = float(ticker.get("lastPrice", pos.entry))
+                if price <= 0:
+                    log.warning(f"monitor {symbol}: lastPrice=0 from ticker, skipping cycle")
+                    continue
 
                 # Breakeven trigger — skip for exchange-synced positions (tp1/sl unknown)
                 _be_just_fired = False
@@ -2093,15 +2096,16 @@ class Scanner:
             log.error(f"periodic_report: {e}")
 
     async def daily_report(self):
-        # Snapshot yesterday's stats BEFORE reset_day() zeroes the counters
-        d_prev     = state.day
-        wins       = d_prev.wins
-        losses     = d_prev.losses
-        trades     = d_prev.trades
-        pnl_usdt   = d_prev.pnl_usdt
-        report_date = d_prev.date
+        # state.day is reset at the first scan/monitor after midnight, so by 09:00 it's already
+        # the new day. Read yesterday's data from DB where it's permanently recorded.
+        y        = db.get_yesterday_stats()
+        trades   = y["total"]
+        wins     = y["wins"]
+        losses   = y["losses"]
+        pnl_usdt = y["pnl"]
+        report_date = y["date"]
         total_pnl_snap = state.total_pnl
-        state.reset_day()  # advance to new day
+        state.reset_day()  # ensure new day is active
         wr   = round(wins / trades * 100) if trades else 0
         sign = "+" if pnl_usdt >= 0 else ""
         await self._notify(

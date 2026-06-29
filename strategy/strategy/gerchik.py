@@ -602,6 +602,9 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if is_near_d1:
         score -= 10
     score = min(score, 100)
+    if score < cfg.MIN_SCORE:
+        _reject("score ниже MIN_SCORE")
+        return None
 
     rsi_str  = f"{cur_rsi:.0f}"
     atr_str  = f"{cur_atr:.4f}"

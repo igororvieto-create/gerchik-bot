@@ -181,6 +181,36 @@ def get_stats_by_pattern(days: Optional[int] = None) -> list:
         return []
 
 
+def get_yesterday_stats() -> dict:
+    """Stats for yesterday (UTC calendar day) — used by daily_report at 09:00 UTC."""
+    try:
+        from datetime import timedelta
+        today = datetime.utcnow().date()
+        since = (today - timedelta(days=1)).isoformat() + "T00:00:00"
+        until = today.isoformat() + "T00:00:00"
+        with _connect() as conn:
+            cur = conn.execute(
+                """SELECT
+                      SUM(CASE WHEN is_partial=0 THEN 1 ELSE 0 END),
+                      SUM(pnl),
+                      SUM(CASE WHEN is_partial=0 AND pnl>0 THEN 1 ELSE 0 END)
+                   FROM trades WHERE closed_at >= ? AND closed_at < ?""",
+                (since, until),
+            )
+            row = cur.fetchone()
+        total = row[0] or 0
+        pnl   = row[1] or 0.0
+        wins  = row[2] or 0
+        return {
+            "total": total, "pnl": round(pnl, 2),
+            "wins": wins, "losses": total - wins,
+            "date": (datetime.utcnow().date() - timedelta(days=1)).isoformat(),
+        }
+    except Exception as e:
+        log.error(f"get_yesterday_stats: {e}")
+        return {"total": 0, "pnl": 0.0, "wins": 0, "losses": 0, "date": ""}
+
+
 def get_today_stats() -> dict:
     """Stats for today (UTC) — used to restore state.day after restart.
     Counts only final closes; PnL includes all records (partials + final)."""

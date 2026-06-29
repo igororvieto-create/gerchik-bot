@@ -846,11 +846,12 @@ async def cmd_closeall(msg: Message):
                         except Exception:
                             pass
             await ex.close_position(sym, amt, side)
-            state.positions.pop(sym, None)  # pop before await — prevents monitor race
+            popped = state.positions.pop(sym, None)  # pop before await — prevents monitor race
             await db.async_delete_open_position(sym)
-            if tracked and tracked.entry > 0:
+            # Use popped value: if None, monitor already accounted this position — skip to avoid double PnL
+            if popped and popped.entry > 0:
                 try:
-                    await _account_manual_close(ex, tracked)
+                    await _account_manual_close(ex, popped)
                 except Exception as ae:
                     log.warning(f"closeall account {sym}: {ae}")
             closed.append(sym)
@@ -878,11 +879,11 @@ async def cmd_closeall(msg: Message):
             if not live:
                 # Exchange returned nothing — try to close anyway (position may exist)
                 await ex.close_position(sym, gpos.qty, gpos.side)
-            state.positions.pop(sym, None)  # pop before await — prevents monitor race
+            ghost_popped = state.positions.pop(sym, None)
             await db.async_delete_open_position(sym)
-            if gpos.entry > 0:
+            if ghost_popped and ghost_popped.entry > 0:
                 try:
-                    await _account_manual_close(ex, gpos)
+                    await _account_manual_close(ex, ghost_popped)
                 except Exception as ae:
                     log.warning(f"closeall ghost account {sym}: {ae}")
             closed.append(sym)
@@ -1150,6 +1151,36 @@ async def cmd_funding(msg: Message):
         await msg.answer(f"❌ Ошибка: {_html.escape(str(e))}", parse_mode="HTML")
 
 
+# ------------------------------------------------------------------ /setob
+
+async def cmd_setob(msg: Message):
+    if not _auth(msg):
+        return
+    args = (msg.text or "").split()
+    if len(args) < 2:
+        mode = "LOG_ONLY (не блокирует)" if cfg.ORDERBOOK_LOG_ONLY else "АКТИВНЫЙ (блокирует и даёт бонус)"
+        await msg.answer(
+            f"📊 <b>Режим стакана:</b> <code>{mode}</code>\n\n"
+            f"Стакан подтверждает/блокирует сигналы и добавляет очки.\n\n"
+            f"/setob on  — активный режим (читает и блокирует)\n"
+            f"/setob off — только логирование (не блокирует)",
+            parse_mode="HTML",
+        )
+        return
+    v = args[1].lower()
+    if v not in ("on", "off"):
+        await msg.answer("Введи on или off (например: /setob on)")
+        return
+    cfg.ORDERBOOK_LOG_ONLY = (v == "off")
+    await db.async_save_cfg_value("ORDERBOOK_LOG_ONLY", str(cfg.ORDERBOOK_LOG_ONLY).lower())
+    mode = "LOG_ONLY (не блокирует)" if cfg.ORDERBOOK_LOG_ONLY else "АКТИВНЫЙ (блокирует и даёт бонус)"
+    await msg.answer(
+        f"✅ Стакан: <code>{mode}</code>",
+        parse_mode="HTML",
+        reply_markup=main_keyboard(),
+    )
+
+
 # ------------------------------------------------------------------ register
 
 def register_handlers(dp: Dispatcher):
@@ -1183,6 +1214,7 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_scan,     Command("scan"))
     dp.message.register(cmd_closeall,     Command("closeall"))
     dp.message.register(cmd_close_symbol, Command("close"))
+    dp.message.register(cmd_setob,        Command("setob"))
     dp.message.register(handle_misc)
     dp.callback_query.register(
         handle_signal_callback,

@@ -791,8 +791,10 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # ── Funding ──
     if funding is not None:
         if trend == "LONG"  and funding > cfg.FUNDING_MAX_LONG:
+            _reject("фандинг высокий")
             return None
         if trend == "SHORT" and funding < cfg.FUNDING_MAX_SHORT:
+            _reject("фандинг низкий")
             return None
 
     # ── SL: beyond the false breakout wick extreme ──
@@ -1062,8 +1064,10 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # ── Funding ──
     if funding is not None:
         if trend == "LONG"  and funding > cfg.FUNDING_MAX_LONG:
+            _reject("фандинг высокий")
             return None
         if trend == "SHORT" and funding < cfg.FUNDING_MAX_SHORT:
+            _reject("фандинг низкий")
             return None
 
     # ── SL: just inside the broken range boundary ──
@@ -1284,8 +1288,10 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # ── Funding ──
     if funding is not None:
         if trend == "LONG"  and funding > cfg.FUNDING_MAX_LONG:
+            _reject("фандинг высокий")
             return None
         if trend == "SHORT" and funding < cfg.FUNDING_MAX_SHORT:
+            _reject("фандинг низкий")
             return None
 
     # ── SL: just below broken level ──

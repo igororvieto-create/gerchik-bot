@@ -32,9 +32,6 @@ def _px(p: float) -> float:
     return round(p, 6)
 
 
-SL_COOLDOWN_MIN = cfg.SL_COOLDOWN_MIN  # loaded from config / env
-
-
 class Scanner:
     def __init__(self, exchange: BingXClient, bot: Bot):
         global _global_scanner
@@ -227,7 +224,7 @@ class Scanner:
     def _cooldown_minutes(self, symbol: str) -> int:
         """Return active cooldown duration in minutes for symbol (extended on loss streak)."""
         streak = self._symbol_loss_streak.get(symbol, 0)
-        return cfg.SYMBOL_LOSS_COOLDOWN_MIN if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT else SL_COOLDOWN_MIN
+        return cfg.SYMBOL_LOSS_COOLDOWN_MIN if streak >= cfg.SYMBOL_LOSS_STREAK_LIMIT else cfg.SL_COOLDOWN_MIN
 
     def _in_cooldown(self, symbol: str) -> bool:
         """Check in-memory cooldown. Uses extended duration on loss streak."""
@@ -552,12 +549,12 @@ class Scanner:
                         thin_book_threshold_usdt=cfg.OB_THIN_THRESHOLD_USDT,
                         max_spread_bps=cfg.OB_MAX_SPREAD_BPS,
                     )
-                    # Auto-leverage for orderbook validation (same tier logic)
+                    # Auto-leverage for orderbook validation — must match _enter() tier logic exactly
                     ob_lev = cfg.LEVERAGE
                     if cfg.AUTO_LEVERAGE:
                         bal = state.current_balance  # already fetched at scan start; avoid concurrent API calls
                         if bal > 0:
-                            ob_lev = 5 if bal < 1000 else 3
+                            ob_lev = 3 if bal < 100 else (5 if bal < 2000 else 3)
                     ob_val = await validate_signal_with_orderbook(
                         sig, self.ex, ob_lev, ob_cfg,
                         log_only=cfg.ORDERBOOK_LOG_ONLY,
@@ -567,8 +564,41 @@ class Scanner:
                             from strategy.strategy.gerchik import _reject as _rej
                             _rej(f"OB:{r}")
                         sig = None
-                    elif ob_val.suggested_leverage is not None:
-                        sig._ob_suggested_leverage = ob_val.suggested_leverage
+                    else:
+                        if ob_val.suggested_leverage is not None:
+                            sig._ob_suggested_leverage = ob_val.suggested_leverage
+                        # Score bonus: order book actively confirms the signal direction
+                        m = ob_val.metrics
+                        if m and m.is_valid:
+                            imb = m.imbalance_3pct
+                            strong = cfg.OB_SCORE_STRONG_IMBALANCE
+                            weak   = cfg.OB_SCORE_WEAK_IMBALANCE
+                            if (sig.side == "LONG" and imb >= strong) or \
+                               (sig.side == "SHORT" and imb <= -strong):
+                                sig.score = min(100, sig.score + 8)
+                                sig.reason += f"\n📊 <b>Стакан</b>: сильный перевес {imb:+.1%} +8"
+                                log.info(f"{symbol}: OB сильный дисбаланс {imb:+.1%} → +8 к скору")
+                            elif (sig.side == "LONG" and imb >= weak) or \
+                                 (sig.side == "SHORT" and imb <= -weak):
+                                sig.score = min(100, sig.score + 4)
+                                sig.reason += f"\n📊 <b>Стакан</b>: перевес {imb:+.1%} +4"
+                            # Protecting wall behind SL (stops stop-hunt from clearing position)
+                            if sig.side == "LONG" and m.nearest_bid_wall \
+                               and sig.sl > 0 and m.nearest_bid_wall.price <= sig.sl:
+                                sig.score = min(100, sig.score + 5)
+                                sig.reason += (
+                                    f"\n🧱 <b>Защитная стена</b> "
+                                    f"{m.nearest_bid_wall.price:.4f} "
+                                    f"({m.nearest_bid_wall.size_usdt/1000:.0f}k) +5"
+                                )
+                            elif sig.side == "SHORT" and m.nearest_ask_wall \
+                               and sig.sl > 0 and m.nearest_ask_wall.price >= sig.sl:
+                                sig.score = min(100, sig.score + 5)
+                                sig.reason += (
+                                    f"\n🧱 <b>Защитная стена</b> "
+                                    f"{m.nearest_ask_wall.price:.4f} "
+                                    f"({m.nearest_ask_wall.size_usdt/1000:.0f}k) +5"
+                                )
                 except Exception as obe:
                     log.warning(f"orderbook filter {symbol}: {obe}")
 
@@ -1413,7 +1443,7 @@ class Scanner:
                 )
 
         # Clean up stale sl_cooldown entries — use max possible cooldown to not evict early
-        max_cooldown = max(SL_COOLDOWN_MIN, cfg.SYMBOL_LOSS_COOLDOWN_MIN)
+        max_cooldown = max(cfg.SL_COOLDOWN_MIN, cfg.SYMBOL_LOSS_COOLDOWN_MIN)
         cutoff = datetime.utcnow() - timedelta(minutes=max_cooldown * 2)
         self._sl_cooldown = {s: t for s, t in self._sl_cooldown.items() if t > cutoff}
 
@@ -1959,8 +1989,30 @@ class Scanner:
                                     )
                         except Exception as se:
                             issues.append(f"⚠️ {symbol}: ошибка проверки SL: {_html.escape(str(se))}")
+
+                    # TP3 order health check: re-place if order disappeared from exchange
+                    if pos.tp3 > 0 and pos.qty > 0:
+                        side_str = "BUY" if pos.side == "LONG" else "SELL"
+                        if pos.tp_order_id and pos.tp_order_id not in order_ids:
+                            log.warning(f"{symbol}: TP3 ордер {pos.tp_order_id} исчез, перевыставляем")
+                            pos.tp_order_id = ""
+                            r = await self.ex.place_take_profit(symbol, side_str, pos.qty, pos.tp3)
+                            if r.get("code") == 0:
+                                pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))
+                                await db.async_save_open_position(pos)
+                                issues.append(f"🔄 {symbol}: TP3 ордер потерялся — перевыставлен @ <code>{pos.tp3:.4f}</code>")
+                            else:
+                                issues.append(f"⚠️ {symbol}: TP3 ордер пропал, ошибка перевыставления: код {r.get('code')}")
+                        elif not pos.tp_order_id:
+                            r = await self.ex.place_take_profit(symbol, side_str, pos.qty, pos.tp3)
+                            if r.get("code") == 0:
+                                pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))
+                                await db.async_save_open_position(pos)
+                                issues.append(f"🔄 {symbol}: нет TP3 ордера — выставлен @ <code>{pos.tp3:.4f}</code>")
+                            else:
+                                log.warning(f"{symbol}: не удалось выставить TP3: код {r.get('code')}")
                 except Exception as oe:
-                    log.warning(f"health SL check {symbol}: {oe}")
+                    log.warning(f"health SL/TP check {symbol}: {oe}")
 
             log.info(
                 f"[healthcheck] баланс={balance:.2f} USDT | "

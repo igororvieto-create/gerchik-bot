@@ -846,11 +846,12 @@ async def cmd_closeall(msg: Message):
                         except Exception:
                             pass
             await ex.close_position(sym, amt, side)
-            state.positions.pop(sym, None)  # pop before await — prevents monitor race
+            popped = state.positions.pop(sym, None)  # pop before await — prevents monitor race
             await db.async_delete_open_position(sym)
-            if tracked and tracked.entry > 0:
+            # Use popped value: if None, monitor already accounted this position — skip to avoid double PnL
+            if popped and popped.entry > 0:
                 try:
-                    await _account_manual_close(ex, tracked)
+                    await _account_manual_close(ex, popped)
                 except Exception as ae:
                     log.warning(f"closeall account {sym}: {ae}")
             closed.append(sym)
@@ -878,11 +879,11 @@ async def cmd_closeall(msg: Message):
             if not live:
                 # Exchange returned nothing — try to close anyway (position may exist)
                 await ex.close_position(sym, gpos.qty, gpos.side)
-            state.positions.pop(sym, None)  # pop before await — prevents monitor race
+            ghost_popped = state.positions.pop(sym, None)
             await db.async_delete_open_position(sym)
-            if gpos.entry > 0:
+            if ghost_popped and ghost_popped.entry > 0:
                 try:
-                    await _account_manual_close(ex, gpos)
+                    await _account_manual_close(ex, ghost_popped)
                 except Exception as ae:
                     log.warning(f"closeall ghost account {sym}: {ae}")
             closed.append(sym)

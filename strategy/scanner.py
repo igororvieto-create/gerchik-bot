@@ -549,12 +549,12 @@ class Scanner:
                         thin_book_threshold_usdt=cfg.OB_THIN_THRESHOLD_USDT,
                         max_spread_bps=cfg.OB_MAX_SPREAD_BPS,
                     )
-                    # Auto-leverage for orderbook validation (same tier logic)
+                    # Auto-leverage for orderbook validation — must match _enter() tier logic exactly
                     ob_lev = cfg.LEVERAGE
                     if cfg.AUTO_LEVERAGE:
                         bal = state.current_balance  # already fetched at scan start; avoid concurrent API calls
                         if bal > 0:
-                            ob_lev = 5 if bal < 1000 else 3
+                            ob_lev = 3 if bal < 100 else (5 if bal < 2000 else 3)
                     ob_val = await validate_signal_with_orderbook(
                         sig, self.ex, ob_lev, ob_cfg,
                         log_only=cfg.ORDERBOOK_LOG_ONLY,
@@ -1443,7 +1443,7 @@ class Scanner:
                 )
 
         # Clean up stale sl_cooldown entries — use max possible cooldown to not evict early
-        max_cooldown = max(SL_COOLDOWN_MIN, cfg.SYMBOL_LOSS_COOLDOWN_MIN)
+        max_cooldown = max(cfg.SL_COOLDOWN_MIN, cfg.SYMBOL_LOSS_COOLDOWN_MIN)
         cutoff = datetime.utcnow() - timedelta(minutes=max_cooldown * 2)
         self._sl_cooldown = {s: t for s, t in self._sl_cooldown.items() if t > cutoff}
 

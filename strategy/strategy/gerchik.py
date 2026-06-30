@@ -645,7 +645,7 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     """
     if not d1 or not h4 or not h1:
         return None
-    if len(d1["close"]) < cfg.TREND_EMA_D1 or len(h4["close"]) < 55 or len(h1["close"]) < 40:
+    if len(d1["close"]) < cfg.TREND_EMA_D1 or len(h4["close"]) < cfg.TREND_EMA_H4 + 5 or len(h1["close"]) < 40:
         return None
 
     # ── D1 trend ──
@@ -831,6 +831,12 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         wick_pct = (fb_candle["h"] - fb_level) / fb_level * 100
 
     touches = level_touches(fb_level, h4["high"][-120:], h4["low"][-120:])
+    if touches == 0:
+        _reject("ложный пробой: уровень не подтверждён на H4 (0 касаний)")
+        return None
+    if touches > 6:
+        _reject("ложный пробой: уровень пробит (>6 касаний H4)")
+        return None
 
     # ── Score (base 58 — strong setup) ──
     score = 58
@@ -914,7 +920,7 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if not d1 or not h4 or not h1:
         return None
     n4 = len(h4["close"])
-    if len(d1["close"]) < cfg.TREND_EMA_D1 or n4 < 50 or len(h1["close"]) < 40:
+    if len(d1["close"]) < cfg.TREND_EMA_D1 or n4 < cfg.TREND_EMA_H4 + 5 or len(h1["close"]) < 40:
         return None
 
     # ── D1 trend ──
@@ -1169,7 +1175,7 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     """
     if not d1 or not h4 or not h1:
         return None
-    if len(d1["close"]) < cfg.TREND_EMA_D1 or len(h4["close"]) < 55 or len(h1["close"]) < 40:
+    if len(d1["close"]) < cfg.TREND_EMA_D1 or len(h4["close"]) < cfg.TREND_EMA_H4 + 5 or len(h1["close"]) < 40:
         return None
 
     # ── D1 trend ──

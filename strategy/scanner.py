@@ -49,6 +49,8 @@ class Scanner:
         self._entering: set = set()             # symbols currently in-flight in _enter()
         self._sl_mark_skip: dict = {}           # symbol → cycles skipped due to mark=0 in health_check
         self._being_closed: set = set()         # symbols for which close_position is in-flight (dedup guard)
+        self._sl_replacing: set = set()         # symbols where _move_be/_trail_sl is mid-swap of SL order
+        self._tp_replacing: set = set()         # symbols where _partial_close is mid-swap of TP order
         _global_scanner = self
         self._restore_cooldowns()
 
@@ -304,7 +306,7 @@ class Scanner:
     async def update_pairs(self):
         try:
             if cfg.WHITELIST:
-                state.pairs = list(cfg.WHITELIST)
+                state.pairs = [s for s in cfg.WHITELIST if s not in cfg.BLACKLIST]
             else:
                 symbols = await self.ex.get_top_symbols(cfg.TOP_N_PAIRS)
                 state.pairs = [
@@ -1010,6 +1012,18 @@ class Scanner:
                         log.info(f"{sig.symbol}: лимитный ордер отменён (таймаут {cfg.LIMIT_ORDER_TIMEOUT_SEC}с)")
                     except Exception as _ce:
                         log.warning(f"cancel limit {sig.symbol}: {_ce}")
+                        # Check order status — if still OPEN on exchange, alert user to cancel manually.
+                        # An unfilled uncancelled limit order can fill later without SL/TP protection.
+                        try:
+                            _ord = await self.ex.get_order(sig.symbol, order_id)
+                            _st  = str(_ord.get("status", "") or _ord.get("data", {}).get("status", ""))
+                            if _st.upper() in ("NEW", "PARTIALLY_FILLED", "PENDING_NEW", "PENDING"):
+                                await self._notify(
+                                    f"🚨 <b>{sig.symbol}</b>: лимитный ордер #{order_id} НЕ ОТМЕНЁН на бирже!\n"
+                                    f"Статус: <code>{_st}</code>. Отмени вручную — иначе откроется без SL!"
+                                )
+                        except Exception as _ge:
+                            log.warning(f"get_order after cancel failure {sig.symbol}: {_ge}")
                     # Check for partial fill: a position may exist even after cancel
                     await asyncio.sleep(0.5)
                     _partial_qty = 0.0
@@ -1215,6 +1229,17 @@ class Scanner:
             if not sl_id:
                 log.warning(f"SL выставлен (code=0) но orderId не получен {sig.symbol} — отмена SL позже недоступна")
 
+            # Persist sl_order_id immediately — shrinks the crash window between SL placement
+            # and position being tracked in state.  On restart health_check detects missing TP.
+            _pre_pos.sl_order_id = sl_id
+            await db.async_save_open_position(_pre_pos)
+
+            # Register position in state BEFORE TP placement.  If place_take_profit raises
+            # (network outage), the position is already tracked; health_check will re-place TP.
+            pos = _pre_pos
+            state.positions[sig.symbol] = pos
+            state.day.trades += 1
+
             tp_order = await self.ex.place_take_profit(sig.symbol, side, qty, sig.tp3)
             tp_id    = str(tp_order.get("data", {}).get("orderId", ""))
             if tp_order.get("code") != 0:
@@ -1228,11 +1253,7 @@ class Scanner:
                         f"При достижении TP3 <code>{sig.tp3:.4f}</code> закрой вручную"
                     )
 
-            _pre_pos.sl_order_id = sl_id
-            _pre_pos.tp_order_id = tp_id
-            pos = _pre_pos
-            state.positions[sig.symbol] = pos
-            state.day.trades += 1
+            pos.tp_order_id = tp_id
             state.pending.pop(sig.symbol, None)
             await db.async_save_open_position(pos)
 
@@ -1315,8 +1336,19 @@ class Scanner:
         # Sync with BingX: detect positions closed externally (SL/TP hit on exchange)
         try:
             live = await self.ex.get_open_positions()
-            live_syms = {p.get("symbol") for p in live if abs(float(p.get("positionAmt", 0))) > 0}
+            # Guard: an API error (auth expiry, maintenance) returns an empty list but the
+            # positions still exist on the exchange.  Purging state on an API failure would
+            # close all tracked positions with wrong PnL.  Skip the sync loop when the
+            # exchange returns nothing while we have active positions.
+            if not live and state.positions:
+                log.warning("monitor sync: биржа вернула пустой список позиций при наличии "
+                            "отслеживаемых — пропуск синхронизации (возможна ошибка API)")
+                live_syms = None  # sentinel — skip the purge loop below
+            else:
+                live_syms = {p.get("symbol") for p in live if abs(float(p.get("positionAmt", 0))) > 0}
             for symbol, pos in list(state.positions.items()):
+                if live_syms is None:
+                    break  # skip purge when exchange returned empty on API error
                 age = (datetime.utcnow() - pos.opened_at).total_seconds()
                 if age > 60 and symbol not in live_syms:
                     # Position no longer on exchange — clean up state
@@ -1535,6 +1567,8 @@ class Scanner:
 
             if pos.sl_order_id:
                 old_sl_id = pos.sl_order_id
+                old_sl_price = pos.sl  # save for restore if new placement fails
+                self._sl_replacing.add(pos.symbol)  # block health_check re-place during swap
                 pos.sl_order_id = ""  # clear first — health_check re-places if new SL fails
                 try:
                     await self.ex.cancel_order(pos.symbol, old_sl_id)
@@ -1542,9 +1576,12 @@ class Scanner:
                     # Cancel failed — old SL is still active on exchange.
                     # Restore ID and abort to avoid placing a duplicate SL order.
                     pos.sl_order_id = old_sl_id
+                    self._sl_replacing.discard(pos.symbol)
                     log.warning(f"_move_be {pos.symbol}: cancel failed, retrying next cycle")
                     return
             else:
+                old_sl_price = pos.sl
+                self._sl_replacing.add(pos.symbol)
                 # No tracked SL order — cancel any lingering STOP orders to avoid duplicates
                 try:
                     open_orders = await self.ex.get_open_orders(pos.symbol)
@@ -1560,7 +1597,18 @@ class Scanner:
             side = "BUY" if pos.side == "LONG" else "SELL"
             r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, be_price)
             if r.get("code") != 0:
+                self._sl_replacing.discard(pos.symbol)
                 log.error(f"BE SL не выставился {pos.symbol}: {r.get('code')} {r.get('msg','')}")
+                # Try to restore original SL so position is not left unprotected
+                try:
+                    r2 = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, old_sl_price)
+                    if r2.get("code") == 0:
+                        pos.sl_order_id = str(r2.get("data", {}).get("orderId", ""))
+                        log.info(f"_move_be {pos.symbol}: исходный SL восстановлен @ {old_sl_price:.4f}")
+                    else:
+                        log.error(f"_move_be {pos.symbol}: восстановление SL не удалось — health_check перевыставит")
+                except Exception as _re:
+                    log.error(f"_move_be {pos.symbol}: ошибка восстановления SL: {_re}")
                 await self._notify(
                     f"⚠️ <b>{pos.symbol}</b>: SL на безубыток не выставился "
                     f"(код {r.get('code')}) — позиция без защиты!"
@@ -1570,6 +1618,7 @@ class Scanner:
             pos.sl          = be_price
             pos.be_moved    = True
             pos.trail_price = be_price
+            self._sl_replacing.discard(pos.symbol)  # unblock health_check
             await db.async_save_open_position(pos)  # persist BE state change
 
             trigger_info = (
@@ -1584,6 +1633,7 @@ class Scanner:
                 + (f" (+{cfg.BE_BUFFER_PCT}% буфер)" if cfg.BE_BUFFER_PCT > 0 else "")
             )
         except Exception as e:
+            self._sl_replacing.discard(pos.symbol)
             log.error(f"move_be {pos.symbol}: {e}")
 
     async def _trail_sl(self, pos: Position, price: float):
@@ -1609,15 +1659,20 @@ class Scanner:
 
             if pos.sl_order_id:
                 old_sl_id = pos.sl_order_id
+                old_sl_price = pos.sl
+                self._sl_replacing.add(pos.symbol)  # block health_check during swap
                 pos.sl_order_id = ""  # clear first — health_check re-places if new SL fails
                 try:
                     await self.ex.cancel_order(pos.symbol, old_sl_id)
                 except Exception:
                     # Cancel failed — old SL still active on exchange; abort to avoid duplicate.
                     pos.sl_order_id = old_sl_id
+                    self._sl_replacing.discard(pos.symbol)
                     log.warning(f"_trail_sl {pos.symbol}: cancel failed, retrying next cycle")
                     return
             else:
+                old_sl_price = pos.sl
+                self._sl_replacing.add(pos.symbol)
                 # No tracked SL order — cancel any lingering STOP orders to avoid duplicates
                 try:
                     open_orders = await self.ex.get_open_orders(pos.symbol)
@@ -1634,14 +1689,27 @@ class Scanner:
             r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, new_sl)
             new_id = str(r.get("data", {}).get("orderId", ""))
             if r.get("code") != 0 or not new_id:
+                self._sl_replacing.discard(pos.symbol)
                 log.warning(f"Trail SL не обновился {pos.symbol}: код {r.get('code')}")
+                # Try to restore old SL so position is not left unprotected
+                try:
+                    r2 = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, old_sl_price)
+                    if r2.get("code") == 0:
+                        pos.sl_order_id = str(r2.get("data", {}).get("orderId", ""))
+                        log.info(f"_trail_sl {pos.symbol}: исходный SL восстановлен @ {old_sl_price:.4f}")
+                    else:
+                        log.warning(f"_trail_sl {pos.symbol}: восстановление SL не удалось — health_check перевыставит")
+                except Exception as _re:
+                    log.warning(f"_trail_sl {pos.symbol}: ошибка восстановления SL: {_re}")
                 return
             pos.sl_order_id = new_id
             pos.sl = new_sl
             pos.trail_price = new_trail  # update only after exchange confirms
+            self._sl_replacing.discard(pos.symbol)  # unblock health_check
             log.info(f"Trail SL {pos.symbol} → {new_sl:.4f}")
             await db.async_save_open_position(pos)
         except Exception as e:
+            self._sl_replacing.discard(pos.symbol)
             log.error(f"trail_sl {pos.symbol}: {e}")
 
     async def _partial_close(self, pos: Position, pct: float, label: str):
@@ -1667,27 +1735,35 @@ class Scanner:
                 pos.tp2_hit = True
             await db.async_save_open_position(pos)
 
-            # Record PnL for the closed portion; use entry as safe fallback (zero PnL, not inflated)
+            # Record PnL for the closed portion; skip when ticker is unavailable.
+            # Using entry price (zero PnL) would write a LOSS record and trigger a spurious
+            # loss_streak increment.  The PnL is accounted at the final close instead.
             close_price = pos.entry
+            price_known = False
             try:
                 ticker = await self.ex.get_ticker(pos.symbol)
                 if ticker and float(ticker.get("lastPrice", 0)) > 0:
                     close_price = float(ticker.get("lastPrice", pos.entry))
+                    price_known = True
             except Exception as pe:
                 log.warning(f"partial_close ticker {pos.symbol}: {pe}")
-            partial_pnl = (close_price - pos.entry) * qty if pos.side == "LONG" \
-                          else (pos.entry - close_price) * qty
-            state.total_pnl    += partial_pnl
-            state.day.pnl_usdt += partial_pnl
-            pos.partial_pnl_taken += partial_pnl
-            try:
-                from dataclasses import replace as dc_replace
-                pos_snap = dc_replace(pos, qty=qty)
-                await db.async_save_trade(pos_snap, close_price, round(partial_pnl, 4),
-                                          "WIN" if partial_pnl > 0 else "LOSS",
-                                          is_partial=True)
-            except Exception as pe:
-                log.error(f"partial_close db.save_trade {pos.symbol}: {pe}")
+            if price_known:
+                partial_pnl = (close_price - pos.entry) * qty if pos.side == "LONG" \
+                              else (pos.entry - close_price) * qty
+                state.total_pnl    += partial_pnl
+                state.day.pnl_usdt += partial_pnl
+                pos.partial_pnl_taken += partial_pnl
+                try:
+                    from dataclasses import replace as dc_replace
+                    pos_snap = dc_replace(pos, qty=qty)
+                    await db.async_save_trade(pos_snap, close_price, round(partial_pnl, 4),
+                                              "WIN" if partial_pnl > 0 else "LOSS",
+                                              is_partial=True)
+                except Exception as pe:
+                    log.error(f"partial_close db.save_trade {pos.symbol}: {pe}")
+            else:
+                partial_pnl = 0.0
+                log.warning(f"{pos.symbol}: цена частичного закрытия неизвестна — PnL учтётся при финальном закрытии")
             sign = "+" if partial_pnl >= 0 else ""
             if label == "TP1":
                 await self._notify(
@@ -1724,6 +1800,7 @@ class Scanner:
             # Re-place TP3 for remaining qty (old order had original full qty)
             if pos.tp_order_id:
                 old_tp_id = pos.tp_order_id
+                self._tp_replacing.add(pos.symbol)  # block health_check TP3 re-place during swap
                 pos.tp_order_id = ""
                 try:
                     await self.ex.cancel_order(pos.symbol, old_tp_id)
@@ -1735,9 +1812,12 @@ class Scanner:
                     pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))
                 else:
                     log.error(f"partial_close {pos.symbol}: TP3 не выставился (код {r.get('code')}) — health_check перевыставит")
+            self._tp_replacing.discard(pos.symbol)  # unblock health_check TP3 check
 
             await db.async_save_open_position(pos)  # persist updated qty and tp2_hit flag
         except Exception as e:
+            self._tp_replacing.discard(pos.symbol)
+            self._sl_replacing.discard(pos.symbol)
             log.error(f"partial_close {pos.symbol}: {e}")
             try:
                 await self._notify(f"⚠️ Ошибка частичного закрытия <b>{pos.symbol}</b>: {_html.escape(str(e))}")
@@ -1879,8 +1959,9 @@ class Scanner:
                                 )
                         else:
                             issues.append(f"⚠️ {symbol}: нет SL-уровня (внешняя позиция?)")
-                    else:
-                        # Has SL price but no order ID — try to re-place
+                    elif symbol not in self._sl_replacing:
+                        # Has SL price but no order ID — try to re-place.
+                        # Skip when _move_be/_trail_sl is mid-swap to avoid duplicate SL orders.
                         log.warning(f"{symbol}: нет sl_order_id, перевыставляем SL @ {pos.sl}")
                         try:
                             ticker = await self.ex.get_ticker(symbol)
@@ -1998,7 +2079,9 @@ class Scanner:
                     # TP3 order health check: re-place if order disappeared from exchange
                     if pos.tp3 > 0 and pos.qty > 0:
                         side_str = "BUY" if pos.side == "LONG" else "SELL"
-                        if pos.tp_order_id and pos.tp_order_id not in order_ids:
+                        if symbol in self._tp_replacing:
+                            pass  # _partial_close is mid-swap; it will set the new TP3 order ID
+                        elif pos.tp_order_id and pos.tp_order_id not in order_ids:
                             log.warning(f"{symbol}: TP3 ордер {pos.tp_order_id} исчез, перевыставляем")
                             pos.tp_order_id = ""
                             r = await self.ex.place_take_profit(symbol, side_str, pos.qty, pos.tp3)

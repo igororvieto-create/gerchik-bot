@@ -879,13 +879,19 @@ async def cmd_closeall(msg: Message):
             if not live:
                 # Exchange returned nothing — try to close anyway (position may exist)
                 await ex.close_position(sym, gpos.qty, gpos.side)
-            ghost_popped = state.positions.pop(sym, None)
-            await db.async_delete_open_position(sym)
-            if ghost_popped and ghost_popped.entry > 0:
-                try:
-                    await _account_manual_close(ex, ghost_popped)
-                except Exception as ae:
-                    log.warning(f"closeall ghost account {sym}: {ae}")
+                ghost_popped = state.positions.pop(sym, None)
+                await db.async_delete_open_position(sym)
+                if ghost_popped and ghost_popped.entry > 0:
+                    try:
+                        await _account_manual_close(ex, ghost_popped)
+                    except Exception as ae:
+                        log.warning(f"closeall ghost account {sym}: {ae}")
+            else:
+                # Position absent from exchange — already closed by SL/TP.
+                # monitor_positions will (or already did) account for it via _record_close.
+                # Don't double-account: just purge from state so it's not re-tracked.
+                state.positions.pop(sym, None)
+                await db.async_delete_open_position(sym)
             closed.append(sym)
         except Exception as e:
             log.error(f"closeall ghost {sym}: {e}")
@@ -926,8 +932,14 @@ async def cmd_close_symbol(msg: Message):
                 except Exception:
                     pass
         await ex.close_position(symbol, pos.qty, pos.side)
-        state.positions.pop(symbol, None)  # pop before await — prevents monitor race
-        close_px, leg_pnl = await _account_manual_close(ex, pos)
+        popped = state.positions.pop(symbol, None)  # pop before await — prevents monitor race
+        try:
+            close_px, leg_pnl = await _account_manual_close(ex, pos)
+        except Exception as _ae:
+            # Accounting failed — restore tracking so position is not permanently lost
+            if popped:
+                state.positions[symbol] = popped
+            raise _ae
         await db.async_delete_open_position(symbol)  # after accounting
         sign = "+" if leg_pnl >= 0 else ""
         await msg.answer(
@@ -1006,6 +1018,17 @@ async def handle_signal_callback(cb: CallbackQuery):
         from strategy.scanner import _global_scanner
         if _global_scanner:
             await _global_scanner._enter(pend["signal"], confirmed=True)
+            # _enter() may silently return (e.g. _entering guard fires) without raising.
+            # Detect this and restore pending so the user can retry.
+            if symbol not in state.positions:
+                state.pending.setdefault(symbol, pend)
+                try:
+                    cbm4 = cb.message
+                    if isinstance(cbm4, Message):
+                        await cbm4.answer("⚠️ Вход не выполнен — уже в процессе или пауза. Попробуй снова.", reply_markup=main_keyboard())
+                except Exception:
+                    pass
+                return
         else:
             from exchange.bingx import BingXClient
             from strategy.scanner import Scanner

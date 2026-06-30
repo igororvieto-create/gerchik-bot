@@ -210,18 +210,28 @@ class Scanner:
         return total_trade_pnl
 
     async def _drought_alert(self, diag: str = "") -> None:
-        """Send a 24h no-signal drought alert at most once every ~2 hours."""
+        """Send a no-signal drought alert at most once every ~2 hours."""
+        if self._scan_count % 8 != 1:
+            return
         if self._last_signal_time is None:
-            return
-        drought_h = (datetime.utcnow() - self._last_signal_time).total_seconds() / 3600
-        if drought_h < 24 or self._scan_count % 8 != 1:
-            return
-        msg = (
-            f"⏳ <b>Нет сигналов уже {drought_h:.0f}ч</b>\n"
-            f"MIN_SCORE: {cfg.MIN_SCORE} | Пар: {len(state.pairs)}"
-        )
+            # Bot started and found no signal at all yet — alert after 2h (8 scans)
+            if self._scan_count < 8:
+                return
+            drought_h = self._scan_count * 15 / 60  # approximate minutes since start
+            msg = (
+                f"⏳ <b>Нет сигналов с запуска (~{drought_h:.0f}ч)</b>\n"
+                f"ADX_MIN: {cfg.ADX_MIN} | MIN_SCORE: {cfg.MIN_SCORE} | Пар: {len(state.pairs)}"
+            )
+        else:
+            drought_h = (datetime.utcnow() - self._last_signal_time).total_seconds() / 3600
+            if drought_h < 24:
+                return
+            msg = (
+                f"⏳ <b>Нет сигналов уже {drought_h:.0f}ч</b>\n"
+                f"ADX_MIN: {cfg.ADX_MIN} | MIN_SCORE: {cfg.MIN_SCORE} | Пар: {len(state.pairs)}"
+            )
         if diag:
-            msg += f"\n📊 Топ причин отсева: {diag}\nРассмотри снижение MIN_SCORE или смену пар"
+            msg += f"\n📊 Топ причин отсева: {diag}"
         await self._notify(msg)
 
     def _cooldown_minutes(self, symbol: str) -> int:
@@ -557,7 +567,7 @@ class Scanner:
                     if cfg.AUTO_LEVERAGE:
                         bal = state.current_balance  # already fetched at scan start; avoid concurrent API calls
                         if bal > 0:
-                            ob_lev = 3 if bal < 100 else (5 if bal < 2000 else 3)
+                            ob_lev = 10 if bal < 100 else (7 if bal < 500 else (5 if bal < 2000 else 3))
                     ob_val = await validate_signal_with_orderbook(
                         sig, self.ex, ob_lev, ob_cfg,
                         log_only=cfg.ORDERBOOK_LOG_ONLY,

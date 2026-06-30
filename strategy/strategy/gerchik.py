@@ -418,7 +418,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
 
     touches = level_touches(level, h4["high"][-120:], h4["low"][-120:])
     if touches == 0:
-        _reject("уровень не подтверждён (0 касаний H4)")
+        # Level may be H1-specific — fall back to H1 confirmation
+        touches = level_touches(level, h1["high"][-80:], h1["low"][-80:])
+    if touches == 0:
+        _reject("уровень не подтверждён (0 касаний H4/H1)")
         return None
     if touches > 6:
         _reject("уровень пробит (>6 касаний)")
@@ -832,7 +835,10 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
 
     touches = level_touches(fb_level, h4["high"][-120:], h4["low"][-120:])
     if touches == 0:
-        _reject("ложный пробой: уровень не подтверждён на H4 (0 касаний)")
+        # Level may be H1-specific — fall back to H1 confirmation
+        touches = level_touches(fb_level, h1["high"][-80:], h1["low"][-80:])
+    if touches == 0:
+        _reject("ложный пробой: уровень не подтверждён на H4/H1 (0 касаний)")
         return None
     if touches > 6:
         _reject("ложный пробой: уровень пробит (>6 касаний H4)")
@@ -1267,7 +1273,10 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
 
     touches = level_touches(broken_level, h4["high"][-120:], h4["low"][-120:])
     if touches < 2:
-        _reject("пробой: уровень не подтверждён (<2 касаний)")
+        # Level may be H1-specific — fall back to H1 confirmation
+        touches = level_touches(broken_level, h1["high"][-80:], h1["low"][-80:])
+    if touches < 2:
+        _reject("пробой: уровень не подтверждён (<2 касаний H4/H1)")
         return None
 
     # ── Volume: breakout must have 2x+ volume ──

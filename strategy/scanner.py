@@ -1344,6 +1344,7 @@ class Scanner:
             await self._check_open_funding()
 
         # Sync with BingX: detect positions closed externally (SL/TP hit on exchange)
+        live_syms = None  # init before try so it's always defined for the age-close loop below
         try:
             live = await self.ex.get_open_positions()
             # Guard: an API error (auth expiry, maintenance) returns an empty list but the
@@ -1403,6 +1404,10 @@ class Scanner:
         for symbol, pos in list(state.positions.items()):
             # Guard: exchange sync above may have already removed this position
             if symbol not in state.positions:
+                continue
+            # Skip age-based auto-close when exchange API is down (live_syms=None) — we cannot
+            # confirm position state, and 3 failed close_position calls would purge it from state.
+            if live_syms is None:
                 continue
             if pos.sl == 0:
                 continue
@@ -1772,6 +1777,13 @@ class Scanner:
                 except Exception as pe:
                     log.error(f"partial_close db.save_trade {pos.symbol}: {pe}")
             else:
+                # Ticker unavailable — estimate PnL using TP price for WIN/LOSS classification
+                # only; state.pnl / day.pnl are NOT updated (will be accounted at final close).
+                tp_price = pos.tp1 if label == "TP1" else pos.tp2
+                if tp_price > 0 and pos.entry > 0:
+                    est_pnl = (tp_price - pos.entry) * qty if pos.side == "LONG" \
+                              else (pos.entry - tp_price) * qty
+                    pos.partial_pnl_taken += est_pnl
                 partial_pnl = 0.0
                 log.warning(f"{pos.symbol}: цена частичного закрытия неизвестна — PnL учтётся при финальном закрытии")
             sign = "+" if partial_pnl >= 0 else ""
@@ -1794,6 +1806,7 @@ class Scanner:
             # detects a missing SL if placement fails and re-places it.
             if pos.sl_order_id:
                 old_sl_id = pos.sl_order_id
+                self._sl_replacing.add(pos.symbol)  # block health_check SL re-place during swap
                 pos.sl_order_id = ""
                 try:
                     await self.ex.cancel_order(pos.symbol, old_sl_id)
@@ -1807,6 +1820,7 @@ class Scanner:
                     pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
                 except Exception as e:
                     log.error(f"partial_close {pos.symbol}: SL re-place failed — health_check will retry: {e}")
+                self._sl_replacing.discard(pos.symbol)  # unblock health_check
             # Re-place TP3 for remaining qty (old order had original full qty)
             if pos.tp_order_id:
                 old_tp_id = pos.tp_order_id

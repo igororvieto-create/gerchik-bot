@@ -94,9 +94,14 @@ async def main():
     state.day.losses    = today["losses"]
     state.day.pnl_usdt  = today["pnl"]
     try:
-        state.day.loss_streak = int(db.get_kv("loss_streak", "0"))
-        if state.day.loss_streak:
-            log.info(f"Восстановлена серия убытков: {state.day.loss_streak}")
+        stored_streak_date = db.get_kv("loss_streak_date", "")
+        today_str = datetime.utcnow().date().isoformat()
+        if stored_streak_date == today_str:
+            state.day.loss_streak = int(db.get_kv("loss_streak", "0"))
+            if state.day.loss_streak:
+                log.info(f"Восстановлена серия убытков: {state.day.loss_streak}")
+        else:
+            log.info("loss_streak из другого дня — не восстанавливается")
     except Exception:
         pass
     log.info(f"Восстановлена дневная статистика: {today['total']} сделок, PnL {today['pnl']:.2f} USDT")

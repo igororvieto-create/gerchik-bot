@@ -183,7 +183,7 @@ class BingXClient:
         bal = d.get("balance") if isinstance(d, dict) else None
 
         if isinstance(bal, dict):
-            for field in ("equity", "balance", "availableMargin", "available"):
+            for field in ("balance", "equity", "availableMargin", "available"):
                 if field in bal and float(bal[field]) > 0 and balance == 0.0:
                     balance = float(bal[field])
             for field in ("availableMargin", "available"):
@@ -194,7 +194,7 @@ class BingXClient:
         elif isinstance(bal, list):
             for a in bal:
                 if a.get("asset") in ("USDT", "usdt"):
-                    for field in ("equity", "balance", "availableMargin", "available"):
+                    for field in ("balance", "equity", "availableMargin", "available"):
                         if field in a and float(a[field]) > 0 and balance == 0.0:
                             balance = float(a[field])
                     for field in ("availableMargin", "available"):

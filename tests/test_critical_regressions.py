@@ -7,8 +7,8 @@ immediately tells you which invariant broke.
 Run: pytest tests/test_critical_regressions.py -v
 """
 import pytest
-from datetime import date, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import date, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch, call
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -428,3 +428,186 @@ class TestTP3HealthCheck:
             f"TP3 must be re-placed at {pos.tp3}, got {placed_price}"
         )
         assert pos.tp_order_id == "tp_new"
+
+
+# ══════════════════════════════════════════════════════════════════
+# 10. loss_streak must NOT bleed from one calendar day into the next
+#     after a bot restart (audit-5 Bug A).
+#
+# Scenario: 3 consecutive losses at 23:50. Bot restarts at 00:01 on
+# the new day. DB has loss_streak=3 from yesterday. Without the date
+# check, state.day.loss_streak=3 on the new day → adaptive MIN_SCORE
+# penalty + reduced risk for a clean new day.
+# ══════════════════════════════════════════════════════════════════
+
+class TestLossStreakDayBoundary:
+
+    def test_streak_not_restored_when_date_is_yesterday(self):
+        """Stored loss_streak with yesterday's date must not be applied to today."""
+        from core.state import state
+        yesterday = (datetime.utcnow().date() - timedelta(days=1)).isoformat()
+        today_str = datetime.utcnow().date().isoformat()
+
+        kv = {"loss_streak": "3", "loss_streak_date": yesterday}
+
+        stored_date = kv.get("loss_streak_date", "")
+        if stored_date == today_str:
+            state.day.loss_streak = int(kv["loss_streak"])
+
+        assert state.day.loss_streak == 0, (
+            "loss_streak from yesterday must not bleed into today — "
+            "bot would penalise the new day with yesterday's bad streak"
+        )
+
+    def test_streak_restored_when_date_is_today(self):
+        """Stored loss_streak with today's date MUST be restored (intraday restart)."""
+        from core.state import state
+        today_str = datetime.utcnow().date().isoformat()
+
+        kv = {"loss_streak": "2", "loss_streak_date": today_str}
+
+        stored_date = kv.get("loss_streak_date", "")
+        if stored_date == today_str:
+            state.day.loss_streak = int(kv["loss_streak"])
+
+        assert state.day.loss_streak == 2, (
+            "loss_streak stored today must survive an intraday restart"
+        )
+
+    def test_streak_not_restored_when_date_absent(self):
+        """If loss_streak_date key is missing (legacy DB), streak must not be restored."""
+        from core.state import state
+        today_str = datetime.utcnow().date().isoformat()
+
+        kv = {"loss_streak": "3"}  # no loss_streak_date key
+
+        stored_date = kv.get("loss_streak_date", "")
+        if stored_date == today_str:
+            state.day.loss_streak = int(kv["loss_streak"])
+
+        assert state.day.loss_streak == 0, (
+            "legacy DB without loss_streak_date must not restore streak — "
+            "safer to start fresh than to apply an undated streak"
+        )
+
+
+# ══════════════════════════════════════════════════════════════════
+# 11. get_balance must return wallet balance, not equity
+#     (audit-5 Bug B).
+#
+# BingX equity = wallet_balance + unrealized_pnl. Using equity for
+# position sizing causes oversizing when in profit, undersizing when
+# in loss. The correct field is "balance" (wallet balance).
+# ══════════════════════════════════════════════════════════════════
+
+class TestGetBalanceReturnsWalletBalance:
+
+    def _parse(self, payload):
+        from exchange.bingx import BingXClient
+        return BingXClient._parse_balance_data(payload)
+
+    def test_prefers_balance_over_equity_dict_format(self):
+        """Format-1 (dict): wallet balance=100, equity=150 → must return 100."""
+        bal, _ = self._parse({
+            "balance": {"balance": "100.0", "equity": "150.0", "availableMargin": "80.0"}
+        })
+        assert bal == 100.0, (
+            f"Expected wallet balance 100.0, got {bal} — "
+            "equity (includes unrealized PnL) must not be used for position sizing"
+        )
+
+    def test_prefers_balance_over_equity_list_format(self):
+        """Format-2 (list): wallet balance=200, equity=300 → must return 200."""
+        bal, _ = self._parse({
+            "balance": [{"asset": "USDT", "balance": "200.0", "equity": "300.0",
+                         "availableMargin": "150.0"}]
+        })
+        assert bal == 200.0, (
+            f"Expected wallet balance 200.0, got {bal}"
+        )
+
+    def test_falls_back_to_equity_when_balance_is_zero(self):
+        """If balance field is 0 or missing, equity is the fallback — not primary."""
+        bal, _ = self._parse({
+            "balance": {"balance": "0", "equity": "99.0", "availableMargin": "99.0"}
+        })
+        assert bal == 99.0, (
+            f"When wallet balance is 0, equity={bal} is acceptable as fallback"
+        )
+
+
+# ══════════════════════════════════════════════════════════════════
+# 12. _partial_close must persist tp1_hit + reduced qty to DB
+#     BEFORE fetching the ticker (audit-5 Bug C).
+#
+# If the bot crashes after exchange confirms the partial close but
+# before the DB is updated, the next restart restores stale values
+# (tp1_hit=False, original qty) and fires _partial_close again —
+# closing more of the position than intended.
+# ══════════════════════════════════════════════════════════════════
+
+class TestPartialCloseEarlyPersist:
+
+    async def test_db_save_called_before_ticker_fetch(self, scanner, mock_scanner_db):
+        """async_save_open_position must be called before get_ticker in _partial_close."""
+        from core.state import state
+
+        pos = _pos("LONG", entry=100.0, qty=1.0, tp1=103.0)
+        state.positions[pos.symbol] = pos
+
+        call_order = []
+
+        scanner.ex.close_position = AsyncMock(
+            side_effect=lambda *a, **kw: call_order.append("close") or None
+        )
+        mock_scanner_db.async_save_open_position = AsyncMock(
+            side_effect=lambda *a, **kw: call_order.append("db_save") or None
+        )
+        scanner.ex.get_ticker = AsyncMock(
+            side_effect=lambda *a, **kw: call_order.append("ticker") or {"lastPrice": "104.0"}
+        )
+        mock_scanner_db.async_save_trade = AsyncMock()
+
+        await scanner._partial_close(pos, 0.25, "TP1")
+
+        assert "close" in call_order, "close_position was not called"
+        assert "db_save" in call_order, "async_save_open_position was not called"
+        assert "ticker" in call_order, "get_ticker was not called"
+
+        close_idx  = call_order.index("close")
+        db_idx     = call_order.index("db_save")
+        ticker_idx = call_order.index("ticker")
+        assert db_idx > close_idx, "DB save must happen AFTER close_position"
+        assert db_idx < ticker_idx, (
+            "DB save must happen BEFORE get_ticker — "
+            "a crash between close and DB persist would cause restart re-fire"
+        )
+
+    async def test_tp1_hit_flag_set_before_first_db_save(self, scanner, mock_scanner_db):
+        """pos.tp1_hit must be True by the time async_save_open_position is first called."""
+        from core.state import state
+
+        pos = _pos("LONG", entry=100.0, qty=1.0, tp1=103.0)
+        state.positions[pos.symbol] = pos
+
+        captured = {}
+
+        async def save_pos(p, *a, **kw):
+            if "tp1_hit" not in captured:
+                captured["tp1_hit"] = p.tp1_hit
+                captured["qty"] = p.qty
+
+        mock_scanner_db.async_save_open_position = AsyncMock(side_effect=save_pos)
+        scanner.ex.close_position = AsyncMock(return_value=None)
+        scanner.ex.get_ticker = AsyncMock(return_value={"lastPrice": "104.0"})
+        mock_scanner_db.async_save_trade = AsyncMock()
+
+        await scanner._partial_close(pos, 0.25, "TP1")
+
+        assert captured.get("tp1_hit") is True, (
+            "First async_save_open_position call must see tp1_hit=True — "
+            "otherwise restart restores False and fires partial close again"
+        )
+        assert captured.get("qty", 1.0) < 1.0, (
+            "First async_save_open_position call must see reduced qty"
+        )

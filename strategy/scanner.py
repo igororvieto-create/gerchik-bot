@@ -204,6 +204,7 @@ class Scanner:
             else:
                 self._symbol_loss_streak.pop(symbol, None)
             await db.async_save_kv("loss_streak", str(state.day.loss_streak))
+            await db.async_save_kv("loss_streak_date", datetime.utcnow().date().isoformat())
         return total_trade_pnl
 
     async def _drought_alert(self, diag: str = "") -> None:
@@ -1656,6 +1657,16 @@ class Scanner:
             qty = min(qty, pos.qty)  # safety: never close more than held
             await self.ex.close_position(pos.symbol, qty, pos.side)
 
+            # Set hit flags and reduce qty immediately after exchange confirms close.
+            # Early DB persist here means a crash/restart cannot leave stale tp1_hit=False
+            # in the DB, which would cause _partial_close to fire again for an already-closed qty.
+            pos.qty -= qty
+            if label == "TP1":
+                pos.tp1_hit = True
+            else:
+                pos.tp2_hit = True
+            await db.async_save_open_position(pos)
+
             # Record PnL for the closed portion; use entry as safe fallback (zero PnL, not inflated)
             close_price = pos.entry
             try:
@@ -1677,15 +1688,6 @@ class Scanner:
                                           is_partial=True)
             except Exception as pe:
                 log.error(f"partial_close db.save_trade {pos.symbol}: {pe}")
-
-            pos.qty -= qty
-            if label == "TP1":
-                pos.tp1_hit = True
-            else:
-                pos.tp2_hit = True
-            # Persist partial_pnl_taken, updated qty, and tp_hit flag immediately — before any
-            # further awaits so a crash during SL/TP order management doesn't lose these values.
-            await db.async_save_open_position(pos)
             sign = "+" if partial_pnl >= 0 else ""
             if label == "TP1":
                 await self._notify(

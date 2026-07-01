@@ -2,9 +2,11 @@ import asyncio
 import logging
 import os
 import ssl
+import time
 from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 import aiohttp
 
 from core import db
@@ -56,7 +58,10 @@ async def main():
         return
 
     # Init SQLite and restore state
-    db.init_db()
+    try:
+        db.init_db()
+    except Exception as e:
+        log.error(f"SQLite init failed — продолжаем без персистентности: {e}")
 
     # Restore runtime-changed config values (setrisk, setlev, etc.)
     _saved_cfg = db.load_cfg_values()
@@ -136,8 +141,40 @@ async def main():
     except Exception as e:
         log.warning(f"delete_webhook: {e}")
 
+    # Catch uncaught asyncio exceptions — log them instead of crashing the event loop
+    def _async_exc_handler(loop, context):
+        exc  = context.get("exception")
+        msg  = context.get("message", "")
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            return
+        log.error(f"Uncaught async exception: {msg} | {exc!r}")
+
+    asyncio.get_event_loop().set_exception_handler(_async_exc_handler)
+
     exchange = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
     scanner  = Scanner(exchange, bot)
+
+    # APScheduler error listener — log crashed jobs to Telegram
+    def _on_job_error(event):
+        log.error(f"APScheduler job '{event.job_id}' crashed: {event.exception!r}")
+        try:
+            asyncio.get_event_loop().create_task(
+                bot.send_message(
+                    cfg.TELEGRAM_CHAT_ID,
+                    f"⚠️ <b>Ошибка планировщика</b>\n"
+                    f"Задача: <code>{event.job_id}</code>\n"
+                    f"Ошибка: <code>{type(event.exception).__name__}: {event.exception}</code>",
+                    parse_mode="HTML",
+                )
+            )
+        except Exception:
+            pass
+
+    def _on_job_missed(event):
+        log.warning(f"APScheduler job '{event.job_id}' missed (overload?)")
+
+    scheduler.add_listener(_on_job_error,  EVENT_JOB_ERROR)
+    scheduler.add_listener(_on_job_missed, EVENT_JOB_MISSED)
 
     # Scheduler jobs
     scheduler.add_job(scanner.scan_all,          "cron",     minute=f"*/{cfg.SCAN_H1_INTERVAL_MIN}")
@@ -150,7 +187,10 @@ async def main():
     scheduler.add_job(scanner.daily_report,       "cron",     hour="9",  minute="0")
     scheduler.add_job(scanner.weekly_report,      "cron",     day_of_week="mon", hour="9", minute="5")
     scheduler.add_job(scanner.monthly_report,     "cron",     day="1",   hour="9", minute="10")
-    scheduler.start()
+    try:
+        scheduler.start()
+    except Exception as e:
+        log.error(f"Scheduler start failed: {e} — продолжаем без планировщика")
 
     async def startup_tasks():
         await asyncio.sleep(2)
@@ -258,14 +298,33 @@ async def main():
 
     _startup_task = asyncio.create_task(startup_tasks())  # noqa: F841 — keep reference
 
+    _poll_delay = 5
     while True:
         try:
             await dp.start_polling(bot)
+            break  # clean shutdown
+        except (KeyboardInterrupt, SystemExit):
+            log.info("Получен сигнал остановки — выход")
             break
-        except Exception as e:
-            log.error(f"Polling error: {e} — retry in 10s")
-            await asyncio.sleep(10)
+        except BaseException as e:
+            log.error(f"Polling error: {type(e).__name__}: {e} — retry in {_poll_delay}s")
+            await asyncio.sleep(_poll_delay)
+            _poll_delay = min(_poll_delay * 2, 120)  # backoff до 2 минут
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    _restart_delay = 5
+    while True:
+        try:
+            asyncio.run(main())
+            break  # чистый выход (KeyboardInterrupt изнутри main())
+        except (KeyboardInterrupt, SystemExit):
+            log.info("Остановка по сигналу — выход")
+            break
+        except Exception as e:
+            log.error(
+                f"ФАТАЛЬНАЯ ОШИБКА — перезапуск через {_restart_delay}с: "
+                f"{type(e).__name__}: {e}"
+            )
+            time.sleep(_restart_delay)
+            _restart_delay = min(_restart_delay * 2, 300)  # backoff до 5 минут

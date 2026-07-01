@@ -345,6 +345,10 @@ class Scanner:
         _SCANNING = True
         try:
             await self._scan_all_inner()
+        except asyncio.CancelledError:
+            raise  # propagate graceful shutdown signals
+        except Exception as e:
+            log.error(f"scan_all unhandled: {e}", exc_info=True)
         finally:
             _SCANNING = False
 
@@ -1297,6 +1301,10 @@ class Scanner:
         _MONITORING = True
         try:
             await self._monitor_inner()
+        except asyncio.CancelledError:
+            raise  # propagate graceful shutdown signals
+        except Exception as e:
+            log.error(f"monitor_positions unhandled: {e}", exc_info=True)
         finally:
             _MONITORING = False
 

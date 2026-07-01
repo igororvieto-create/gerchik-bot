@@ -1290,7 +1290,7 @@ class Scanner:
             # When _pre_pos is set but position not in state, the market order landed on the
             # exchange; health_check will detect the missing SL and recover — don't delete.
             if sig.symbol not in state.positions and _pre_pos is None:
-                asyncio.ensure_future(db.async_delete_open_position(sig.symbol))
+                asyncio.create_task(db.async_delete_open_position(sig.symbol))
 
     # ------------------------------------------------------------------ monitor
 
@@ -1547,7 +1547,11 @@ class Scanner:
                                        (pos.side == "SHORT" and price <= pos.tp1)
                     if be_triggered:
                         await self._move_be(pos)
-                        _be_just_fired = True
+                        # Block TP1 ONLY when BE was triggered via the TP1-fallback path
+                        # (BE_TRIGGER_PCT=0 → TP1 price is the trigger → same event, same SL churn).
+                        # When BE_TRIGGER_PCT > 0, BE fires at a different price than TP1;
+                        # TP1 partial close is a distinct event and must not be suppressed.
+                        _be_just_fired = (cfg.BE_TRIGGER_PCT == 0)
 
                 # TP1 → partial close 25% (lock early profit)
                 # Skip if BE just fired in the same cycle via the TP1-fallback path —
@@ -1810,8 +1814,9 @@ class Scanner:
                     f"Остаток: <code>{pos.qty:.3f}</code> | Трейлинг активен"
                 )
             side = "BUY" if pos.side == "LONG" else "SELL"
-            # Re-place SL: cancel old, then place new — clear ID first so health_check
-            # detects a missing SL if placement fails and re-places it.
+            # Re-place SL for reduced qty. Block health_check unconditionally so it can't
+            # race to re-place SL even when sl_order_id was already empty (failed at entry).
+            self._sl_replacing.add(pos.symbol)
             if pos.sl_order_id:
                 old_sl_id = pos.sl_order_id
                 self._sl_replacing.add(pos.symbol)  # block health_check SL re-place during swap

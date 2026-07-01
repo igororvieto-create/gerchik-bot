@@ -169,7 +169,7 @@ async def cmd_status(msg: Message):
             amt  = abs(float(lp.get("positionAmt", 0)))
             side = lp.get("positionSide", "?")
             text += (
-                f"<b>{sym}</b> {side} (внешняя)\n"
+                f"<b>{_html.escape(str(sym))}</b> {_html.escape(str(side))} (внешняя)\n"
                 f"Вход: <code>{ep:.4f}</code> | Кол-во: {amt}\n"
                 f"PnL: {emoji} <code>{sign}{upnl:.2f} USDT</code>\n\n"
             )
@@ -826,77 +826,79 @@ async def cmd_closeall(msg: Message):
     closed: list[str] = []
     errors: list[str] = []
     live_syms: set[str] = set()
-    for p in live:
-        sym  = str(p.get("symbol") or "")
-        if not sym:
-            continue
-        side = str(p.get("positionSide", "LONG"))
-        amt  = abs(float(p.get("positionAmt", 0)))
-        if amt == 0:
-            continue
-        live_syms.add(sym)
-        try:
-            # Cancel SL/TP orders if tracked in state
-            tracked = state.positions.get(sym)
-            if tracked:
-                for oid in (tracked.sl_order_id, tracked.tp_order_id):
-                    if oid:
-                        try:
-                            await ex.cancel_order(sym, oid)
-                        except Exception:
-                            pass
-            await ex.close_position(sym, amt, side)
-            popped = state.positions.pop(sym, None)  # pop before await — prevents monitor race
-            await db.async_delete_open_position(sym)
-            # Use popped value: if None, monitor already accounted this position — skip to avoid double PnL
-            if popped and popped.entry > 0:
-                try:
-                    await _account_manual_close(ex, popped)
-                except Exception as ae:
-                    log.warning(f"closeall account {sym}: {ae}")
-            closed.append(sym)
-        except Exception as e:
-            log.error(f"closeall {sym}: {e}")
-            errors.append(sym)
-
-    # Close positions tracked in state but absent from exchange (ghost state or API returned none)
-    ghost_syms = [sym for sym in list(state.positions.keys()) if sym not in live_syms]
-    for sym in ghost_syms:
-        gpos: Optional[Position] = state.positions.get(sym)
-        if not gpos:
-            continue
-        try:
-            if gpos.sl_order_id:
-                try:
-                    await ex.cancel_order(sym, gpos.sl_order_id)
-                except Exception:
-                    pass
-            if gpos.tp_order_id:
-                try:
-                    await ex.cancel_order(sym, gpos.tp_order_id)
-                except Exception:
-                    pass
-            if not live:
-                # Exchange returned nothing — try to close anyway (position may exist)
-                await ex.close_position(sym, gpos.qty, gpos.side)
-                ghost_popped = state.positions.pop(sym, None)
+    try:
+        for p in live:
+            sym  = str(p.get("symbol") or "")
+            if not sym:
+                continue
+            side = str(p.get("positionSide", "LONG"))
+            amt  = abs(float(p.get("positionAmt", 0)))
+            if amt == 0:
+                continue
+            live_syms.add(sym)
+            try:
+                # Cancel SL/TP orders if tracked in state
+                tracked = state.positions.get(sym)
+                if tracked:
+                    for oid in (tracked.sl_order_id, tracked.tp_order_id):
+                        if oid:
+                            try:
+                                await ex.cancel_order(sym, oid)
+                            except Exception:
+                                pass
+                await ex.close_position(sym, amt, side)
+                popped = state.positions.pop(sym, None)  # pop before await — prevents monitor race
                 await db.async_delete_open_position(sym)
-                if ghost_popped and ghost_popped.entry > 0:
+                # Use popped value: if None, monitor already accounted this position — skip to avoid double PnL
+                if popped and popped.entry > 0:
                     try:
-                        await _account_manual_close(ex, ghost_popped)
+                        await _account_manual_close(ex, popped)
                     except Exception as ae:
-                        log.warning(f"closeall ghost account {sym}: {ae}")
-            else:
-                # Position absent from exchange — already closed by SL/TP.
-                # monitor_positions will (or already did) account for it via _record_close.
-                # Don't double-account: just purge from state so it's not re-tracked.
-                state.positions.pop(sym, None)
-                await db.async_delete_open_position(sym)
-            closed.append(sym)
-        except Exception as e:
-            log.error(f"closeall ghost {sym}: {e}")
-            errors.append(sym)
-    await ex.close()
+                        log.warning(f"closeall account {sym}: {ae}")
+                closed.append(sym)
+            except Exception as e:
+                log.error(f"closeall {sym}: {e}")
+                errors.append(sym)
+
+        # Close positions tracked in state but absent from exchange (ghost state or API returned none)
+        ghost_syms = [sym for sym in list(state.positions.keys()) if sym not in live_syms]
+        for sym in ghost_syms:
+            gpos: Optional[Position] = state.positions.get(sym)
+            if not gpos:
+                continue
+            try:
+                if gpos.sl_order_id:
+                    try:
+                        await ex.cancel_order(sym, gpos.sl_order_id)
+                    except Exception:
+                        pass
+                if gpos.tp_order_id:
+                    try:
+                        await ex.cancel_order(sym, gpos.tp_order_id)
+                    except Exception:
+                        pass
+                if not live:
+                    # Exchange returned nothing — try to close anyway (position may exist)
+                    await ex.close_position(sym, gpos.qty, gpos.side)
+                    ghost_popped = state.positions.pop(sym, None)
+                    await db.async_delete_open_position(sym)
+                    if ghost_popped and ghost_popped.entry > 0:
+                        try:
+                            await _account_manual_close(ex, ghost_popped)
+                        except Exception as ae:
+                            log.warning(f"closeall ghost account {sym}: {ae}")
+                else:
+                    # Position absent from exchange — already closed by SL/TP.
+                    # monitor_positions will (or already did) account for it via _record_close.
+                    # Don't double-account: just purge from state so it's not re-tracked.
+                    state.positions.pop(sym, None)
+                    await db.async_delete_open_position(sym)
+                closed.append(sym)
+            except Exception as e:
+                log.error(f"closeall ghost {sym}: {e}")
+                errors.append(sym)
+    finally:
+        await ex.close()
     text = f"✅ Закрыто: {', '.join(closed) or 'ничего'}"
     if errors:
         text += f"\n❌ Ошибка закрытия: {', '.join(errors)}"

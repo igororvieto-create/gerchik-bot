@@ -679,6 +679,16 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if not h4_aligned and not h4_near_fb:
         _reject("ложный пробой: H4 против тренда")
         return None
+    if h4_near_fb and not h4_aligned:
+        lookback = min(cfg.H4_WAS_ABOVE_LOOKBACK, len(h4["close"]) - 1)
+        if trend == "LONG":
+            if not any(h4["close"][-lookback-1:-1] > ema50_h4[-lookback-1:-1]):
+                _reject("ложный пробой: H4 у EMA снизу (не откат — сопротивление)")
+                return None
+        else:
+            if not any(h4["close"][-lookback-1:-1] < ema50_h4[-lookback-1:-1]):
+                _reject("ложный пробой: H4 у EMA сверху (не откат — поддержка)")
+                return None
 
     # H4 impulse guard: 4 of last 4 candles against signal direction → skip
     h4_bear_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] < h4["open"][i])
@@ -959,6 +969,16 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if trend == "SHORT" and h4_up and not h4_near_rb:
         _reject("накопление: H4 против тренда")
         return None
+    if h4_near_rb and ((trend == "LONG" and not h4_up) or (trend == "SHORT" and h4_up)):
+        lookback = min(cfg.H4_WAS_ABOVE_LOOKBACK, len(h4["close"]) - 1)
+        if trend == "LONG":
+            if not any(h4["close"][-lookback-1:-1] > ema50_h4[-lookback-1:-1]):
+                _reject("накопление: H4 у EMA снизу (не откат — сопротивление)")
+                return None
+        else:
+            if not any(h4["close"][-lookback-1:-1] < ema50_h4[-lookback-1:-1]):
+                _reject("накопление: H4 у EMA сверху (не откат — поддержка)")
+                return None
 
     # H4 impulse guard
     h4_bear_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] < h4["open"][i])

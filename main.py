@@ -42,7 +42,8 @@ def _validate_config() -> bool:
         errors.append(f"RISK_PER_TRADE={cfg.RISK_PER_TRADE} должен быть в диапазоне 0–5%")
     for msg in errors:
         log.error(f"[config] {msg}")
-    critical = not cfg.TELEGRAM_TOKEN or not cfg.BINGX_API_KEY or not cfg.BINGX_SECRET
+    critical = (not cfg.TELEGRAM_TOKEN or not cfg.TELEGRAM_CHAT_ID
+                or not cfg.BINGX_API_KEY or not cfg.BINGX_SECRET)
     return not critical
 
 
@@ -197,18 +198,23 @@ async def main():
 
     async def startup_tasks():
         await asyncio.sleep(2)
+
+        # --- Balance fetch (isolated: failure must not block position restore) ---
+        balance = 0.0
         try:
             balance = await exchange.get_balance()
             state.current_balance = balance
+        except Exception as e:
+            log.error(f"startup: не удалось получить баланс — {e}")
 
-            # Get live positions from exchange (ground truth)
+        # --- Position restore (always runs, even if balance fetch failed) ---
+        try:
             live = await exchange.get_open_positions()
             live_map = {
                 p.get("symbol"): p for p in live
                 if abs(float(p.get("positionAmt", 0))) > 0
             }
 
-            # Restore positions from DB (full data: SL, TP, pattern, BE state, etc.)
             from core.state import Position
             saved = db.load_open_positions()
             restored = 0
@@ -218,8 +224,6 @@ async def main():
                 if not sym:
                     continue
                 if sym not in live_map:
-                    # Closed during downtime — PnL cannot be recorded without the close price.
-                    # Notify the user so they can check exchange history manually.
                     log.warning(
                         f"Позиция {sym} закрыта в downtime — PnL не записан (нет цены закрытия)"
                     )
@@ -264,7 +268,6 @@ async def main():
                 except Exception:
                     pass
 
-            # Any live exchange position not in DB → manual position, do NOT manage it
             manual_syms = []
             for sym in live_map:
                 if sym not in state.positions:
@@ -281,7 +284,11 @@ async def main():
                     )
                 except Exception:
                     pass
+        except Exception as e:
+            log.error(f"startup: ошибка восстановления позиций — {e}")
 
+        # --- Startup notification ---
+        try:
             await bot.send_message(
                 cfg.TELEGRAM_CHAT_ID,
                 f"✅ <b>Герчик Бот запущен</b>\n\n"
@@ -293,6 +300,7 @@ async def main():
             )
         except Exception as e:
             log.error(f"startup notify: {e}")
+
         try:
             await scanner.update_pairs()
             await scanner.scan_all()

@@ -65,6 +65,15 @@ class Config:
     BTC_FILTER_PCT:       float = float(os.getenv("BTC_FILTER_PCT", "3.0").strip())
     # ADX minimum — below this value market is ranging, skip signal
     ADX_MIN:              float = float(os.getenv("ADX_MIN", "15.0").strip())
+    # H4 near-EMA tolerance: how far below/above EMA50 price can be and still qualify as "near"
+    # 2.0 = standard; raise to 3.0-3.5 during deep corrections to allow more pullback setups
+    H4_NEAR_PCT:          float = float(os.getenv("H4_NEAR_PCT", "2.0").strip())
+    # H4 EMA50 slope floor: minimum slope (%) over 5 candles to allow LONG in "near" zone
+    # 0 = block any declining EMA50 (strict); -1.0 = allow gentle declines; -2.0 = correction mode
+    H4_SLOPE_FLOOR:       float = float(os.getenv("H4_SLOPE_FLOOR", "0.0").strip())
+    # H4 was-above lookback (candles): how far back to look for price above EMA50 in near-zone check
+    # 4 = last 16h (strict); 12 = last 2 days; 20 = last 3.3 days (correction mode)
+    H4_WAS_ABOVE_LOOKBACK: int  = int(os.getenv("H4_WAS_ABOVE_LOOKBACK", "4").strip())
     # D1 slope for breakout strategy: require at least this % positive momentum (LONG) or negative (SHORT)
     D1_SLOPE_MIN:         float = float(os.getenv("D1_SLOPE_MIN", "0.02").strip())
     # D1 slope for entry/reversal strategies: block LONG only when slope falls more than this % over 10 days

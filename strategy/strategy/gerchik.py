@@ -344,22 +344,22 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     h4_up   = h4["close"][-1] > ema50[-1]
     h4_dn   = h4["close"][-1] < ema50[-1]
     h4_aligned = (trend=="LONG" and h4_up) or (trend=="SHORT" and h4_dn)
-    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 2.0
+    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < cfg.H4_NEAR_PCT
     if not h4_aligned and not h4_near:
         _reject("H4 против тренда")
         return None
     if h4_near and not h4_aligned:
         h4_slope = (ema50[-1] - ema50[-5]) / ema50[-5] * 100 if ema50[-5] > 0 else 0
-        if trend == "LONG"  and h4_slope < 0:
+        if trend == "LONG"  and h4_slope < cfg.H4_SLOPE_FLOOR:
             _reject("H4 против тренда")
             return None
-        if trend == "SHORT" and h4_slope > 0:
+        if trend == "SHORT" and h4_slope > -cfg.H4_SLOPE_FLOOR:
             _reject("H4 против тренда")
             return None
         # Reject: price approaching EMA50 from the WRONG side (bounce into resistance).
         # For LONG: price below EMA50 must have been ABOVE it recently (pullback from above).
         # For SHORT: price above EMA50 must have been BELOW it recently (bounce from below).
-        lookback = min(4, len(h4["close"]) - 1)
+        lookback = min(cfg.H4_WAS_ABOVE_LOOKBACK, len(h4["close"]) - 1)
         if trend == "LONG":
             was_above = any(h4["close"][-lookback-1:-1] > ema50[-lookback-1:-1])
             if not was_above:
@@ -675,7 +675,7 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     ema50_h4  = ema(h4["close"], cfg.TREND_EMA_H4)
     h4_up     = h4["close"][-1] > ema50_h4[-1]
     h4_aligned = (trend == "LONG" and h4_up) or (trend == "SHORT" and not h4_up)
-    h4_near_fb = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < 2.0
+    h4_near_fb = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < cfg.H4_NEAR_PCT
     if not h4_aligned and not h4_near_fb:
         _reject("ложный пробой: H4 против тренда")
         return None
@@ -952,7 +952,7 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # H4 EMA50 alignment — must be in trend direction (tolerance 2%)
     ema50_h4   = ema(h4["close"], cfg.TREND_EMA_H4)
     h4_up      = h4["close"][-1] > ema50_h4[-1]
-    h4_near_rb = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < 2.0
+    h4_near_rb = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < cfg.H4_NEAR_PCT
     if trend == "LONG" and not h4_up and not h4_near_rb:
         _reject("накопление: H4 против тренда")
         return None
@@ -1201,7 +1201,7 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # ── H4 filter — breakout must not happen against H4 trend ──
     ema50_h4 = ema(h4["close"], cfg.TREND_EMA_H4)
     h4_up    = h4["close"][-1] > ema50_h4[-1]
-    h4_near  = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < 2.0
+    h4_near  = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < cfg.H4_NEAR_PCT
     # For breakout: allow if H4 aligned OR price is crossing EMA50 from below (bullish)
     if trend == "LONG"  and not h4_up and not h4_near:
         _reject("пробой: H4 против тренда")

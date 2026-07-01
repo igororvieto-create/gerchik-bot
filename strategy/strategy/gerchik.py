@@ -371,8 +371,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
                 _reject("H4 у EMA сверху (не откат — поддержка)")
                 return None
 
-    # H4 bearish/bullish impulse guard: if 3+ of last 4 H4 candles go against trend with
-    # meaningful bodies (≥0.3% of price), skip — market is in corrective impulse.
+    # H4 bearish/bullish impulse guard: skip when market is in corrective impulse.
+    # In the borderline EMA zone (near but not aligned) apply a stricter threshold (3/4)
+    # because we removed the H4-pattern hard requirement there — impulse guard is the
+    # only remaining protection against entering into active H4 momentum.
     _h4_ref = max(float(h4["close"][-1]), 0.001)
     _h4_body_min = _h4_ref * 0.003
     h4_bear_cnt = sum(
@@ -385,10 +387,11 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         if h4["close"][i] > h4["open"][i]
         and (h4["close"][i] - h4["open"][i]) >= _h4_body_min
     )
-    if trend == "LONG"  and h4_bear_cnt >= 4:
+    _impulse_threshold = 3 if (h4_near and not h4_aligned) else 4
+    if trend == "LONG"  and h4_bear_cnt >= _impulse_threshold:
         _reject("H4 медвежий импульс")
         return None
-    if trend == "SHORT" and h4_bull_cnt >= 4:
+    if trend == "SHORT" and h4_bull_cnt >= _impulse_threshold:
         _reject("H4 бычий импульс")
         return None
 

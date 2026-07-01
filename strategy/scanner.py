@@ -1818,7 +1818,6 @@ class Scanner:
             self._sl_replacing.add(pos.symbol)
             if pos.sl_order_id:
                 old_sl_id = pos.sl_order_id
-                self._sl_replacing.add(pos.symbol)  # block health_check SL re-place during swap
                 pos.sl_order_id = ""
                 try:
                     await self.ex.cancel_order(pos.symbol, old_sl_id)

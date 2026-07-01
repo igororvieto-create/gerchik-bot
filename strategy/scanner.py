@@ -152,6 +152,9 @@ class Scanner:
             log.warning(f"_record_close: {symbol} уже удалён из state — двойной вызов предотвращён")
             self._being_closed.discard(symbol)
             return 0.0
+        # Pop from state immediately — prevents double-PnL if an awaited DB call raises below.
+        # The double-call guard above catches any retry that arrives after this point.
+        state.positions.pop(symbol, None)
         pnl = 0.0
         total_trade_pnl = 0.0
         result = "UNKNOWN"
@@ -171,7 +174,10 @@ class Scanner:
                 if total_trade_pnl >= min_profit:
                     state.day.loss_streak = 0
                     state.day.paused_until = None
-                    await db.async_save_kv("paused_until", "")
+                    try:
+                        await db.async_save_kv("paused_until", "")
+                    except Exception as _e:
+                        log.error(f"db.save_kv paused_until {symbol}: {_e}")
             else:
                 state.day.losses += 1
                 state.day.loss_streak += 1
@@ -185,14 +191,18 @@ class Scanner:
                 else:
                     pause_min = cfg.PAUSE_AFTER_LOSS_MIN
                 state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
-                await db.async_save_kv("paused_until", state.day.paused_until.isoformat())
-        # Guard: ensure position is removed from state even if DB write fails or is cancelled
+                try:
+                    await db.async_save_kv("paused_until", state.day.paused_until.isoformat())
+                except Exception as _e:
+                    log.error(f"db.save_kv paused_until {symbol}: {_e}")
         try:
             await db.async_save_trade(pos, price, pnl, result)
         except Exception as e:
             log.error(f"db.async_save_trade {symbol}: {e}")
-        state.positions.pop(symbol, None)
-        await db.async_delete_open_position(symbol)
+        try:
+            await db.async_delete_open_position(symbol)
+        except Exception as e:
+            log.error(f"db.delete_open_position {symbol}: {e}")
         self._stale_alerted.discard(symbol)
         self._funding_warned.discard(symbol)
         self._auto_close_failed.discard(symbol)
@@ -204,8 +214,11 @@ class Scanner:
                 await self._loss_cooldown(symbol)
             else:
                 self._symbol_loss_streak.pop(symbol, None)
-            await db.async_save_kv("loss_streak", str(state.day.loss_streak))
-            await db.async_save_kv("loss_streak_date", datetime.utcnow().date().isoformat())
+            try:
+                await db.async_save_kv("loss_streak", str(state.day.loss_streak))
+                await db.async_save_kv("loss_streak_date", datetime.utcnow().date().isoformat())
+            except Exception as _e:
+                log.error(f"db.save_kv loss_streak {symbol}: {_e}")
         return total_trade_pnl
 
     async def _drought_alert(self, diag: str = "") -> None:
@@ -1819,18 +1832,23 @@ class Scanner:
             if pos.sl_order_id:
                 old_sl_id = pos.sl_order_id
                 pos.sl_order_id = ""
+                cancel_ok = True
                 try:
                     await self.ex.cancel_order(pos.symbol, old_sl_id)
                 except Exception as e:
-                    # Log the failure: if old SL is still live + new SL is placed below,
-                    # there will be two concurrent SL orders on the exchange.
+                    # Cancel failed — old SL is still live on the exchange. Placing a second SL
+                    # would create two concurrent orders and risk a double-close. Keep the old ID
+                    # so health_check can re-verify and resize the order later.
+                    cancel_ok = False
+                    pos.sl_order_id = old_sl_id
                     log.warning(f"{pos.symbol}: cancel old SL ({old_sl_id}) failed in _partial_close: {e} — "
-                                f"placing new SL anyway; health_check will verify open orders")
-                try:
-                    r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, pos.sl)
-                    pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
-                except Exception as e:
-                    log.error(f"partial_close {pos.symbol}: SL re-place failed — health_check will retry: {e}")
+                                f"keeping old SL; health_check will resize qty")
+                if cancel_ok:
+                    try:
+                        r = await self.ex.place_stop_loss(pos.symbol, side, pos.qty, pos.sl)
+                        pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
+                    except Exception as e:
+                        log.error(f"partial_close {pos.symbol}: SL re-place failed — health_check will retry: {e}")
                 self._sl_replacing.discard(pos.symbol)  # unblock health_check
             else:
                 self._sl_replacing.discard(pos.symbol)  # no old order — still unblock

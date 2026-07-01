@@ -84,6 +84,11 @@ class BotState:
 
     def can_trade(self, max_daily_loss, max_positions, max_daily_trades):
         self.reset_day()
+        # When the auto-pause timer expires naturally (no win to reset it), clear the streak
+        # so the next loss starts a fresh count rather than immediately triggering a long pause.
+        if self.day.paused_until and datetime.utcnow() >= self.day.paused_until:
+            self.day.paused_until = None
+            self.day.loss_streak = 0
         if self.is_paused:
             return False, "бот на паузе"
         if len(self.positions) >= max_positions:

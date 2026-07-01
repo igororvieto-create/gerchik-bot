@@ -212,7 +212,7 @@ async def cmd_pairs(msg: Message):
         return
     n = len(state.pairs)
     await msg.answer(
-        f"📋 Пар: <b>{n}</b>\n{' | '.join(state.pairs[:15])}{'...' if n > 15 else ''}",
+        f"📋 Пар: <b>{n}</b>\n{' | '.join(_html.escape(p) for p in state.pairs[:15])}{'...' if n > 15 else ''}",
         parse_mode="HTML",
         reply_markup=main_keyboard(),
     )
@@ -280,8 +280,10 @@ async def cmd_history(msg: Message):
     if not _auth(msg):
         return
     from core.db import get_history, get_stats
-    rows  = get_history(15)
-    stats = get_stats()
+    rows, stats = await asyncio.gather(
+        asyncio.to_thread(get_history, 15),
+        asyncio.to_thread(get_stats),
+    )
     if not rows:
         await msg.answer("📜 История сделок пуста", reply_markup=main_keyboard())
         return
@@ -321,7 +323,7 @@ async def cmd_top(msg: Message):
     lines = ["🏆 <b>Топ 20 пар по объёму:</b>\n"]
     for i, s in enumerate(syms[:20], 1):
         in_bl = "🚫" if s in cfg.BLACKLIST else ""
-        lines.append(f"{i:2}. {s} {in_bl}")
+        lines.append(f"{i:2}. {_html.escape(s)} {in_bl}")
     await msg.answer("\n".join(lines), parse_mode="HTML", reply_markup=main_keyboard())
 
 
@@ -770,6 +772,7 @@ async def _account_manual_close(ex, pos) -> tuple:
         log.warning(f"_account_manual_close db.save_trade {pos.symbol}: {e}")
     state.total_pnl    += leg_pnl
     state.day.pnl_usdt += leg_pnl
+    state.day.trades   += 1
     if total_trade_pnl > 0:
         state.day.wins += 1
         state.day.loss_streak = 0

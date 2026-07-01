@@ -303,9 +303,12 @@ async def main():
 
         try:
             await scanner.update_pairs()
+        except Exception as e:
+            log.error(f"startup update_pairs: {e}")
+        try:
             await scanner.scan_all()
         except Exception as e:
-            log.error(f"startup scan: {e}")
+            log.error(f"startup scan_all: {e}")
 
     _startup_task = asyncio.create_task(startup_tasks())  # noqa: F841 — keep reference
 

@@ -934,15 +934,15 @@ async def cmd_close_symbol(msg: Message):
                 except Exception:
                     pass
         await ex.close_position(symbol, pos.qty, pos.side)
-        popped = state.positions.pop(symbol, None)  # pop before await — prevents monitor race
+        state.positions.pop(symbol, None)  # pop before await — prevents monitor race
+        await db.async_delete_open_position(symbol)
         try:
             close_px, leg_pnl = await _account_manual_close(ex, pos)
         except Exception as _ae:
-            # Accounting failed — restore tracking so position is not permanently lost
-            if popped:
-                state.positions[symbol] = popped
+            # Accounting failed but position is already closed on exchange and removed from state/DB.
+            # Do NOT restore to state — monitor would see it missing and double-account PnL.
+            log.error(f"close_symbol {symbol}: accounting failed (position already closed): {_ae}")
             raise _ae
-        await db.async_delete_open_position(symbol)  # after accounting
         sign = "+" if leg_pnl >= 0 else ""
         await msg.answer(
             f"✅ Позиция {symbol} закрыта\n"

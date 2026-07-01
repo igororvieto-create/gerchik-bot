@@ -177,12 +177,11 @@ class Scanner:
                 state.day.loss_streak += 1
                 if state.day.loss_streak >= 3:
                     pause_min = cfg.PAUSE_3X_LOSS_MIN
-                    if state.day.loss_streak == 3:
-                        await self._notify(
-                            f"⛔ <b>3 убытка подряд</b> — пауза {pause_min} мин\n"
-                            f"Серия: {state.day.loss_streak} | "
-                            f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
-                        )
+                    await self._notify(
+                        f"⛔ <b>{state.day.loss_streak} убытка подряд</b> — пауза {pause_min} мин\n"
+                        f"Серия: {state.day.loss_streak} | "
+                        f"PnL сегодня: <code>{state.day.pnl_usdt:+.2f} USDT</code>"
+                    )
                 else:
                     pause_min = cfg.PAUSE_AFTER_LOSS_MIN
                 state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
@@ -192,7 +191,7 @@ class Scanner:
             await db.async_save_trade(pos, price, pnl, result)
         except Exception as e:
             log.error(f"db.async_save_trade {symbol}: {e}")
-        del state.positions[symbol]
+        state.positions.pop(symbol, None)
         await db.async_delete_open_position(symbol)
         self._stale_alerted.discard(symbol)
         self._funding_warned.discard(symbol)
@@ -1834,6 +1833,8 @@ class Scanner:
                 except Exception as e:
                     log.error(f"partial_close {pos.symbol}: SL re-place failed — health_check will retry: {e}")
                 self._sl_replacing.discard(pos.symbol)  # unblock health_check
+            else:
+                self._sl_replacing.discard(pos.symbol)  # no old order — still unblock
             # Re-place TP3 for remaining qty (old order had original full qty).
             # Set _tp_replacing unconditionally so health_check doesn't race to place TP3
             # even when tp_order_id was already empty (e.g. placement failed at entry).

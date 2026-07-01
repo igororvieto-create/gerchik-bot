@@ -382,7 +382,8 @@ class Scanner:
         can, reason = state.can_trade(cfg.MAX_DAILY_LOSS, cfg.MAX_POSITIONS, cfg.MAX_DAILY_TRADES)
         if not can:
             log.info(f"Пропуск скана: {reason}")
-            # Notify user every 4th scan so they know the bot is paused / at limits
+            self._scan_count += 1
+            # Notify user every 4th skipped scan (≈1h) so they know the bot is paused/at limits
             if self._scan_count % 4 == 0:
                 pause_detail = ""
                 if state.day.paused_until and datetime.utcnow() < state.day.paused_until:
@@ -393,7 +394,6 @@ class Scanner:
                     f"Серия убытков: {state.day.loss_streak} | "
                     f"Позиций: {len(state.positions)}/{cfg.MAX_POSITIONS}"
                 )
-            self._scan_count += 1
             return
         # Time filter: skip low-liquidity hours
         hour = datetime.utcnow().hour
@@ -910,7 +910,7 @@ class Scanner:
                     log.warning(
                         f"{sig.symbol}: мин. позиция {min_notional:.0f} USDT "
                         f"создаёт риск {actual_risk:.2f} USDT "
-                        f"({actual_risk/balance*100:.1f}% > {cfg.RISK_PER_TRADE*3:.1f}%) "
+                        f"({actual_risk/balance*100:.1f}% > {max(cfg.RISK_PER_TRADE*5, 3.0):.1f}%) "
                         f"при балансе {balance:.2f} — пропуск"
                     )
                     await self._notify(

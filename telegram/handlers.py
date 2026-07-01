@@ -778,7 +778,7 @@ async def _account_manual_close(ex, pos) -> tuple:
         log.warning(f"_account_manual_close db.save_trade {pos.symbol}: {e}")
     state.total_pnl    += leg_pnl
     state.day.pnl_usdt += leg_pnl
-    state.day.trades   += 1
+    # state.day.trades is incremented at entry by _enter() — do NOT increment again on close
     if total_trade_pnl > 0:
         state.day.wins += 1
         state.day.loss_streak = 0

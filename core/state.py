@@ -89,6 +89,19 @@ class BotState:
         if self.day.paused_until and datetime.utcnow() >= self.day.paused_until:
             self.day.paused_until = None
             self.day.loss_streak = 0
+            # Persist the reset so a same-day restart doesn't restore the old streak from DB
+            try:
+                import asyncio
+                from core import db as _db
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(_db.async_save_kv("loss_streak", "0"))
+                    loop.create_task(_db.async_save_kv("paused_until", ""))
+                except RuntimeError:
+                    _db.save_kv("loss_streak", "0")
+                    _db.save_kv("paused_until", "")
+            except Exception:
+                pass
         if self.is_paused:
             return False, "бот на паузе"
         if len(self.positions) >= max_positions:

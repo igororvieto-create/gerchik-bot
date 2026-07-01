@@ -382,6 +382,18 @@ class Scanner:
         can, reason = state.can_trade(cfg.MAX_DAILY_LOSS, cfg.MAX_POSITIONS, cfg.MAX_DAILY_TRADES)
         if not can:
             log.info(f"Пропуск скана: {reason}")
+            # Notify user every 4th scan so they know the bot is paused / at limits
+            if self._scan_count % 4 == 0:
+                pause_detail = ""
+                if state.day.paused_until and datetime.utcnow() < state.day.paused_until:
+                    rem = int((state.day.paused_until - datetime.utcnow()).total_seconds() / 60)
+                    pause_detail = f"\nПауза истечёт через <b>{rem} мин</b>"
+                await self._notify(
+                    f"⏸ <b>Скан пропущен:</b> {reason}{pause_detail}\n"
+                    f"Серия убытков: {state.day.loss_streak} | "
+                    f"Позиций: {len(state.positions)}/{cfg.MAX_POSITIONS}"
+                )
+            self._scan_count += 1
             return
         # Time filter: skip low-liquidity hours
         hour = datetime.utcnow().hour
@@ -894,7 +906,7 @@ class Scanner:
                 actual_risk = min_notional * sl_pct
                 risk_usdt = actual_risk  # update to match actual bumped size
                 # Guard: bumping to min size must not create excessive actual risk
-                if balance > 0 and actual_risk / balance * 100 > cfg.RISK_PER_TRADE * 3:
+                if balance > 0 and actual_risk / balance * 100 > max(cfg.RISK_PER_TRADE * 5, 3.0):
                     log.warning(
                         f"{sig.symbol}: мин. позиция {min_notional:.0f} USDT "
                         f"создаёт риск {actual_risk:.2f} USDT "

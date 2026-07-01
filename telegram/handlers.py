@@ -223,7 +223,13 @@ async def cmd_pairs(msg: Message):
 async def cmd_settings(msg: Message):
     if not _auth(msg):
         return
-    status = "⏸ ПАУЗА" if state.paused else "▶️ Работает"
+    if state.paused:
+        status = "⏸ РУЧНАЯ ПАУЗА"
+    elif state.day.paused_until and datetime.utcnow() < state.day.paused_until:
+        remaining = int((state.day.paused_until - datetime.utcnow()).total_seconds() / 60)
+        status = f"⏸ АВТО-ПАУЗА ещё {remaining} мин (убытки)"
+    else:
+        status = "▶️ Работает"
     be_mode = f"+{cfg.BE_TRIGGER_PCT}% от входа" if cfg.BE_TRIGGER_PCT > 0 else "TP1"
     al = "✅ вкл" if cfg.AUTO_LEVERAGE else "❌ выкл"
     text = (

@@ -16,12 +16,12 @@ class Config:
     LEVERAGE:         int   = int(os.getenv("LEVERAGE", "5").strip())
     MIN_RR:           float = float(os.getenv("MIN_RR", "2.0").strip())
     SL_BUFFER_PCT:    float = float(os.getenv("SL_BUFFER_PCT", "0.15").strip())
-    VOLUME_MULT:      float = float(os.getenv("VOLUME_MULT", "1.3").strip())
+    VOLUME_MULT:      float = float(os.getenv("VOLUME_MULT", "1.2").strip())
     VOLUME_MA_PERIOD: int   = int(os.getenv("VOLUME_MA_PERIOD", "20").strip())
     # Per-strategy volume floors (intentionally higher for breakout setups)
-    FB_VOLUME_MULT:   float = float(os.getenv("FB_VOLUME_MULT",  "1.5").strip())
-    BRK_VOLUME_MULT:  float = float(os.getenv("BRK_VOLUME_MULT", "2.0").strip())
-    MIN_SCORE:        int   = int(os.getenv("MIN_SCORE", "60").strip())
+    FB_VOLUME_MULT:   float = float(os.getenv("FB_VOLUME_MULT",  "1.3").strip())
+    BRK_VOLUME_MULT:  float = float(os.getenv("BRK_VOLUME_MULT", "1.5").strip())
+    MIN_SCORE:        int   = int(os.getenv("MIN_SCORE", "55").strip())
     TREND_EMA_D1:     int   = int(os.getenv("TREND_EMA_D1", "200").strip())
     TREND_EMA_H4:     int   = int(os.getenv("TREND_EMA_H4", "50").strip())
     FUNDING_MAX_LONG:  float = float(os.getenv("FUNDING_MAX_LONG", "0.05").strip())
@@ -64,7 +64,7 @@ class Config:
     BTC_FILTER:           bool  = os.getenv("BTC_FILTER", "true").strip().lower() == "true"
     BTC_FILTER_PCT:       float = float(os.getenv("BTC_FILTER_PCT", "3.0").strip())
     # ADX minimum — below this value market is ranging, skip signal
-    ADX_MIN:              float = float(os.getenv("ADX_MIN", "15.0").strip())
+    ADX_MIN:              float = float(os.getenv("ADX_MIN", "12.0").strip())
     # H4 near-EMA tolerance: how far below/above EMA50 price can be and still qualify as "near"
     # 2.0 = strict; 3.5 = correction mode (allows pullbacks up to 3.5% from EMA50)
     H4_NEAR_PCT:          float = float(os.getenv("H4_NEAR_PCT", "3.5").strip())
@@ -76,7 +76,7 @@ class Config:
     H4_WAS_ABOVE_LOOKBACK: int  = int(os.getenv("H4_WAS_ABOVE_LOOKBACK", "50").strip())
     # S/R near-level tolerance (%): how far price can be from a S/R level and still qualify
     # 0.8 = strict; 1.2 = standard; 1.5 = relaxed
-    SR_NEAR_PCT:           float = float(os.getenv("SR_NEAR_PCT", "1.2").strip())
+    SR_NEAR_PCT:           float = float(os.getenv("SR_NEAR_PCT", "1.5").strip())
     # D1 slope for breakout strategy: require at least this % positive momentum (LONG) or negative (SHORT)
     D1_SLOPE_MIN:         float = float(os.getenv("D1_SLOPE_MIN", "0.02").strip())
     # D1 slope for entry/reversal strategies: block LONG only when slope falls more than this % over 10 days

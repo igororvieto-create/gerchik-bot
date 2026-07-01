@@ -72,8 +72,11 @@ class Config:
     # 0.0 = block any declining EMA50; -1.5 = allow gentle corrections (recommended)
     H4_SLOPE_FLOOR:       float = float(os.getenv("H4_SLOPE_FLOOR", "-1.5").strip())
     # H4 was-above lookback (candles): how far back to look for price above EMA50 in near-zone check
-    # 4 = last 16h (strict); 20 = last 3.3 days (recommended for corrections)
-    H4_WAS_ABOVE_LOOKBACK: int  = int(os.getenv("H4_WAS_ABOVE_LOOKBACK", "20").strip())
+    # 20 = last 3.3 days; 50 = last 8.3 days (better for prolonged corrections)
+    H4_WAS_ABOVE_LOOKBACK: int  = int(os.getenv("H4_WAS_ABOVE_LOOKBACK", "50").strip())
+    # S/R near-level tolerance (%): how far price can be from a S/R level and still qualify
+    # 0.8 = strict; 1.2 = standard; 1.5 = relaxed
+    SR_NEAR_PCT:           float = float(os.getenv("SR_NEAR_PCT", "1.2").strip())
     # D1 slope for breakout strategy: require at least this % positive momentum (LONG) or negative (SHORT)
     D1_SLOPE_MIN:         float = float(os.getenv("D1_SLOPE_MIN", "0.02").strip())
     # D1 slope for entry/reversal strategies: block LONG only when slope falls more than this % over 10 days

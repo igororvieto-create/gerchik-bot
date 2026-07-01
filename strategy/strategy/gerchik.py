@@ -411,7 +411,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         primary = lv4["support"] + lv1["support"]
     else:
         primary = lv4["resistance"] + lv1["resistance"]
-    near, level = near_level(price, primary, tol=0.8)
+    near, level = near_level(price, primary, tol=cfg.SR_NEAR_PCT)
     if not near:
         _reject("не у уровня S/R")
         return None
@@ -484,10 +484,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if trend == "SHORT" and price > pat_high:
         _reject("паттерн недействителен")
         return None
-    if trend == "LONG"  and price > pat_close * 1.008:
+    if trend == "LONG"  and price > pat_close * 1.015:
         _reject("цена ушла от паттерна")
         return None
-    if trend == "SHORT" and price < pat_close * 0.992:
+    if trend == "SHORT" and price < pat_close * 0.985:
         _reject("цена ушла от паттерна")
         return None
 
@@ -496,10 +496,8 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if is_doji and not h4ok:
         _reject("доджи без H4 подтверждения")
         return None
-    # When price is near EMA50 but not aligned (borderline zone), require H4 pattern.
-    if h4_near and not h4_aligned and not h4ok:
-        _reject("H4 зона: нет подтверждения H4 паттерна")
-        return None
+    # Near-EMA zone (not aligned): H4 pattern gives score bonus but is NOT a hard requirement.
+    # was-above/was-below guard already ensures this is a genuine pullback, not a resistance approach.
 
     # ── Volume ──
     vm    = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)

@@ -1829,10 +1829,12 @@ class Scanner:
                 except Exception as e:
                     log.error(f"partial_close {pos.symbol}: SL re-place failed — health_check will retry: {e}")
                 self._sl_replacing.discard(pos.symbol)  # unblock health_check
-            # Re-place TP3 for remaining qty (old order had original full qty)
+            # Re-place TP3 for remaining qty (old order had original full qty).
+            # Set _tp_replacing unconditionally so health_check doesn't race to place TP3
+            # even when tp_order_id was already empty (e.g. placement failed at entry).
+            self._tp_replacing.add(pos.symbol)
             if pos.tp_order_id:
                 old_tp_id = pos.tp_order_id
-                self._tp_replacing.add(pos.symbol)  # block health_check TP3 re-place during swap
                 pos.tp_order_id = ""
                 try:
                     await self.ex.cancel_order(pos.symbol, old_tp_id)

@@ -353,7 +353,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         if trend == "LONG"  and h4_slope < cfg.H4_SLOPE_FLOOR:
             _reject("H4 против тренда")
             return None
-        if trend == "SHORT" and h4_slope > -cfg.H4_SLOPE_FLOOR:
+        if trend == "SHORT" and h4_slope > abs(cfg.H4_SLOPE_FLOOR):
             _reject("H4 против тренда")
             return None
         # Reject: price approaching EMA50 from the WRONG side (bounce into resistance).

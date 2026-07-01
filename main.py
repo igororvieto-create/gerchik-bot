@@ -22,8 +22,6 @@ logging.basicConfig(
 )
 log = logging.getLogger("main")
 
-# Module-level scheduler — prevents garbage collection
-scheduler = AsyncIOScheduler(timezone="UTC")
 
 
 def _validate_config() -> bool:
@@ -149,23 +147,27 @@ async def main():
             return
         log.error(f"Uncaught async exception: {msg} | {exc!r}")
 
-    asyncio.get_event_loop().set_exception_handler(_async_exc_handler)
+    _main_loop = asyncio.get_running_loop()
+    _main_loop.set_exception_handler(_async_exc_handler)
 
     exchange = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
     scanner  = Scanner(exchange, bot)
 
-    # APScheduler error listener — log crashed jobs to Telegram
+    # APScheduler error listener — log crashed jobs to Telegram.
+    # Uses run_coroutine_threadsafe because APScheduler fires sync callbacks
+    # from the event-loop thread; get_event_loop() is deprecated in 3.10+.
     def _on_job_error(event):
         log.error(f"APScheduler job '{event.job_id}' crashed: {event.exception!r}")
         try:
-            asyncio.get_event_loop().create_task(
+            asyncio.run_coroutine_threadsafe(
                 bot.send_message(
                     cfg.TELEGRAM_CHAT_ID,
                     f"⚠️ <b>Ошибка планировщика</b>\n"
                     f"Задача: <code>{event.job_id}</code>\n"
                     f"Ошибка: <code>{type(event.exception).__name__}: {event.exception}</code>",
                     parse_mode="HTML",
-                )
+                ),
+                _main_loop,
             )
         except Exception:
             pass
@@ -173,6 +175,7 @@ async def main():
     def _on_job_missed(event):
         log.warning(f"APScheduler job '{event.job_id}' missed (overload?)")
 
+    scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_listener(_on_job_error,  EVENT_JOB_ERROR)
     scheduler.add_listener(_on_job_missed, EVENT_JOB_MISSED)
 
@@ -299,17 +302,21 @@ async def main():
     _startup_task = asyncio.create_task(startup_tasks())  # noqa: F841 — keep reference
 
     _poll_delay = 5
-    while True:
-        try:
-            await dp.start_polling(bot)
-            break  # clean shutdown
-        except (KeyboardInterrupt, SystemExit):
-            log.info("Получен сигнал остановки — выход")
-            break
-        except BaseException as e:
-            log.error(f"Polling error: {type(e).__name__}: {e} — retry in {_poll_delay}s")
-            await asyncio.sleep(_poll_delay)
-            _poll_delay = min(_poll_delay * 2, 120)  # backoff до 2 минут
+    try:
+        while True:
+            try:
+                await dp.start_polling(bot)
+                break  # clean shutdown
+            except (KeyboardInterrupt, SystemExit):
+                log.info("Получен сигнал остановки — выход")
+                break
+            except BaseException as e:
+                log.error(f"Polling error: {type(e).__name__}: {e} — retry in {_poll_delay}s")
+                await asyncio.sleep(_poll_delay)
+                _poll_delay = min(_poll_delay * 2, 120)  # backoff до 2 минут
+    finally:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
 
 
 if __name__ == "__main__":

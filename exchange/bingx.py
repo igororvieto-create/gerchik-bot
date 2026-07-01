@@ -206,7 +206,7 @@ class BingXClient:
         # Format 3 fallback
         if isinstance(d, dict):
             if balance == 0.0:
-                for field in ("equity", "balance", "availableMargin", "available"):
+                for field in ("balance", "equity", "availableMargin", "available"):
                     if field in d and float(d[field]) > 0:
                         balance = float(d[field])
                         break

@@ -52,12 +52,14 @@ class BotState:
         if self.day.date != datetime.utcnow().date():
             self.day = DayStats()
             # Clear persisted pause so restart on a new day doesn't inherit yesterday's pause.
-            # Use asyncio.ensure_future to avoid blocking the event loop with a synchronous
-            # SQLite write inside an async context.
             try:
                 import asyncio
                 from core import db as _db
-                asyncio.ensure_future(_db.async_save_kv("paused_until", ""))
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(_db.async_save_kv("paused_until", ""))
+                except RuntimeError:
+                    _db.save_kv("paused_until", "")  # no running loop — sync fallback
             except Exception:
                 pass
 

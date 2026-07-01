@@ -51,10 +51,15 @@ class BotState:
     def reset_day(self):
         if self.day.date != datetime.utcnow().date():
             self.day = DayStats()
-            # clear persisted pause so restart on a new day doesn't inherit yesterday's pause
+            # Clear persisted pause so restart on a new day doesn't inherit yesterday's pause.
             try:
+                import asyncio
                 from core import db as _db
-                _db.save_kv("paused_until", "")
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(_db.async_save_kv("paused_until", ""))
+                except RuntimeError:
+                    _db.save_kv("paused_until", "")  # no running loop — sync fallback
             except Exception:
                 pass
 
@@ -79,6 +84,24 @@ class BotState:
 
     def can_trade(self, max_daily_loss, max_positions, max_daily_trades):
         self.reset_day()
+        # When the auto-pause timer expires naturally (no win to reset it), clear the streak
+        # so the next loss starts a fresh count rather than immediately triggering a long pause.
+        if self.day.paused_until and datetime.utcnow() >= self.day.paused_until:
+            self.day.paused_until = None
+            self.day.loss_streak = 0
+            # Persist the reset so a same-day restart doesn't restore the old streak from DB
+            try:
+                import asyncio
+                from core import db as _db
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(_db.async_save_kv("loss_streak", "0"))
+                    loop.create_task(_db.async_save_kv("paused_until", ""))
+                except RuntimeError:
+                    _db.save_kv("loss_streak", "0")
+                    _db.save_kv("paused_until", "")
+            except Exception:
+                pass
         if self.is_paused:
             return False, "бот на паузе"
         if len(self.positions) >= max_positions:

@@ -2,9 +2,11 @@ import asyncio
 import logging
 import os
 import ssl
+import time
 from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 import aiohttp
 
 from core import db
@@ -20,8 +22,6 @@ logging.basicConfig(
 )
 log = logging.getLogger("main")
 
-# Module-level scheduler — prevents garbage collection
-scheduler = AsyncIOScheduler(timezone="UTC")
 
 
 def _validate_config() -> bool:
@@ -42,7 +42,8 @@ def _validate_config() -> bool:
         errors.append(f"RISK_PER_TRADE={cfg.RISK_PER_TRADE} должен быть в диапазоне 0–5%")
     for msg in errors:
         log.error(f"[config] {msg}")
-    critical = not cfg.TELEGRAM_TOKEN or not cfg.BINGX_API_KEY or not cfg.BINGX_SECRET
+    critical = (not cfg.TELEGRAM_TOKEN or not cfg.TELEGRAM_CHAT_ID
+                or not cfg.BINGX_API_KEY or not cfg.BINGX_SECRET)
     return not critical
 
 
@@ -56,7 +57,10 @@ async def main():
         return
 
     # Init SQLite and restore state
-    db.init_db()
+    try:
+        db.init_db()
+    except Exception as e:
+        log.error(f"SQLite init failed — продолжаем без персистентности: {e}")
 
     # Restore runtime-changed config values (setrisk, setlev, etc.)
     _saved_cfg = db.load_cfg_values()
@@ -94,9 +98,14 @@ async def main():
     state.day.losses    = today["losses"]
     state.day.pnl_usdt  = today["pnl"]
     try:
-        state.day.loss_streak = int(db.get_kv("loss_streak", "0"))
-        if state.day.loss_streak:
-            log.info(f"Восстановлена серия убытков: {state.day.loss_streak}")
+        stored_streak_date = db.get_kv("loss_streak_date", "")
+        today_str = datetime.utcnow().date().isoformat()
+        if stored_streak_date == today_str:
+            state.day.loss_streak = int(db.get_kv("loss_streak", "0"))
+            if state.day.loss_streak:
+                log.info(f"Восстановлена серия убытков: {state.day.loss_streak}")
+        else:
+            log.info("loss_streak из другого дня — не восстанавливается")
     except Exception:
         pass
     log.info(f"Восстановлена дневная статистика: {today['total']} сделок, PnL {today['pnl']:.2f} USDT")
@@ -131,8 +140,45 @@ async def main():
     except Exception as e:
         log.warning(f"delete_webhook: {e}")
 
+    # Catch uncaught asyncio exceptions — log them instead of crashing the event loop
+    def _async_exc_handler(loop, context):
+        exc  = context.get("exception")
+        msg  = context.get("message", "")
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            return
+        log.error(f"Uncaught async exception: {msg} | {exc!r}")
+
+    _main_loop = asyncio.get_running_loop()
+    _main_loop.set_exception_handler(_async_exc_handler)
+
     exchange = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
     scanner  = Scanner(exchange, bot)
+
+    # APScheduler error listener — log crashed jobs to Telegram.
+    # Uses run_coroutine_threadsafe because APScheduler fires sync callbacks
+    # from the event-loop thread; get_event_loop() is deprecated in 3.10+.
+    def _on_job_error(event):
+        log.error(f"APScheduler job '{event.job_id}' crashed: {event.exception!r}")
+        try:
+            asyncio.run_coroutine_threadsafe(
+                bot.send_message(
+                    cfg.TELEGRAM_CHAT_ID,
+                    f"⚠️ <b>Ошибка планировщика</b>\n"
+                    f"Задача: <code>{event.job_id}</code>\n"
+                    f"Ошибка: <code>{type(event.exception).__name__}: {event.exception}</code>",
+                    parse_mode="HTML",
+                ),
+                _main_loop,
+            )
+        except Exception:
+            pass
+
+    def _on_job_missed(event):
+        log.warning(f"APScheduler job '{event.job_id}' missed (overload?)")
+
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler.add_listener(_on_job_error,  EVENT_JOB_ERROR)
+    scheduler.add_listener(_on_job_missed, EVENT_JOB_MISSED)
 
     # Scheduler jobs
     scheduler.add_job(scanner.scan_all,          "cron",     minute=f"*/{cfg.SCAN_H1_INTERVAL_MIN}")
@@ -145,22 +191,30 @@ async def main():
     scheduler.add_job(scanner.daily_report,       "cron",     hour="9",  minute="0")
     scheduler.add_job(scanner.weekly_report,      "cron",     day_of_week="mon", hour="9", minute="5")
     scheduler.add_job(scanner.monthly_report,     "cron",     day="1",   hour="9", minute="10")
-    scheduler.start()
+    try:
+        scheduler.start()
+    except Exception as e:
+        log.error(f"Scheduler start failed: {e} — продолжаем без планировщика")
 
     async def startup_tasks():
         await asyncio.sleep(2)
+
+        # --- Balance fetch (isolated: failure must not block position restore) ---
+        balance = 0.0
         try:
             balance = await exchange.get_balance()
             state.current_balance = balance
+        except Exception as e:
+            log.error(f"startup: не удалось получить баланс — {e}")
 
-            # Get live positions from exchange (ground truth)
+        # --- Position restore (always runs, even if balance fetch failed) ---
+        try:
             live = await exchange.get_open_positions()
             live_map = {
                 p.get("symbol"): p for p in live
                 if abs(float(p.get("positionAmt", 0))) > 0
             }
 
-            # Restore positions from DB (full data: SL, TP, pattern, BE state, etc.)
             from core.state import Position
             saved = db.load_open_positions()
             restored = 0
@@ -170,8 +224,6 @@ async def main():
                 if not sym:
                     continue
                 if sym not in live_map:
-                    # Closed during downtime — PnL cannot be recorded without the close price.
-                    # Notify the user so they can check exchange history manually.
                     log.warning(
                         f"Позиция {sym} закрыта в downtime — PnL не записан (нет цены закрытия)"
                     )
@@ -216,7 +268,6 @@ async def main():
                 except Exception:
                     pass
 
-            # Any live exchange position not in DB → manual position, do NOT manage it
             manual_syms = []
             for sym in live_map:
                 if sym not in state.positions:
@@ -233,7 +284,11 @@ async def main():
                     )
                 except Exception:
                     pass
+        except Exception as e:
+            log.error(f"startup: ошибка восстановления позиций — {e}")
 
+        # --- Startup notification ---
+        try:
             await bot.send_message(
                 cfg.TELEGRAM_CHAT_ID,
                 f"✅ <b>Герчик Бот запущен</b>\n\n"
@@ -245,22 +300,49 @@ async def main():
             )
         except Exception as e:
             log.error(f"startup notify: {e}")
+
         try:
             await scanner.update_pairs()
+        except Exception as e:
+            log.error(f"startup update_pairs: {e}")
+        try:
             await scanner.scan_all()
         except Exception as e:
-            log.error(f"startup scan: {e}")
+            log.error(f"startup scan_all: {e}")
 
     _startup_task = asyncio.create_task(startup_tasks())  # noqa: F841 — keep reference
 
-    while True:
-        try:
-            await dp.start_polling(bot)
-            break
-        except Exception as e:
-            log.error(f"Polling error: {e} — retry in 10s")
-            await asyncio.sleep(10)
+    _poll_delay = 5
+    try:
+        while True:
+            try:
+                await dp.start_polling(bot)
+                break  # clean shutdown
+            except (KeyboardInterrupt, SystemExit):
+                log.info("Получен сигнал остановки — выход")
+                break
+            except BaseException as e:
+                log.error(f"Polling error: {type(e).__name__}: {e} — retry in {_poll_delay}s")
+                await asyncio.sleep(_poll_delay)
+                _poll_delay = min(_poll_delay * 2, 120)  # backoff до 2 минут
+    finally:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    _restart_delay = 5
+    while True:
+        try:
+            asyncio.run(main())
+            break  # чистый выход (KeyboardInterrupt изнутри main())
+        except (KeyboardInterrupt, SystemExit):
+            log.info("Остановка по сигналу — выход")
+            break
+        except Exception as e:
+            log.error(
+                f"ФАТАЛЬНАЯ ОШИБКА — перезапуск через {_restart_delay}с: "
+                f"{type(e).__name__}: {e}"
+            )
+            time.sleep(_restart_delay)
+            _restart_delay = min(_restart_delay * 2, 300)  # backoff до 5 минут

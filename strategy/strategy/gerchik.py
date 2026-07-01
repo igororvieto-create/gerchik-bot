@@ -344,22 +344,22 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     h4_up   = h4["close"][-1] > ema50[-1]
     h4_dn   = h4["close"][-1] < ema50[-1]
     h4_aligned = (trend=="LONG" and h4_up) or (trend=="SHORT" and h4_dn)
-    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < 2.0
+    h4_near    = abs(h4["close"][-1]-ema50[-1])/ema50[-1]*100 < cfg.H4_NEAR_PCT
     if not h4_aligned and not h4_near:
         _reject("H4 против тренда")
         return None
     if h4_near and not h4_aligned:
         h4_slope = (ema50[-1] - ema50[-5]) / ema50[-5] * 100 if ema50[-5] > 0 else 0
-        if trend == "LONG"  and h4_slope < 0:
+        if trend == "LONG"  and h4_slope < cfg.H4_SLOPE_FLOOR:
             _reject("H4 против тренда")
             return None
-        if trend == "SHORT" and h4_slope > 0:
+        if trend == "SHORT" and h4_slope > abs(cfg.H4_SLOPE_FLOOR):
             _reject("H4 против тренда")
             return None
         # Reject: price approaching EMA50 from the WRONG side (bounce into resistance).
         # For LONG: price below EMA50 must have been ABOVE it recently (pullback from above).
         # For SHORT: price above EMA50 must have been BELOW it recently (bounce from below).
-        lookback = min(4, len(h4["close"]) - 1)
+        lookback = min(cfg.H4_WAS_ABOVE_LOOKBACK, len(h4["close"]) - 1)
         if trend == "LONG":
             was_above = any(h4["close"][-lookback-1:-1] > ema50[-lookback-1:-1])
             if not was_above:
@@ -371,8 +371,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
                 _reject("H4 у EMA сверху (не откат — поддержка)")
                 return None
 
-    # H4 bearish/bullish impulse guard: if 3+ of last 4 H4 candles go against trend with
-    # meaningful bodies (≥0.3% of price), skip — market is in corrective impulse.
+    # H4 bearish/bullish impulse guard: skip when market is in corrective impulse.
+    # In the borderline EMA zone (near but not aligned) apply a stricter threshold (3/4)
+    # because we removed the H4-pattern hard requirement there — impulse guard is the
+    # only remaining protection against entering into active H4 momentum.
     _h4_ref = max(float(h4["close"][-1]), 0.001)
     _h4_body_min = _h4_ref * 0.003
     h4_bear_cnt = sum(
@@ -385,10 +387,11 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         if h4["close"][i] > h4["open"][i]
         and (h4["close"][i] - h4["open"][i]) >= _h4_body_min
     )
-    if trend == "LONG"  and h4_bear_cnt >= 4:
+    _impulse_threshold = 3 if (h4_near and not h4_aligned) else 4
+    if trend == "LONG"  and h4_bear_cnt >= _impulse_threshold:
         _reject("H4 медвежий импульс")
         return None
-    if trend == "SHORT" and h4_bull_cnt >= 4:
+    if trend == "SHORT" and h4_bull_cnt >= _impulse_threshold:
         _reject("H4 бычий импульс")
         return None
 
@@ -411,14 +414,17 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         primary = lv4["support"] + lv1["support"]
     else:
         primary = lv4["resistance"] + lv1["resistance"]
-    near, level = near_level(price, primary, tol=0.8)
+    near, level = near_level(price, primary, tol=cfg.SR_NEAR_PCT)
     if not near:
         _reject("не у уровня S/R")
         return None
 
     touches = level_touches(level, h4["high"][-120:], h4["low"][-120:])
     if touches == 0:
-        _reject("уровень не подтверждён (0 касаний H4)")
+        # Level may be H1-specific — fall back to H1 confirmation
+        touches = level_touches(level, h1["high"][-80:], h1["low"][-80:])
+    if touches == 0:
+        _reject("уровень не подтверждён (0 касаний H4/H1)")
         return None
     if touches > 6:
         _reject("уровень пробит (>6 касаний)")
@@ -481,10 +487,10 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if trend == "SHORT" and price > pat_high:
         _reject("паттерн недействителен")
         return None
-    if trend == "LONG"  and price > pat_close * 1.008:
+    if trend == "LONG"  and price > pat_close * 1.015:
         _reject("цена ушла от паттерна")
         return None
-    if trend == "SHORT" and price < pat_close * 0.992:
+    if trend == "SHORT" and price < pat_close * 0.985:
         _reject("цена ушла от паттерна")
         return None
 
@@ -493,10 +499,8 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if is_doji and not h4ok:
         _reject("доджи без H4 подтверждения")
         return None
-    # When price is near EMA50 but not aligned (borderline zone), require H4 pattern.
-    if h4_near and not h4_aligned and not h4ok:
-        _reject("H4 зона: нет подтверждения H4 паттерна")
-        return None
+    # Near-EMA zone (not aligned): H4 pattern gives score bonus but is NOT a hard requirement.
+    # was-above/was-below guard already ensures this is a genuine pullback, not a resistance approach.
 
     # ── Volume ──
     vm    = vol_ma(h1["volume"], cfg.VOLUME_MA_PERIOD)
@@ -645,7 +649,7 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     """
     if not d1 or not h4 or not h1:
         return None
-    if len(d1["close"]) < cfg.TREND_EMA_D1 or len(h4["close"]) < 55 or len(h1["close"]) < 40:
+    if len(d1["close"]) < cfg.TREND_EMA_D1 or len(h4["close"]) < cfg.TREND_EMA_H4 + 5 or len(h1["close"]) < 40:
         return None
 
     # ── D1 trend ──
@@ -672,10 +676,20 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     ema50_h4  = ema(h4["close"], cfg.TREND_EMA_H4)
     h4_up     = h4["close"][-1] > ema50_h4[-1]
     h4_aligned = (trend == "LONG" and h4_up) or (trend == "SHORT" and not h4_up)
-    h4_near_fb = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < 2.0
+    h4_near_fb = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < cfg.H4_NEAR_PCT
     if not h4_aligned and not h4_near_fb:
         _reject("ложный пробой: H4 против тренда")
         return None
+    if h4_near_fb and not h4_aligned:
+        lookback = min(cfg.H4_WAS_ABOVE_LOOKBACK, len(h4["close"]) - 1)
+        if trend == "LONG":
+            if not any(h4["close"][-lookback-1:-1] > ema50_h4[-lookback-1:-1]):
+                _reject("ложный пробой: H4 у EMA снизу (не откат — сопротивление)")
+                return None
+        else:
+            if not any(h4["close"][-lookback-1:-1] < ema50_h4[-lookback-1:-1]):
+                _reject("ложный пробой: H4 у EMA сверху (не откат — поддержка)")
+                return None
 
     # H4 impulse guard: 4 of last 4 candles against signal direction → skip
     h4_bear_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] < h4["open"][i])
@@ -831,6 +845,15 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         wick_pct = (fb_candle["h"] - fb_level) / fb_level * 100
 
     touches = level_touches(fb_level, h4["high"][-120:], h4["low"][-120:])
+    if touches == 0:
+        # Level may be H1-specific — fall back to H1 confirmation
+        touches = level_touches(fb_level, h1["high"][-80:], h1["low"][-80:])
+    if touches == 0:
+        _reject("ложный пробой: уровень не подтверждён на H4/H1 (0 касаний)")
+        return None
+    if touches > 6:
+        _reject("ложный пробой: уровень пробит (>6 касаний H4)")
+        return None
 
     # ── Score (base 58 — strong setup) ──
     score = 58
@@ -914,7 +937,7 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if not d1 or not h4 or not h1:
         return None
     n4 = len(h4["close"])
-    if len(d1["close"]) < cfg.TREND_EMA_D1 or n4 < 50 or len(h1["close"]) < 40:
+    if len(d1["close"]) < cfg.TREND_EMA_D1 or n4 < cfg.TREND_EMA_H4 + 5 or len(h1["close"]) < 40:
         return None
 
     # ── D1 trend ──
@@ -940,13 +963,23 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # H4 EMA50 alignment — must be in trend direction (tolerance 2%)
     ema50_h4   = ema(h4["close"], cfg.TREND_EMA_H4)
     h4_up      = h4["close"][-1] > ema50_h4[-1]
-    h4_near_rb = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < 2.0
+    h4_near_rb = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < cfg.H4_NEAR_PCT
     if trend == "LONG" and not h4_up and not h4_near_rb:
         _reject("накопление: H4 против тренда")
         return None
     if trend == "SHORT" and h4_up and not h4_near_rb:
         _reject("накопление: H4 против тренда")
         return None
+    if h4_near_rb and ((trend == "LONG" and not h4_up) or (trend == "SHORT" and h4_up)):
+        lookback = min(cfg.H4_WAS_ABOVE_LOOKBACK, len(h4["close"]) - 1)
+        if trend == "LONG":
+            if not any(h4["close"][-lookback-1:-1] > ema50_h4[-lookback-1:-1]):
+                _reject("накопление: H4 у EMA снизу (не откат — сопротивление)")
+                return None
+        else:
+            if not any(h4["close"][-lookback-1:-1] < ema50_h4[-lookback-1:-1]):
+                _reject("накопление: H4 у EMA сверху (не откат — поддержка)")
+                return None
 
     # H4 impulse guard
     h4_bear_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] < h4["open"][i])
@@ -1169,7 +1202,7 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     """
     if not d1 or not h4 or not h1:
         return None
-    if len(d1["close"]) < cfg.TREND_EMA_D1 or len(h4["close"]) < 55 or len(h1["close"]) < 40:
+    if len(d1["close"]) < cfg.TREND_EMA_D1 or len(h4["close"]) < cfg.TREND_EMA_H4 + 5 or len(h1["close"]) < 40:
         return None
 
     # ── D1 trend ──
@@ -1189,7 +1222,7 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # ── H4 filter — breakout must not happen against H4 trend ──
     ema50_h4 = ema(h4["close"], cfg.TREND_EMA_H4)
     h4_up    = h4["close"][-1] > ema50_h4[-1]
-    h4_near  = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < 2.0
+    h4_near  = abs(h4["close"][-1] - ema50_h4[-1]) / ema50_h4[-1] * 100 < cfg.H4_NEAR_PCT
     # For breakout: allow if H4 aligned OR price is crossing EMA50 from below (bullish)
     if trend == "LONG"  and not h4_up and not h4_near:
         _reject("пробой: H4 против тренда")
@@ -1261,7 +1294,10 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
 
     touches = level_touches(broken_level, h4["high"][-120:], h4["low"][-120:])
     if touches < 2:
-        _reject("пробой: уровень не подтверждён (<2 касаний)")
+        # Level may be H1-specific — fall back to H1 confirmation
+        touches = level_touches(broken_level, h1["high"][-80:], h1["low"][-80:])
+    if touches < 2:
+        _reject("пробой: уровень не подтверждён (<2 касаний H4/H1)")
         return None
 
     # ── Volume: breakout must have 2x+ volume ──

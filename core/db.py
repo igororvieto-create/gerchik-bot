@@ -120,7 +120,7 @@ def get_stats(days: Optional[int] = None):
                     """SELECT
                           SUM(CASE WHEN is_partial=0 THEN 1 ELSE 0 END),
                           SUM(pnl),
-                          SUM(CASE WHEN is_partial=0 AND pnl>0 THEN 1 ELSE 0 END)
+                          SUM(CASE WHEN is_partial=0 AND result='WIN' THEN 1 ELSE 0 END)
                        FROM trades WHERE closed_at >= ?""",
                     (since,),
                 )
@@ -129,7 +129,7 @@ def get_stats(days: Optional[int] = None):
                     """SELECT
                           SUM(CASE WHEN is_partial=0 THEN 1 ELSE 0 END),
                           SUM(pnl),
-                          SUM(CASE WHEN is_partial=0 AND pnl>0 THEN 1 ELSE 0 END)
+                          SUM(CASE WHEN is_partial=0 AND result='WIN' THEN 1 ELSE 0 END)
                        FROM trades"""
                 )
             row = cur.fetchone()
@@ -157,7 +157,7 @@ def get_stats_by_pattern(days: Optional[int] = None) -> list:
                 cur = conn.execute(
                     """SELECT pattern,
                               SUM(CASE WHEN is_partial=0 THEN 1 ELSE 0 END),
-                              SUM(CASE WHEN is_partial=0 AND pnl>0 THEN 1 ELSE 0 END),
+                              SUM(CASE WHEN is_partial=0 AND result='WIN' THEN 1 ELSE 0 END),
                               SUM(pnl)
                        FROM trades WHERE closed_at >= ? AND pattern != ''
                        GROUP BY pattern
@@ -168,7 +168,7 @@ def get_stats_by_pattern(days: Optional[int] = None) -> list:
                 cur = conn.execute(
                     """SELECT pattern,
                               SUM(CASE WHEN is_partial=0 THEN 1 ELSE 0 END),
-                              SUM(CASE WHEN is_partial=0 AND pnl>0 THEN 1 ELSE 0 END),
+                              SUM(CASE WHEN is_partial=0 AND result='WIN' THEN 1 ELSE 0 END),
                               SUM(pnl)
                        FROM trades WHERE pattern != ''
                        GROUP BY pattern
@@ -193,7 +193,7 @@ def get_yesterday_stats() -> dict:
                 """SELECT
                       SUM(CASE WHEN is_partial=0 THEN 1 ELSE 0 END),
                       SUM(pnl),
-                      SUM(CASE WHEN is_partial=0 AND pnl>0 THEN 1 ELSE 0 END)
+                      SUM(CASE WHEN is_partial=0 AND result='WIN' THEN 1 ELSE 0 END)
                    FROM trades WHERE closed_at >= ? AND closed_at < ?""",
                 (since, until),
             )
@@ -221,7 +221,7 @@ def get_today_stats() -> dict:
                 """SELECT
                       SUM(CASE WHEN is_partial=0 THEN 1 ELSE 0 END),
                       SUM(pnl),
-                      SUM(CASE WHEN is_partial=0 AND pnl>0 THEN 1 ELSE 0 END)
+                      SUM(CASE WHEN is_partial=0 AND result='WIN' THEN 1 ELSE 0 END)
                    FROM trades WHERE closed_at >= ?""",
                 (today,),
             )

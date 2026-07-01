@@ -169,7 +169,7 @@ async def cmd_status(msg: Message):
             amt  = abs(float(lp.get("positionAmt", 0)))
             side = lp.get("positionSide", "?")
             text += (
-                f"<b>{sym}</b> {side} (внешняя)\n"
+                f"<b>{_html.escape(str(sym))}</b> {_html.escape(str(side))} (внешняя)\n"
                 f"Вход: <code>{ep:.4f}</code> | Кол-во: {amt}\n"
                 f"PnL: {emoji} <code>{sign}{upnl:.2f} USDT</code>\n\n"
             )
@@ -212,7 +212,7 @@ async def cmd_pairs(msg: Message):
         return
     n = len(state.pairs)
     await msg.answer(
-        f"📋 Пар: <b>{n}</b>\n{' | '.join(state.pairs[:15])}{'...' if n > 15 else ''}",
+        f"📋 Пар: <b>{n}</b>\n{' | '.join(_html.escape(p) for p in state.pairs[:15])}{'...' if n > 15 else ''}",
         parse_mode="HTML",
         reply_markup=main_keyboard(),
     )
@@ -223,7 +223,13 @@ async def cmd_pairs(msg: Message):
 async def cmd_settings(msg: Message):
     if not _auth(msg):
         return
-    status = "⏸ ПАУЗА" if state.paused else "▶️ Работает"
+    if state.paused:
+        status = "⏸ РУЧНАЯ ПАУЗА"
+    elif state.day.paused_until and datetime.utcnow() < state.day.paused_until:
+        remaining = int((state.day.paused_until - datetime.utcnow()).total_seconds() / 60)
+        status = f"⏸ АВТО-ПАУЗА ещё {remaining} мин (убытки)"
+    else:
+        status = "▶️ Работает"
     be_mode = f"+{cfg.BE_TRIGGER_PCT}% от входа" if cfg.BE_TRIGGER_PCT > 0 else "TP1"
     al = "✅ вкл" if cfg.AUTO_LEVERAGE else "❌ выкл"
     text = (
@@ -280,8 +286,10 @@ async def cmd_history(msg: Message):
     if not _auth(msg):
         return
     from core.db import get_history, get_stats
-    rows  = get_history(15)
-    stats = get_stats()
+    rows, stats = await asyncio.gather(
+        asyncio.to_thread(get_history, 15),
+        asyncio.to_thread(get_stats),
+    )
     if not rows:
         await msg.answer("📜 История сделок пуста", reply_markup=main_keyboard())
         return
@@ -321,7 +329,7 @@ async def cmd_top(msg: Message):
     lines = ["🏆 <b>Топ 20 пар по объёму:</b>\n"]
     for i, s in enumerate(syms[:20], 1):
         in_bl = "🚫" if s in cfg.BLACKLIST else ""
-        lines.append(f"{i:2}. {s} {in_bl}")
+        lines.append(f"{i:2}. {_html.escape(s)} {in_bl}")
     await msg.answer("\n".join(lines), parse_mode="HTML", reply_markup=main_keyboard())
 
 
@@ -770,6 +778,7 @@ async def _account_manual_close(ex, pos) -> tuple:
         log.warning(f"_account_manual_close db.save_trade {pos.symbol}: {e}")
     state.total_pnl    += leg_pnl
     state.day.pnl_usdt += leg_pnl
+    # state.day.trades is incremented at entry by _enter() — do NOT increment again on close
     if total_trade_pnl > 0:
         state.day.wins += 1
         state.day.loss_streak = 0
@@ -826,71 +835,79 @@ async def cmd_closeall(msg: Message):
     closed: list[str] = []
     errors: list[str] = []
     live_syms: set[str] = set()
-    for p in live:
-        sym  = str(p.get("symbol") or "")
-        if not sym:
-            continue
-        side = str(p.get("positionSide", "LONG"))
-        amt  = abs(float(p.get("positionAmt", 0)))
-        if amt == 0:
-            continue
-        live_syms.add(sym)
-        try:
-            # Cancel SL/TP orders if tracked in state
-            tracked = state.positions.get(sym)
-            if tracked:
-                for oid in (tracked.sl_order_id, tracked.tp_order_id):
-                    if oid:
-                        try:
-                            await ex.cancel_order(sym, oid)
-                        except Exception:
-                            pass
-            await ex.close_position(sym, amt, side)
-            popped = state.positions.pop(sym, None)  # pop before await — prevents monitor race
-            await db.async_delete_open_position(sym)
-            # Use popped value: if None, monitor already accounted this position — skip to avoid double PnL
-            if popped and popped.entry > 0:
-                try:
-                    await _account_manual_close(ex, popped)
-                except Exception as ae:
-                    log.warning(f"closeall account {sym}: {ae}")
-            closed.append(sym)
-        except Exception as e:
-            log.error(f"closeall {sym}: {e}")
-            errors.append(sym)
+    try:
+        for p in live:
+            sym  = str(p.get("symbol") or "")
+            if not sym:
+                continue
+            side = str(p.get("positionSide", "LONG"))
+            amt  = abs(float(p.get("positionAmt", 0)))
+            if amt == 0:
+                continue
+            live_syms.add(sym)
+            try:
+                # Cancel SL/TP orders if tracked in state
+                tracked = state.positions.get(sym)
+                if tracked:
+                    for oid in (tracked.sl_order_id, tracked.tp_order_id):
+                        if oid:
+                            try:
+                                await ex.cancel_order(sym, oid)
+                            except Exception:
+                                pass
+                await ex.close_position(sym, amt, side)
+                popped = state.positions.pop(sym, None)  # pop before await — prevents monitor race
+                await db.async_delete_open_position(sym)
+                # Use popped value: if None, monitor already accounted this position — skip to avoid double PnL
+                if popped and popped.entry > 0:
+                    try:
+                        await _account_manual_close(ex, popped)
+                    except Exception as ae:
+                        log.warning(f"closeall account {sym}: {ae}")
+                closed.append(sym)
+            except Exception as e:
+                log.error(f"closeall {sym}: {e}")
+                errors.append(sym)
 
-    # Close positions tracked in state but absent from exchange (ghost state or API returned none)
-    ghost_syms = [sym for sym in list(state.positions.keys()) if sym not in live_syms]
-    for sym in ghost_syms:
-        gpos: Optional[Position] = state.positions.get(sym)
-        if not gpos:
-            continue
-        try:
-            if gpos.sl_order_id:
-                try:
-                    await ex.cancel_order(sym, gpos.sl_order_id)
-                except Exception:
-                    pass
-            if gpos.tp_order_id:
-                try:
-                    await ex.cancel_order(sym, gpos.tp_order_id)
-                except Exception:
-                    pass
-            if not live:
-                # Exchange returned nothing — try to close anyway (position may exist)
-                await ex.close_position(sym, gpos.qty, gpos.side)
-            ghost_popped = state.positions.pop(sym, None)
-            await db.async_delete_open_position(sym)
-            if ghost_popped and ghost_popped.entry > 0:
-                try:
-                    await _account_manual_close(ex, ghost_popped)
-                except Exception as ae:
-                    log.warning(f"closeall ghost account {sym}: {ae}")
-            closed.append(sym)
-        except Exception as e:
-            log.error(f"closeall ghost {sym}: {e}")
-            errors.append(sym)
-    await ex.close()
+        # Close positions tracked in state but absent from exchange (ghost state or API returned none)
+        ghost_syms = [sym for sym in list(state.positions.keys()) if sym not in live_syms]
+        for sym in ghost_syms:
+            gpos: Optional[Position] = state.positions.get(sym)
+            if not gpos:
+                continue
+            try:
+                if gpos.sl_order_id:
+                    try:
+                        await ex.cancel_order(sym, gpos.sl_order_id)
+                    except Exception:
+                        pass
+                if gpos.tp_order_id:
+                    try:
+                        await ex.cancel_order(sym, gpos.tp_order_id)
+                    except Exception:
+                        pass
+                if not live:
+                    # Exchange returned nothing — try to close anyway (position may exist)
+                    await ex.close_position(sym, gpos.qty, gpos.side)
+                    ghost_popped = state.positions.pop(sym, None)
+                    await db.async_delete_open_position(sym)
+                    if ghost_popped and ghost_popped.entry > 0:
+                        try:
+                            await _account_manual_close(ex, ghost_popped)
+                        except Exception as ae:
+                            log.warning(f"closeall ghost account {sym}: {ae}")
+                else:
+                    # Position absent from exchange — already closed by SL/TP.
+                    # monitor_positions will (or already did) account for it via _record_close.
+                    # Don't double-account: just purge from state so it's not re-tracked.
+                    state.positions.pop(sym, None)
+                    await db.async_delete_open_position(sym)
+                closed.append(sym)
+            except Exception as e:
+                log.error(f"closeall ghost {sym}: {e}")
+                errors.append(sym)
+    finally:
+        await ex.close()
     text = f"✅ Закрыто: {', '.join(closed) or 'ничего'}"
     if errors:
         text += f"\n❌ Ошибка закрытия: {', '.join(errors)}"
@@ -927,8 +944,14 @@ async def cmd_close_symbol(msg: Message):
                     pass
         await ex.close_position(symbol, pos.qty, pos.side)
         state.positions.pop(symbol, None)  # pop before await — prevents monitor race
-        close_px, leg_pnl = await _account_manual_close(ex, pos)
-        await db.async_delete_open_position(symbol)  # after accounting
+        await db.async_delete_open_position(symbol)
+        try:
+            close_px, leg_pnl = await _account_manual_close(ex, pos)
+        except Exception as _ae:
+            # Accounting failed but position is already closed on exchange and removed from state/DB.
+            # Do NOT restore to state — monitor would see it missing and double-account PnL.
+            log.error(f"close_symbol {symbol}: accounting failed (position already closed): {_ae}")
+            raise _ae
         sign = "+" if leg_pnl >= 0 else ""
         await msg.answer(
             f"✅ Позиция {symbol} закрыта\n"
@@ -1006,6 +1029,17 @@ async def handle_signal_callback(cb: CallbackQuery):
         from strategy.scanner import _global_scanner
         if _global_scanner:
             await _global_scanner._enter(pend["signal"], confirmed=True)
+            # _enter() may silently return (e.g. _entering guard fires) without raising.
+            # Detect this and restore pending so the user can retry.
+            if symbol not in state.positions:
+                state.pending.setdefault(symbol, pend)
+                try:
+                    cbm4 = cb.message
+                    if isinstance(cbm4, Message):
+                        await cbm4.answer("⚠️ Вход не выполнен — уже в процессе или пауза. Попробуй снова.", reply_markup=main_keyboard())
+                except Exception:
+                    pass
+                return
         else:
             from exchange.bingx import BingXClient
             from strategy.scanner import Scanner

@@ -81,8 +81,8 @@ async def test_streak_3_sends_notification_once(scanner, pos, mock_scanner_db):
     scanner._notify.assert_awaited_once()
 
 
-async def test_streak_4_sends_no_extra_notification(scanner, make_pos, mock_scanner_db):
-    """The 4th loss must NOT send another notification (== 3, not >= 3)."""
+async def test_streak_4_sends_notification(scanner, make_pos, mock_scanner_db):
+    """The 4th consecutive loss must also send a pause notification (streak >= 3)."""
     pos1 = make_pos(symbol="BTC-USDT")
     state.positions["BTC-USDT"] = pos1
     state.day.loss_streak = 3
@@ -90,7 +90,7 @@ async def test_streak_4_sends_no_extra_notification(scanner, make_pos, mock_scan
     await scanner._record_close(pos1, price=48000.0)
 
     assert state.day.loss_streak == 4
-    scanner._notify.assert_not_awaited()
+    scanner._notify.assert_awaited_once()
 
 
 # ── double-call guard ────────────────────────────────────────────────────────

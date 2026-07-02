@@ -806,13 +806,13 @@ class Scanner:
                 return
             state.current_balance = balance
 
-            # Auto-leverage based on balance tiers (conservative, max x5)
+            # Auto-leverage based on balance tiers: <100→x10, <500→x7, <2000→x5, ≥2000→x3
             leverage = cfg.LEVERAGE
             if cfg.AUTO_LEVERAGE:
                 if balance < 100:
-                    leverage = 3   # very small account — protect capital
+                    leverage = 10
                 elif balance < 500:
-                    leverage = 5
+                    leverage = 7
                 elif balance < 2000:
                     leverage = 5
                 else:
@@ -845,7 +845,7 @@ class Scanner:
                             f"SL {sl_pct_check*100:.1f}% от входа — слишком широкий для любого плеча"
                         )
                         return
-                orig_lev = (3 if balance < 100 else 5 if balance < 500 else 5 if balance < 2000 else 3) if cfg.AUTO_LEVERAGE else cfg.LEVERAGE
+                orig_lev = (10 if balance < 100 else 7 if balance < 500 else 5 if balance < 2000 else 3) if cfg.AUTO_LEVERAGE else cfg.LEVERAGE
                 if leverage < orig_lev:
                     log.info(
                         f"{sig.symbol}: плечо снижено x{orig_lev}→x{leverage} "

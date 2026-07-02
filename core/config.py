@@ -86,7 +86,7 @@ class Config:
     MAX_POSITION_HOURS:      int   = int(os.getenv("MAX_POSITION_HOURS", "72").strip())
     # Orderbook filter
     ORDERBOOK_ENABLED:       bool  = os.getenv("ORDERBOOK_ENABLED",  "true").strip().lower() == "true"
-    ORDERBOOK_LOG_ONLY:      bool  = os.getenv("ORDERBOOK_LOG_ONLY", "false").strip().lower() == "true"
+    ORDERBOOK_LOG_ONLY:      bool  = os.getenv("ORDERBOOK_LOG_ONLY", "true").strip().lower() == "true"
     OB_IMBALANCE_THRESHOLD:  float = float(os.getenv("OB_IMBALANCE_THRESHOLD", "0.15").strip())
     OB_THIN_THRESHOLD_USDT:  float = float(os.getenv("OB_THIN_THRESHOLD_USDT", "100000").strip())
     OB_MAX_SPREAD_BPS:       float = float(os.getenv("OB_MAX_SPREAD_BPS", "15.0").strip())

@@ -535,7 +535,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if price <= 0 or sld <= 0 or sld / price < 0.004:
         _reject("SL слишком узкий (шум)")
         return None
-    if sld / price > 0.05:
+    if sld / price > cfg.MAX_SL_PCT / 100:
         _reject("SL слишком широкий")
         return None
 
@@ -692,8 +692,19 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
                 return None
 
     # H4 impulse guard: 4 of last 4 candles against signal direction → skip
-    h4_bear_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] < h4["open"][i])
-    h4_bull_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] > h4["open"][i])
+    # Exclude micro-candles (body < 0.3% of price) — dojis in ranging market should not count
+    _h4_ref = max(float(h4["close"][-1]), 0.001)
+    _h4_body_min = _h4_ref * 0.003
+    h4_bear_cnt = sum(
+        1 for i in (-1,-2,-3,-4)
+        if h4["close"][i] < h4["open"][i]
+        and (h4["open"][i] - h4["close"][i]) >= _h4_body_min
+    )
+    h4_bull_cnt = sum(
+        1 for i in (-1,-2,-3,-4)
+        if h4["close"][i] > h4["open"][i]
+        and (h4["close"][i] - h4["open"][i]) >= _h4_body_min
+    )
     if trend == "LONG"  and h4_bear_cnt >= 4:
         _reject("ложный пробой: H4 медвежий импульс")
         return None
@@ -721,11 +732,22 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         _reject("ложный пробой: нет уровней")
         return None
 
-    # ── ATR for wick quality check ──
+    # ── ATR for wick quality check + volatility guard ──
     h1_atr_v = atr(h1["high"], h1["low"], h1["close"], 14)
     cur_atr  = h1_atr_v[-1]
+    _atr_pct = cur_atr / price * 100 if price > 0 else 0
+    if _atr_pct < 0.2:
+        _reject("ложный пробой: ATR слишком мал (флэт)")
+        return None
+    if _atr_pct > 5.0:
+        _reject("ложный пробой: ATR слишком велик (взрыв)")
+        return None
+    _atr_hist_mean = float(np.mean(h1_atr_v[-20:-1])) if len(h1_atr_v) > 20 else cur_atr
+    if _atr_hist_mean > 0 and cur_atr / _atr_hist_mean > 2.0:
+        _reject("ложный пробой: ATR взрыв (спайк волатильности)")
+        return None
 
-    # ── Scan last 11 H1 candles for a false breakout ──
+    # ── Scan last 6 H1 candles for a false breakout ──
     fb_candle = None
     fb_level  = None
     fb_vrat   = 1.0
@@ -825,7 +847,7 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if price <= 0 or sld <= 0 or sld / price < 0.004:
         _reject("ложный пробой: SL слишком узкий (шум)")
         return None
-    if sld / price > 0.05:
+    if sld / price > cfg.MAX_SL_PCT / 100:
         _reject("ложный пробой: SL слишком широкий")
         return None
 
@@ -981,9 +1003,19 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
                 _reject("накопление: H4 у EMA сверху (не откат — поддержка)")
                 return None
 
-    # H4 impulse guard
-    h4_bear_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] < h4["open"][i])
-    h4_bull_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] > h4["open"][i])
+    # H4 impulse guard (exclude doji micro-candles — body < 0.3% of price)
+    _h4_ref = max(float(h4["close"][-1]), 0.001)
+    _h4_body_min = _h4_ref * 0.003
+    h4_bear_cnt = sum(
+        1 for i in (-1,-2,-3,-4)
+        if h4["close"][i] < h4["open"][i]
+        and (h4["open"][i] - h4["close"][i]) >= _h4_body_min
+    )
+    h4_bull_cnt = sum(
+        1 for i in (-1,-2,-3,-4)
+        if h4["close"][i] > h4["open"][i]
+        and (h4["close"][i] - h4["open"][i]) >= _h4_body_min
+    )
     if trend == "LONG"  and h4_bear_cnt >= 4:
         _reject("накопление: H4 медвежий импульс")
         return None
@@ -1109,6 +1141,18 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # ── SL: just inside the broken range boundary ──
     h1_atr_v = atr(h1["high"], h1["low"], h1["close"], 14)
     cur_atr  = h1_atr_v[-1]
+    # Volatility guard — same as other strategies
+    _atr_pct = cur_atr / price * 100 if price > 0 else 0
+    if _atr_pct < 0.2:
+        _reject("накопление: ATR слишком мал (флэт)")
+        return None
+    if _atr_pct > 5.0:
+        _reject("накопление: ATR слишком велик (взрыв)")
+        return None
+    _atr_hist_mean = float(np.mean(h1_atr_v[-20:-1])) if len(h1_atr_v) > 20 else cur_atr
+    if _atr_hist_mean > 0 and cur_atr / _atr_hist_mean > 2.0:
+        _reject("накопление: ATR взрыв (спайк волатильности)")
+        return None
     buf = price * cfg.SL_BUFFER_PCT / 100
     if trend == "LONG":
         sl = boundary - cur_atr * 0.7 - buf
@@ -1119,7 +1163,7 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if price <= 0 or sld <= 0 or sld / price < 0.004:
         _reject("накопление: SL слишком узкий (шум)")
         return None
-    if sld / price > 0.07:
+    if sld / price > cfg.MAX_SL_PCT / 100:
         _reject("накопление: SL слишком широкий")
         return None
 
@@ -1148,7 +1192,7 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     else:                score += 3   # 2.0–2.5×
     if width_pct < 4.0:  score += 8
     elif width_pct < 6.0: score += 4
-    if adx_rising:       score += 7
+    score += 7  # adx_rising is a hard filter above — always True here
     if cur_adx >= 25:    score += 5
     elif cur_adx >= 20:  score += 2
     if (trend == "LONG"  and d1_slope > 0.1) or \
@@ -1230,9 +1274,19 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if trend == "SHORT" and h4_up and not h4_near:
         _reject("пробой: H4 против тренда")
         return None
-    # H4 impulse guard: 3+ of last 4 candles against direction
-    h4_bear_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] < h4["open"][i])
-    h4_bull_cnt = sum(1 for i in (-1,-2,-3,-4) if h4["close"][i] > h4["open"][i])
+    # H4 impulse guard: 4 of last 4 candles against direction (exclude doji micro-candles)
+    _h4_ref = max(float(h4["close"][-1]), 0.001)
+    _h4_body_min = _h4_ref * 0.003
+    h4_bear_cnt = sum(
+        1 for i in (-1,-2,-3,-4)
+        if h4["close"][i] < h4["open"][i]
+        and (h4["open"][i] - h4["close"][i]) >= _h4_body_min
+    )
+    h4_bull_cnt = sum(
+        1 for i in (-1,-2,-3,-4)
+        if h4["close"][i] > h4["open"][i]
+        and (h4["close"][i] - h4["open"][i]) >= _h4_body_min
+    )
     if trend == "LONG"  and h4_bear_cnt >= 4:
         _reject("пробой: H4 медвежий импульс")
         return None
@@ -1243,6 +1297,18 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     price = h1["close"][-1]
     h1_atr = atr(h1["high"], h1["low"], h1["close"], 14)
     cur_atr = h1_atr[-1]
+    # Volatility guard
+    _atr_pct = cur_atr / price * 100 if price > 0 else 0
+    if _atr_pct < 0.2:
+        _reject("пробой: ATR слишком мал (флэт)")
+        return None
+    if _atr_pct > 5.0:
+        _reject("пробой: ATR слишком велик (взрыв)")
+        return None
+    _atr_hist_mean = float(np.mean(h1_atr[-20:-1])) if len(h1_atr) > 20 else cur_atr
+    if _atr_hist_mean > 0 and cur_atr / _atr_hist_mean > 2.0:
+        _reject("пробой: ATR взрыв (спайк волатильности)")
+        return None
 
     # ── Breakout candle: must be strong (body > 55% of range, min size 0.25× ATR) ──
     o2, c2 = h1["open"][-2], h1["close"][-2]
@@ -1344,7 +1410,7 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     if price <= 0 or sld <= 0 or sld / price < 0.004:
         _reject("пробой: SL слишком узкий (шум)")
         return None
-    if sld / price > 0.05:
+    if sld / price > cfg.MAX_SL_PCT / 100:
         _reject("пробой: SL слишком широкий")
         return None
 

@@ -789,9 +789,12 @@ async def _account_manual_close(ex, pos) -> tuple:
         state.day.losses += 1
         state.day.loss_streak += 1
         pause_min = cfg.PAUSE_3X_LOSS_MIN if state.day.loss_streak >= 3 else cfg.PAUSE_AFTER_LOSS_MIN
-        state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
-        await db.async_save_kv("paused_until", state.day.paused_until.isoformat())
+        new_until = datetime.utcnow() + timedelta(minutes=pause_min)
+        if state.day.paused_until is None or new_until > state.day.paused_until:
+            state.day.paused_until = new_until
+            await db.async_save_kv("paused_until", state.day.paused_until.isoformat())
         await db.async_save_kv("loss_streak", str(state.day.loss_streak))
+        await db.async_save_kv("loss_streak_date", datetime.utcnow().date().isoformat())
         if state.day.loss_streak == 3:
             try:
                 from strategy.scanner import _global_scanner as _gs

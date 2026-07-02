@@ -255,6 +255,50 @@ async def main():
                     restored += 1
             if restored:
                 log.info(f"Восстановлено {restored} позиций из БД с полными данными (SL/TP/BE)")
+
+            # --- Immediate SL/TP verification after restore ---
+            # Don't wait 15 min for health_check — verify right now so positions are protected.
+            sl_fixed = []
+            for sym, pos in list(state.positions.items()):
+                try:
+                    open_orders = await exchange.get_open_orders(sym)
+                    order_ids = {str(o.get("orderId", "")) for o in open_orders}
+                    side_str = "BUY" if pos.side == "LONG" else "SELL"
+
+                    # Re-place SL if missing or order gone from exchange
+                    if not pos.sl_order_id or (pos.sl_order_id and pos.sl_order_id not in order_ids):
+                        if pos.sl > 0 and pos.qty > 0:
+                            r = await exchange.place_stop_loss(sym, side_str, pos.qty, pos.sl)
+                            if r.get("code") == 0:
+                                pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
+                                db.save_open_position(pos)
+                                sl_fixed.append(f"{sym} SL@{pos.sl:.4f}")
+                                log.info(f"startup: SL перевыставлен для {sym} @ {pos.sl:.4f}")
+                            else:
+                                log.error(f"startup: SL не выставился {sym}: {r}")
+
+                    # Re-place TP if missing or order gone from exchange
+                    if not pos.tp_order_id or (pos.tp_order_id and pos.tp_order_id not in order_ids):
+                        if pos.tp3 > 0 and pos.qty > 0:
+                            r = await exchange.place_take_profit(sym, side_str, pos.qty, pos.tp3)
+                            if r.get("code") == 0:
+                                pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))
+                                db.save_open_position(pos)
+                                sl_fixed.append(f"{sym} TP@{pos.tp3:.4f}")
+                                log.info(f"startup: TP перевыставлен для {sym} @ {pos.tp3:.4f}")
+                except Exception as ve:
+                    log.error(f"startup SL/TP verify {sym}: {ve}")
+            if sl_fixed:
+                try:
+                    await bot.send_message(
+                        cfg.TELEGRAM_CHAT_ID,
+                        f"🔧 <b>Восстановлены ордера при старте</b>\n"
+                        + "\n".join(f"• <code>{s}</code>" for s in sl_fixed),
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+
             if downtime_closed:
                 syms_str = ", ".join(downtime_closed)
                 try:

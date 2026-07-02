@@ -258,34 +258,68 @@ async def main():
 
             # --- Immediate SL/TP verification after restore ---
             # Don't wait 15 min for health_check — verify right now so positions are protected.
+            # Fetch open orders per symbol and re-place any missing SL/TP immediately.
             sl_fixed = []
             for sym, pos in list(state.positions.items()):
                 try:
+                    # Fetch fresh order list for this symbol (one API call covers both SL and TP).
                     open_orders = await exchange.get_open_orders(sym)
                     order_ids = {str(o.get("orderId", "")) for o in open_orders}
                     side_str = "BUY" if pos.side == "LONG" else "SELL"
+                    needs_db_save = False
 
-                    # Re-place SL if missing or order gone from exchange
-                    if not pos.sl_order_id or (pos.sl_order_id and pos.sl_order_id not in order_ids):
-                        if pos.sl > 0 and pos.qty > 0:
+                    # Re-place SL if missing or order gone from exchange.
+                    # CRASH-SAFE: if sl_order_id is empty but a STOP order exists on exchange
+                    # (crash between place_stop_loss and DB persist), adopt it instead of
+                    # placing a duplicate that would double-close the position.
+                    sl_missing = not pos.sl_order_id or pos.sl_order_id not in order_ids
+                    if sl_missing and pos.sl > 0 and pos.qty > 0:
+                        existing_sl = next(
+                            (o for o in open_orders
+                             if o.get("type") in ("STOP_MARKET", "STOP")
+                             and str(o.get("positionSide", "")) == pos.side),
+                            None
+                        )
+                        if existing_sl:
+                            pos.sl_order_id = str(existing_sl.get("orderId", ""))
+                            needs_db_save = True
+                            log.info(f"startup: принят существующий SL {sym}: {pos.sl_order_id}")
+                        else:
                             r = await exchange.place_stop_loss(sym, side_str, pos.qty, pos.sl)
                             if r.get("code") == 0:
                                 pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
-                                db.save_open_position(pos)
                                 sl_fixed.append(f"{sym} SL@{pos.sl:.4f}")
                                 log.info(f"startup: SL перевыставлен для {sym} @ {pos.sl:.4f}")
+                                needs_db_save = True
                             else:
                                 log.error(f"startup: SL не выставился {sym}: {r}")
 
-                    # Re-place TP if missing or order gone from exchange
-                    if not pos.tp_order_id or (pos.tp_order_id and pos.tp_order_id not in order_ids):
-                        if pos.tp3 > 0 and pos.qty > 0:
+                    # Re-place TP if missing or order gone from exchange (same crash-safe logic).
+                    tp_missing = not pos.tp_order_id or pos.tp_order_id not in order_ids
+                    if tp_missing and pos.tp3 > 0 and pos.qty > 0:
+                        existing_tp = next(
+                            (o for o in open_orders
+                             if o.get("type") in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT")
+                             and str(o.get("positionSide", "")) == pos.side),
+                            None
+                        )
+                        if existing_tp:
+                            pos.tp_order_id = str(existing_tp.get("orderId", ""))
+                            needs_db_save = True
+                            log.info(f"startup: принят существующий TP {sym}: {pos.tp_order_id}")
+                        else:
                             r = await exchange.place_take_profit(sym, side_str, pos.qty, pos.tp3)
                             if r.get("code") == 0:
                                 pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))
-                                db.save_open_position(pos)
                                 sl_fixed.append(f"{sym} TP@{pos.tp3:.4f}")
                                 log.info(f"startup: TP перевыставлен для {sym} @ {pos.tp3:.4f}")
+                                needs_db_save = True
+                            else:
+                                log.error(f"startup: TP не выставился {sym}: {r}")
+
+                    # Single async DB write after both checks (non-blocking)
+                    if needs_db_save:
+                        await db.async_save_open_position(pos)
                 except Exception as ve:
                     log.error(f"startup SL/TP verify {sym}: {ve}")
             if sl_fixed:

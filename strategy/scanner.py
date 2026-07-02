@@ -190,11 +190,15 @@ class Scanner:
                     )
                 else:
                     pause_min = cfg.PAUSE_AFTER_LOSS_MIN
-                state.day.paused_until = datetime.utcnow() + timedelta(minutes=pause_min)
-                try:
-                    await db.async_save_kv("paused_until", state.day.paused_until.isoformat())
-                except Exception as _e:
-                    log.error(f"db.save_kv paused_until {symbol}: {_e}")
+                new_until = datetime.utcnow() + timedelta(minutes=pause_min)
+                # Only extend the pause if it would run longer than what's already set.
+                # Prevents the timer from sliding forward on each consecutive loss.
+                if state.day.paused_until is None or new_until > state.day.paused_until:
+                    state.day.paused_until = new_until
+                    try:
+                        await db.async_save_kv("paused_until", state.day.paused_until.isoformat())
+                    except Exception as _e:
+                        log.error(f"db.save_kv paused_until {symbol}: {_e}")
         try:
             await db.async_save_trade(pos, price, pnl, result)
         except Exception as e:
@@ -1868,14 +1872,20 @@ class Scanner:
             # Set _tp_replacing unconditionally so health_check doesn't race to place TP3
             # even when tp_order_id was already empty (e.g. placement failed at entry).
             self._tp_replacing.add(pos.symbol)
+            tp_cancel_ok = True
             if pos.tp_order_id:
                 old_tp_id = pos.tp_order_id
                 pos.tp_order_id = ""
                 try:
                     await self.ex.cancel_order(pos.symbol, old_tp_id)
-                except Exception:
-                    pass  # already filled or cancelled
-            if pos.tp3 > 0 and pos.qty > 0:
+                except Exception as _tce:
+                    # Cancel failed — old TP may still be live. Placing a second TP would create
+                    # two concurrent orders; keep the old ID so health_check can resize it later.
+                    tp_cancel_ok = False
+                    pos.tp_order_id = old_tp_id
+                    log.warning(f"_partial_close {pos.symbol}: cancel TP ({old_tp_id}) failed — "
+                                f"keeping old TP, health_check will resize qty: {_tce}")
+            if tp_cancel_ok and pos.tp3 > 0 and pos.qty > 0:
                 r = await self.ex.place_take_profit(pos.symbol, side, pos.qty, pos.tp3)
                 if r.get("code") == 0:
                     pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))

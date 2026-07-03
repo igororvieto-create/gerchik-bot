@@ -187,7 +187,7 @@ async def main():
     scheduler.add_job(scanner.health_check,       "cron",     minute="*/15")
     scheduler.add_job(scanner.btc_weekly_alert,   "cron",     hour="*/6", minute="30")  # 4x/day
     scheduler.add_job(scanner.funding_scan,        "cron",     hour="0,8,16", minute="5")
-    scheduler.add_job(scanner.periodic_report,     "cron",     hour="*/3", minute="0")
+    scheduler.add_job(scanner.periodic_report,     "cron",     hour="0,3,6,12,15,18,21", minute="0")
     scheduler.add_job(scanner.daily_report,       "cron",     hour="9",  minute="0")
     scheduler.add_job(scanner.weekly_report,      "cron",     day_of_week="mon", hour="9", minute="5")
     scheduler.add_job(scanner.monthly_report,     "cron",     day="1",   hour="9", minute="10")

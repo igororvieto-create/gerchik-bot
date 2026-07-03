@@ -218,6 +218,10 @@ class Scanner:
                 await self._loss_cooldown(symbol)
             else:
                 self._symbol_loss_streak.pop(symbol, None)
+                try:
+                    await db.async_save_kv(f"sl_streak:{symbol}", "0")
+                except Exception as _e:
+                    log.warning(f"streak clear {symbol}: {_e}")
             try:
                 await db.async_save_kv("loss_streak", str(state.day.loss_streak))
                 await db.async_save_kv("loss_streak_date", datetime.utcnow().date().isoformat())
@@ -982,6 +986,15 @@ class Scanner:
                         )
                         return
                     sig.entry = cur_price
+                    sld = abs(cur_price - sig.sl)
+                    if sig.side == "LONG":
+                        sig.tp1 = _px(cur_price + sld * cfg.TP1_RR)
+                        sig.tp2 = _px(cur_price + sld * cfg.TP2_RR)
+                        sig.tp3 = _px(cur_price + sld * cfg.TP3_RR)
+                    else:
+                        sig.tp1 = _px(cur_price - sld * cfg.TP1_RR)
+                        sig.tp2 = _px(cur_price - sld * cfg.TP2_RR)
+                        sig.tp3 = _px(cur_price - sld * cfg.TP3_RR)
                 except Exception as e:
                     log.warning(f"{sig.symbol}: не удалось получить текущую цену перед входом — используется цена сигнала: {e}")
 
@@ -1865,9 +1878,9 @@ class Scanner:
                         pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
                     except Exception as e:
                         log.error(f"partial_close {pos.symbol}: SL re-place failed — health_check will retry: {e}")
-                self._sl_replacing.discard(pos.symbol)  # unblock health_check
             else:
-                self._sl_replacing.discard(pos.symbol)  # no old order — still unblock
+                pass  # no old order — nothing to cancel
+            self._sl_replacing.discard(pos.symbol)  # always unblock health_check
             # Re-place TP3 for remaining qty (old order had original full qty).
             # Set _tp_replacing unconditionally so health_check doesn't race to place TP3
             # even when tp_order_id was already empty (e.g. placement failed at entry).

@@ -3,8 +3,8 @@ Tests for telegram/handlers._account_manual_close.
 
 Key invariants:
   - DB write failure must NOT block in-memory state update
-  - 3rd consecutive loss sends notification exactly once (== 3, not >= 3)
-  - 4th loss sends no extra notification
+  - 3rd consecutive loss sends notification (>= 3 threshold, consistent with _record_close)
+  - 4th loss also sends notification (streak updated in message text)
 """
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
@@ -69,8 +69,8 @@ async def test_loss_streak_3_notifies_once(pos, mock_ex_loss):
     notify_mock.assert_awaited_once()
 
 
-async def test_loss_streak_4_no_extra_notification(pos, mock_ex_loss):
-    """The 4th (and higher) loss must NOT send another notification."""
+async def test_loss_streak_4_sends_notification(pos, mock_ex_loss):
+    """The 4th (and higher) loss also sends a notification — consistent with _record_close >= 3."""
     state.day.loss_streak = 3  # already at 3
 
     notify_mock = AsyncMock()
@@ -85,4 +85,4 @@ async def test_loss_streak_4_no_extra_notification(pos, mock_ex_loss):
         await _account_manual_close(mock_ex_loss, pos)
 
     assert state.day.loss_streak == 4
-    notify_mock.assert_not_awaited()
+    notify_mock.assert_awaited_once()

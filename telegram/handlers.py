@@ -636,6 +636,7 @@ async def cmd_setpairs(msg: Message):
     raw = args[1].strip()
     if raw.lower() == "auto":
         cfg.WHITELIST = []
+        await db.async_save_cfg_value("WHITELIST", "")
         from strategy.scanner import _global_scanner
         if _global_scanner:
             await _global_scanner.update_pairs()
@@ -654,6 +655,7 @@ async def cmd_setpairs(msg: Message):
         pairs = [p.strip().upper() for p in raw.split(",") if p.strip()]
         cfg.WHITELIST = pairs
         state.pairs   = pairs
+        await db.async_save_cfg_value("WHITELIST", ",".join(pairs))
         await msg.answer(
             f"✅ Установлено {len(pairs)} пар:\n{', '.join(pairs)}",
             reply_markup=main_keyboard(),

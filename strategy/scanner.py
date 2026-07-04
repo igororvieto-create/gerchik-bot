@@ -549,7 +549,7 @@ class Scanner:
         try:
             raw_d1, raw_h4, raw_h1, funding = await asyncio.gather(
                 self.ex.get_klines(symbol, cfg.TREND_TF,  limit=300),
-                self.ex.get_klines(symbol, cfg.H4_TF,     limit=150),
+                self.ex.get_klines(symbol, cfg.H4_TF,     limit=200),
                 self.ex.get_klines(symbol, cfg.SIGNAL_TF, limit=100),
                 self.ex.get_funding_rate(symbol),
                 return_exceptions=True,

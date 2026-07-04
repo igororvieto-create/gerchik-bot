@@ -408,7 +408,7 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         return None
 
     # ── S/R levels — LONG at support, SHORT at resistance ──
-    lv4 = find_levels(h4["high"], h4["low"], lookback=120)
+    lv4 = find_levels(h4["high"], h4["low"], lookback=160)
     lv1 = find_levels(h1["high"], h1["low"], lookback=80)
     if trend == "LONG":
         primary = lv4["support"] + lv1["support"]
@@ -597,14 +597,14 @@ def analyze(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # RSI divergence on H4: weakening momentum → penalty
     h4_rsi_v = rsi(h4["close"], 14)
     if detect_rsi_divergence(h4["close"], h4_rsi_v, trend):
-        score -= 12
+        score -= 8
     # D1 level proximity: entering near major daily obstacle → penalty
     d1_lv = d1_levels if d1_levels is not None \
             else find_levels(d1["high"], d1["low"], lookback=min(120, len(d1["high"])))
     d1_obstacles = d1_lv["resistance"] if trend == "LONG" else d1_lv["support"]
     is_near_d1, _ = near_level(price, d1_obstacles, tol=2.0)
     if is_near_d1:
-        score -= 10
+        score -= 6
     score = min(score, 100)
     if score < cfg.MIN_SCORE:
         _reject("score ниже MIN_SCORE")
@@ -722,7 +722,7 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     price = h1["close"][-1]
 
     # ── S/R levels ──
-    lv4 = find_levels(h4["high"], h4["low"], lookback=120)
+    lv4 = find_levels(h4["high"], h4["low"], lookback=160)
     lv1 = find_levels(h1["high"], h1["low"], lookback=80)
     if trend == "LONG":
         levels = lv4["support"] + lv1["support"]
@@ -914,14 +914,14 @@ def analyze_false_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # RSI divergence on H4: weakening momentum → penalty
     h4_rsi_fb = rsi(h4["close"], 14)
     if detect_rsi_divergence(h4["close"], h4_rsi_fb, trend):
-        score -= 12
+        score -= 8
     # D1 level proximity: entering near major daily obstacle → penalty
     d1_lv_fb = d1_levels if d1_levels is not None \
                else find_levels(d1["high"], d1["low"], lookback=min(120, len(d1["high"])))
     d1_obs_fb = d1_lv_fb["resistance"] if trend == "LONG" else d1_lv_fb["support"]
     is_near_d1_fb, _ = near_level(price, d1_obs_fb, tol=2.0)
     if is_near_d1_fb:
-        score -= 10
+        score -= 6
     score = min(score, 100)
 
     if score < cfg.MIN_SCORE:
@@ -1203,14 +1203,14 @@ def analyze_range_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     # RSI divergence on H4: weakening momentum into a breakout = warning signal
     h4_rsi_rb = rsi(h4["close"], 14)
     if detect_rsi_divergence(h4["close"], h4_rsi_rb, trend):
-        score -= 10
+        score -= 6
     # D1 level proximity: entering near major daily obstacle → penalty
     d1_lv_rb = d1_levels if d1_levels is not None \
                else find_levels(d1["high"], d1["low"], lookback=min(120, len(d1["high"])))
     d1_obs_rb = d1_lv_rb["resistance"] if trend == "LONG" else d1_lv_rb["support"]
     is_near_d1_rb, _ = near_level(price, d1_obs_rb, tol=2.0)
     if is_near_d1_rb:
-        score -= 10
+        score -= 6
     score = min(score, 100)
 
     if score < cfg.MIN_SCORE:
@@ -1330,7 +1330,7 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
         return None
 
     # ── Price must have broken through a key level ──
-    lv4 = find_levels(h4["high"], h4["low"], lookback=120)
+    lv4 = find_levels(h4["high"], h4["low"], lookback=160)
     lv1 = find_levels(h1["high"], h1["low"], lookback=80)
     if trend == "LONG":
         levels = lv4["resistance"] + lv1["resistance"]
@@ -1440,7 +1440,7 @@ def analyze_breakout(symbol, d1, h4, h1, funding, cfg, d1_levels=None):
     d1_obs_br = d1_lv_br["resistance"] if trend == "LONG" else d1_lv_br["support"]
     is_near_d1_br, _ = near_level(price, d1_obs_br, tol=2.0)
     if is_near_d1_br:
-        score -= 10
+        score -= 6
     score = min(score, 100)
 
     if score < cfg.MIN_SCORE:

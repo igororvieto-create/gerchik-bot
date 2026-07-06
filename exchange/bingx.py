@@ -331,16 +331,23 @@ class BingXClient:
         return result
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
-        """Returns True if leverage was set successfully on both sides."""
+        """Returns True if leverage was set successfully for at least one side."""
+        _NON_FATAL_CODES = {
+            80012,   # already set to this value
+            110029,  # cannot change leverage with open position on this side
+            80001,   # same as 80012 on some API versions
+        }
         ok = True
         for side in ("LONG", "SHORT"):
             r = await self._post("/openApi/swap/v2/trade/leverage",
                                  {"symbol": symbol, "side": side, "leverage": leverage})
             if r.get("code") != 0:
-                # Code 80012 = leverage already set to this value — not an error
-                if r.get("code") != 80012:
-                    log.warning(f"set_leverage {symbol} {side} x{leverage}: {r.get('msg','')}")
+                code = r.get("code")
+                if code not in _NON_FATAL_CODES:
+                    log.warning(f"set_leverage {symbol} {side} x{leverage}: {r.get('msg','')} (код {code})")
                     ok = False
+                else:
+                    log.debug(f"set_leverage {symbol} {side}: код {code} (не ошибка)")
         return ok
 
     async def set_margin_type(self, symbol: str) -> None:

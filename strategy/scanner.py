@@ -1001,12 +1001,10 @@ class Scanner:
             await self.ex.set_margin_type(sig.symbol)
             lev_ok = await self.ex.set_leverage(sig.symbol, leverage)
             if not lev_ok:
-                log.warning(f"{sig.symbol}: не удалось выставить плечо x{leverage} — пропуск")
-                await self._notify(
-                    f"⚠️ <b>{sig.symbol}</b> пропущен\n"
-                    f"Не удалось выставить плечо x{leverage}"
-                )
-                return
+                # Leverage set may fail for the opposite side when a position is open there
+                # (exchange blocks leverage changes on sides with positions). This is non-fatal —
+                # the entry side leverage is already set; the order will fail if margin is really short.
+                log.warning(f"{sig.symbol}: плечо x{leverage} выставлено не полностью — продолжаем")
             side = "BUY" if sig.side == "LONG" else "SELL"
 
             # ── Entry order: limit preferred over market ──

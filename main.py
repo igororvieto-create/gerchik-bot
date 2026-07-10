@@ -1,20 +1,18 @@
 import asyncio
 import logging
 import os
-import ssl
-import time
-from datetime import datetime
+from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
-import aiohttp
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
-from core import db
 from core.config import cfg
 from core.state import state
-from strategy.scanner import Scanner
-from exchange.bingx import BingXClient
-from telegram.handlers import register_handlers
+from core import db
+from exchange.bybit import BybitClient
+from strategy.scanner import run_scan_and_broadcast
+from api.routes import router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,405 +20,68 @@ logging.basicConfig(
 )
 log = logging.getLogger("main")
 
+_client: BybitClient | None = None
+_scheduler: AsyncIOScheduler | None = None
 
 
-def _validate_config() -> bool:
-    errors = []
-    if not cfg.TELEGRAM_TOKEN:
-        errors.append("TELEGRAM_TOKEN не задан")
-    if not cfg.TELEGRAM_CHAT_ID:
-        errors.append("TELEGRAM_CHAT_ID не задан")
-    if not cfg.BINGX_API_KEY:
-        errors.append("BINGX_API_KEY не задан")
-    if not cfg.BINGX_SECRET:
-        errors.append("BINGX_SECRET не задан")
-    if cfg.MIN_RR < 1.0:
-        errors.append(f"MIN_RR={cfg.MIN_RR} должен быть ≥ 1.0")
-    if cfg.MAX_DAILY_LOSS <= 0:
-        errors.append(f"MAX_DAILY_LOSS={cfg.MAX_DAILY_LOSS} должен быть > 0")
-    if not (0 < cfg.RISK_PER_TRADE <= 5):
-        errors.append(f"RISK_PER_TRADE={cfg.RISK_PER_TRADE} должен быть в диапазоне 0–5%")
-    for msg in errors:
-        log.error(f"[config] {msg}")
-    critical = (not cfg.TELEGRAM_TOKEN or not cfg.TELEGRAM_CHAT_ID
-                or not cfg.BINGX_API_KEY or not cfg.BINGX_SECRET)
-    return not critical
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _client, _scheduler
+
+    await db.init_db()
+    log.info("DB ready")
+
+    _client = BybitClient(cfg.BYBIT_API_KEY, cfg.BYBIT_SECRET)
+
+    _scheduler = AsyncIOScheduler(timezone="UTC")
+    _scheduler.add_job(
+        _scan_job,
+        "interval",
+        minutes=cfg.SCAN_INTERVAL_MIN,
+        id="scan",
+        max_instances=1,
+    )
+    _scheduler.add_job(
+        _cleanup_job,
+        "cron",
+        hour="*/6",
+        id="cleanup",
+    )
+    _scheduler.start()
+    log.info(f"Scheduler started — scan every {cfg.SCAN_INTERVAL_MIN} min")
+
+    # Run an initial scan shortly after startup
+    asyncio.create_task(_delayed_initial_scan())
+
+    yield
+
+    if _scheduler and _scheduler.running:
+        _scheduler.shutdown(wait=False)
+    if _client:
+        await _client.close()
+    log.info("Shutdown complete")
 
 
-async def main():
-    from aiogram import Bot, Dispatcher
-
-    log.info(f"TOKEN: {'OK' if cfg.TELEGRAM_TOKEN else 'ПУСТО!'}")
-    log.info(f"CHATID: {cfg.TELEGRAM_CHAT_ID!r}")
-    if not _validate_config():
-        log.error("Критические параметры не заданы — бот не запустится")
-        return
-
-    # Init SQLite and restore state
-    try:
-        db.init_db()
-    except Exception as e:
-        log.error(f"SQLite init failed — продолжаем без персистентности: {e}")
-
-    # Restore runtime-changed config values (setrisk, setlev, etc.)
-    _saved_cfg = db.load_cfg_values()
-    for _k, _v in _saved_cfg.items():
-        if hasattr(cfg, _k):
-            try:
-                _cur = getattr(cfg, _k)
-                if isinstance(_cur, bool):
-                    setattr(cfg, _k, _v.lower() == "true")
-                elif isinstance(_cur, int):
-                    setattr(cfg, _k, int(float(_v)))
-                elif isinstance(_cur, float):
-                    setattr(cfg, _k, float(_v))
-                elif isinstance(_cur, list):
-                    setattr(cfg, _k, [s.strip() for s in _v.split(",") if s.strip()])
-                else:
-                    setattr(cfg, _k, _v)
-                log.info(f"Восстановлена настройка {_k}={_v}")
-            except Exception as _e:
-                log.warning(f"Не удалось восстановить настройку {_k}: {_e}")
-
-    state.total_pnl = db.load_total_pnl()
-    log.info(f"Восстановлен total_pnl из БД: {state.total_pnl:.2f} USDT")
-    _peak_str = db.get_kv("peak_balance", "0")
-    try:
-        state.peak_balance = float(_peak_str)
-        if state.peak_balance > 0:
-            log.info(f"Восстановлен peak_balance: {state.peak_balance:.2f} USDT")
-    except Exception:
-        pass
-    # Restore today's stats so daily limits and /report are correct after restart
-    today = db.get_today_stats()
-    state.day.trades    = today["total"]
-    state.day.wins      = today["wins"]
-    state.day.losses    = today["losses"]
-    state.day.pnl_usdt  = today["pnl"]
-    try:
-        stored_streak_date = db.get_kv("loss_streak_date", "")
-        today_str = datetime.utcnow().date().isoformat()
-        if stored_streak_date == today_str:
-            state.day.loss_streak = int(db.get_kv("loss_streak", "0"))
-            if state.day.loss_streak:
-                log.info(f"Восстановлена серия убытков: {state.day.loss_streak}")
-        else:
-            log.info("loss_streak из другого дня — не восстанавливается")
-    except Exception:
-        pass
-    log.info(f"Восстановлена дневная статистика: {today['total']} сделок, PnL {today['pnl']:.2f} USDT")
-    state.paused = db.get_kv("paused", "0") == "1"
-    if state.paused:
-        log.info("Бот восстановлен на паузе (из БД)")
-    _paused_until_str = db.get_kv("paused_until", "")
-    if _paused_until_str:
-        try:
-            _pu = datetime.fromisoformat(_paused_until_str)
-            if _pu > datetime.utcnow():
-                state.day.paused_until = _pu
-                log.info(f"Восстановлена авто-пауза до {_pu.strftime('%H:%M UTC')}")
-        except Exception:
-            pass
-
-    # Configure proxy-aware SSL for Telegram (Claude Code on the web uses a proxy CA)
-    _ca = os.getenv("SSL_CERT_FILE") or os.getenv("REQUESTS_CA_BUNDLE")
-    if _ca and os.path.exists(_ca):
-        from aiogram.client.session.aiohttp import AiohttpSession
-        _ssl_ctx = ssl.create_default_context(cafile=_ca)
-        _tg_session = AiohttpSession()
-        _tg_session._connector_init = {"ssl": _ssl_ctx}
-        bot = Bot(token=cfg.TELEGRAM_TOKEN, session=_tg_session)
-    else:
-        bot = Bot(token=cfg.TELEGRAM_TOKEN)
-    dp  = Dispatcher()
-    register_handlers(dp)
-
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-    except Exception as e:
-        log.warning(f"delete_webhook: {e}")
-
-    # Catch uncaught asyncio exceptions — log them instead of crashing the event loop
-    def _async_exc_handler(loop, context):
-        exc  = context.get("exception")
-        msg  = context.get("message", "")
-        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-            return
-        log.error(f"Uncaught async exception: {msg} | {exc!r}")
-
-    _main_loop = asyncio.get_running_loop()
-    _main_loop.set_exception_handler(_async_exc_handler)
-
-    exchange = BingXClient(cfg.BINGX_API_KEY, cfg.BINGX_SECRET)
-    scanner  = Scanner(exchange, bot)
-
-    # APScheduler error listener — log crashed jobs to Telegram.
-    # Uses run_coroutine_threadsafe because APScheduler fires sync callbacks
-    # from the event-loop thread; get_event_loop() is deprecated in 3.10+.
-    def _on_job_error(event):
-        log.error(f"APScheduler job '{event.job_id}' crashed: {event.exception!r}")
-        try:
-            asyncio.run_coroutine_threadsafe(
-                bot.send_message(
-                    cfg.TELEGRAM_CHAT_ID,
-                    f"⚠️ <b>Ошибка планировщика</b>\n"
-                    f"Задача: <code>{event.job_id}</code>\n"
-                    f"Ошибка: <code>{type(event.exception).__name__}: {event.exception}</code>",
-                    parse_mode="HTML",
-                ),
-                _main_loop,
-            )
-        except Exception:
-            pass
-
-    def _on_job_missed(event):
-        log.warning(f"APScheduler job '{event.job_id}' missed (overload?)")
-
-    scheduler = AsyncIOScheduler(timezone="UTC")
-    scheduler.add_listener(_on_job_error,  EVENT_JOB_ERROR)
-    scheduler.add_listener(_on_job_missed, EVENT_JOB_MISSED)
-
-    # Scheduler jobs
-    scheduler.add_job(scanner.scan_all,          "cron",     minute=f"*/{cfg.SCAN_H1_INTERVAL_MIN}")
-    scheduler.add_job(scanner.update_pairs,       "cron",     minute="0")
-    scheduler.add_job(scanner.monitor_positions,  "interval", seconds=30)
-    scheduler.add_job(scanner.health_check,       "cron",     minute="*/15")
-    scheduler.add_job(scanner.btc_weekly_alert,   "cron",     hour="*/6", minute="30")  # 4x/day
-    scheduler.add_job(scanner.funding_scan,        "cron",     hour="0,8,16", minute="5")
-    scheduler.add_job(scanner.periodic_report,     "cron",     hour="0,3,6,12,15,18,21", minute="0")
-    scheduler.add_job(scanner.daily_report,       "cron",     hour="9",  minute="0")
-    scheduler.add_job(scanner.weekly_report,      "cron",     day_of_week="mon", hour="9", minute="5")
-    scheduler.add_job(scanner.monthly_report,     "cron",     day="1",   hour="9", minute="10")
-    try:
-        scheduler.start()
-    except Exception as e:
-        log.error(f"Scheduler start failed: {e} — продолжаем без планировщика")
-
-    async def startup_tasks():
-        await asyncio.sleep(2)
-
-        # --- Balance fetch (isolated: failure must not block position restore) ---
-        balance = 0.0
-        try:
-            balance = await exchange.get_balance()
-            state.current_balance = balance
-        except Exception as e:
-            log.error(f"startup: не удалось получить баланс — {e}")
-
-        # --- Position restore (always runs, even if balance fetch failed) ---
-        try:
-            live = await exchange.get_open_positions()
-            live_map = {
-                p.get("symbol"): p for p in live
-                if abs(float(p.get("positionAmt", 0))) > 0
-            }
-
-            from core.state import Position
-            saved = db.load_open_positions()
-            restored = 0
-            downtime_closed = []
-            for d in saved:
-                sym = d.get("symbol", "")
-                if not sym:
-                    continue
-                if sym not in live_map:
-                    log.warning(
-                        f"Позиция {sym} закрыта в downtime — PnL не записан (нет цены закрытия)"
-                    )
-                    downtime_closed.append(sym)
-                    db.delete_open_position(sym)
-                    continue
-                if sym not in state.positions:
-                    state.positions[sym] = Position(
-                        symbol=sym, side=d["side"],
-                        entry=float(d["entry"]), sl=float(d["sl"]),
-                        tp1=float(d["tp1"]), tp2=float(d["tp2"]), tp3=float(d["tp3"]),
-                        qty=float(d["qty"]), risk_usdt=float(d.get("risk_usdt", 0)),
-                        order_id=d.get("order_id", ""),
-                        sl_order_id=d.get("sl_order_id", ""),
-                        tp_order_id=d.get("tp_order_id", ""),
-                        be_moved=bool(d.get("be_moved", False)),
-                        tp1_hit=bool(d.get("tp1_hit", False)),
-                        tp2_hit=bool(d.get("tp2_hit", False)),
-                        trail_price=float(d.get("trail_price", 0.0)),
-                        partial_pnl_taken=float(d.get("partial_pnl_taken", 0.0)),
-                        opened_at=datetime.fromisoformat(
-                            d.get("opened_at") or datetime.utcnow().isoformat()
-                        ) if d.get("opened_at") else datetime.utcnow(),
-                        pattern=d.get("pattern", ""),
-                        tf=d.get("tf", "H1+H4"),
-                        rr=float(d.get("rr", 0.0)),
-                        score=int(d.get("score", 0)),
-                    )
-                    restored += 1
-            if restored:
-                log.info(f"Восстановлено {restored} позиций из БД с полными данными (SL/TP/BE)")
-
-            # --- Immediate SL/TP verification after restore ---
-            # Don't wait 15 min for health_check — verify right now so positions are protected.
-            # Fetch open orders per symbol and re-place any missing SL/TP immediately.
-            sl_fixed = []
-            for sym, pos in list(state.positions.items()):
-                try:
-                    # Fetch fresh order list for this symbol (one API call covers both SL and TP).
-                    open_orders = await exchange.get_open_orders(sym)
-                    order_ids = {str(o.get("orderId", "")) for o in open_orders}
-                    side_str = "BUY" if pos.side == "LONG" else "SELL"
-                    needs_db_save = False
-
-                    # Re-place SL if missing or order gone from exchange.
-                    # CRASH-SAFE: if sl_order_id is empty but a STOP order exists on exchange
-                    # (crash between place_stop_loss and DB persist), adopt it instead of
-                    # placing a duplicate that would double-close the position.
-                    sl_missing = not pos.sl_order_id or pos.sl_order_id not in order_ids
-                    if sl_missing and pos.sl > 0 and pos.qty > 0:
-                        existing_sl = next(
-                            (o for o in open_orders
-                             if o.get("type") in ("STOP_MARKET", "STOP")
-                             and str(o.get("positionSide", "")) == pos.side),
-                            None
-                        )
-                        if existing_sl:
-                            pos.sl_order_id = str(existing_sl.get("orderId", ""))
-                            needs_db_save = True
-                            log.info(f"startup: принят существующий SL {sym}: {pos.sl_order_id}")
-                        else:
-                            r = await exchange.place_stop_loss(sym, side_str, pos.qty, pos.sl)
-                            if r.get("code") == 0:
-                                pos.sl_order_id = str(r.get("data", {}).get("orderId", ""))
-                                sl_fixed.append(f"{sym} SL@{pos.sl:.4f}")
-                                log.info(f"startup: SL перевыставлен для {sym} @ {pos.sl:.4f}")
-                                needs_db_save = True
-                            else:
-                                log.error(f"startup: SL не выставился {sym}: {r}")
-
-                    # Re-place TP if missing or order gone from exchange (same crash-safe logic).
-                    tp_missing = not pos.tp_order_id or pos.tp_order_id not in order_ids
-                    if tp_missing and pos.tp3 > 0 and pos.qty > 0:
-                        existing_tp = next(
-                            (o for o in open_orders
-                             if o.get("type") in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT")
-                             and str(o.get("positionSide", "")) == pos.side),
-                            None
-                        )
-                        if existing_tp:
-                            pos.tp_order_id = str(existing_tp.get("orderId", ""))
-                            needs_db_save = True
-                            log.info(f"startup: принят существующий TP {sym}: {pos.tp_order_id}")
-                        else:
-                            r = await exchange.place_take_profit(sym, side_str, pos.qty, pos.tp3)
-                            if r.get("code") == 0:
-                                pos.tp_order_id = str(r.get("data", {}).get("orderId", ""))
-                                sl_fixed.append(f"{sym} TP@{pos.tp3:.4f}")
-                                log.info(f"startup: TP перевыставлен для {sym} @ {pos.tp3:.4f}")
-                                needs_db_save = True
-                            else:
-                                log.error(f"startup: TP не выставился {sym}: {r}")
-
-                    # Single async DB write after both checks (non-blocking)
-                    if needs_db_save:
-                        await db.async_save_open_position(pos)
-                except Exception as ve:
-                    log.error(f"startup SL/TP verify {sym}: {ve}")
-            if sl_fixed:
-                try:
-                    await bot.send_message(
-                        cfg.TELEGRAM_CHAT_ID,
-                        f"🔧 <b>Восстановлены ордера при старте</b>\n"
-                        + "\n".join(f"• <code>{s}</code>" for s in sl_fixed),
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    pass
-
-            if downtime_closed:
-                syms_str = ", ".join(downtime_closed)
-                try:
-                    await bot.send_message(
-                        cfg.TELEGRAM_CHAT_ID,
-                        f"⚠️ <b>Позиции закрыты в downtime</b>\n"
-                        f"Символы: <code>{syms_str}</code>\n"
-                        f"PnL не записан — проверь историю на бирже вручную",
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    pass
-
-            manual_syms = []
-            for sym in live_map:
-                if sym not in state.positions:
-                    manual_syms.append(sym)
-                    log.info(f"Ручная позиция {sym} — бот не вмешивается (нет в БД)")
-            if manual_syms:
-                try:
-                    await bot.send_message(
-                        cfg.TELEGRAM_CHAT_ID,
-                        f"ℹ️ <b>Ручные позиции найдены</b>\n"
-                        f"Символы: <code>{', '.join(manual_syms)}</code>\n"
-                        f"Бот их <b>не трогает</b> — SL/TP не ставит, не закрывает",
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    pass
-        except Exception as e:
-            log.error(f"startup: ошибка восстановления позиций — {e}")
-
-        # --- Startup notification ---
-        try:
-            await bot.send_message(
-                cfg.TELEGRAM_CHAT_ID,
-                f"✅ <b>Герчик Бот запущен</b>\n\n"
-                f"Режим: <code>{cfg.MODE}</code>\n"
-                f"Баланс: <code>{balance:.2f} USDT</code>\n"
-                f"Открытых позиций: <code>{len(state.positions)}</code>\n"
-                f"PnL всего: <code>{'+' if state.total_pnl >= 0 else ''}{state.total_pnl:.2f} USDT</code>",
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            log.error(f"startup notify: {e}")
-
-        try:
-            await scanner.update_pairs()
-        except Exception as e:
-            log.error(f"startup update_pairs: {e}")
-        try:
-            await scanner.scan_all()
-        except Exception as e:
-            log.error(f"startup scan_all: {e}")
-
-    _startup_task = asyncio.create_task(startup_tasks())  # noqa: F841 — keep reference
-
-    _poll_delay = 5
-    try:
-        while True:
-            try:
-                await dp.start_polling(bot)
-                break  # clean shutdown
-            except (KeyboardInterrupt, SystemExit):
-                log.info("Получен сигнал остановки — выход")
-                break
-            except BaseException as e:
-                log.error(f"Polling error: {type(e).__name__}: {e} — retry in {_poll_delay}s")
-                await asyncio.sleep(_poll_delay)
-                _poll_delay = min(_poll_delay * 2, 120)  # backoff до 2 минут
-    finally:
-        if scheduler.running:
-            scheduler.shutdown(wait=False)
+async def _scan_job():
+    if _client:
+        await run_scan_and_broadcast(_client, cfg.NTFY_URL)
 
 
-if __name__ == "__main__":
-    _restart_delay = 5
-    while True:
-        try:
-            asyncio.run(main())
-            break  # чистый выход (KeyboardInterrupt изнутри main())
-        except (KeyboardInterrupt, SystemExit):
-            log.info("Остановка по сигналу — выход")
-            break
-        except Exception as e:
-            log.error(
-                f"ФАТАЛЬНАЯ ОШИБКА — перезапуск через {_restart_delay}с: "
-                f"{type(e).__name__}: {e}"
-            )
-            time.sleep(_restart_delay)
-            _restart_delay = min(_restart_delay * 2, 300)  # backoff до 5 минут
+async def _cleanup_job():
+    removed = await db.cleanup_old_signals(keep_hours=48)
+    if removed:
+        log.info(f"Cleanup: removed {removed} old signals")
+
+
+async def _delayed_initial_scan():
+    await asyncio.sleep(3)
+    await _scan_job()
+
+
+app = FastAPI(title="Bybit OI Scanner", lifespan=lifespan)
+app.include_router(router)
+
+# Serve PWA static files
+_static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(_static_dir):
+    app.mount("/", StaticFiles(directory=_static_dir, html=True), name="static")

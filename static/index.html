@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="theme-color" content="#f0b90b"/>
+  <title>Bybit OI Scanner</title>
+  <link rel="manifest" href="/manifest.json"/>
+  <style>
+    :root {
+      --bg:      #0d1117;
+      --surface: #161b22;
+      --card:    #1c2129;
+      --border:  #30363d;
+      --text:    #e6edf3;
+      --muted:   #8b949e;
+      --accent:  #f0b90b;
+      --green:   #3fb950;
+      --red:     #f85149;
+      --blue:    #58a6ff;
+      --purple:  #bc8cff;
+      --orange:  #ffa657;
+      --green-bg: rgba(63,185,80,.12);
+      --red-bg:   rgba(248,81,73,.12);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, monospace;
+      font-size: 13px;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+    .logo { font-size: 18px; font-weight: 700; color: var(--accent); letter-spacing: -0.5px; }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--muted); flex-shrink: 0;
+      transition: background .3s;
+    }
+    .dot.ok   { background: var(--green); }
+    .dot.scan { background: var(--accent); animation: blink 1s infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+    #conn-label { color: var(--muted); font-size: 11px; }
+    .spacer { flex: 1; }
+    #scan-info { font-size: 11px; color: var(--muted); text-align: right; line-height: 1.4; }
+
+    /* ── Stats bar ── */
+    .stats-bar {
+      display: flex; gap: 8px; flex-wrap: wrap;
+      padding: 10px 14px 0;
+      max-width: 960px; margin: 0 auto;
+    }
+    .chip {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 11px;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .chip .v { font-weight: 700; }
+    .chip .l { color: var(--muted); }
+    .chip.long-chip  .v { color: var(--green); }
+    .chip.short-chip .v { color: var(--red);   }
+
+    /* ── Filters ── */
+    .filters {
+      display: flex; gap: 6px; flex-wrap: wrap;
+      padding: 8px 14px;
+      max-width: 960px; margin: 0 auto;
+    }
+    .fb {
+      padding: 4px 11px; border-radius: 20px;
+      border: 1px solid var(--border);
+      background: transparent; color: var(--muted);
+      font-size: 12px; cursor: pointer;
+      transition: all .15s;
+    }
+    .fb:hover { border-color: var(--accent); color: var(--text); }
+    .fb.on { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
+
+    /* ── Signal list ── */
+    #list {
+      display: flex; flex-direction: column; gap: 8px;
+      padding: 8px 14px 24px;
+      max-width: 960px; margin: 0 auto;
+    }
+
+    /* ── Signal card ── */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      animation: fadeIn .25s ease;
+    }
+    @keyframes fadeIn { from{opacity:0;transform:translateY(-6px)} to{opacity:1;transform:none} }
+    .card.fresh { border-color: var(--accent); }
+    .card.long-card  { border-left: 3px solid var(--green); }
+    .card.short-card { border-left: 3px solid var(--red);   }
+
+    .card-head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 14px 6px;
+      flex-wrap: wrap;
+    }
+    .sym {
+      font-size: 16px; font-weight: 700;
+      font-family: monospace;
+    }
+    .dir-badge {
+      font-size: 11px; font-weight: 700;
+      padding: 2px 8px; border-radius: 4px;
+    }
+    .dir-LONG  { background: var(--green-bg); color: var(--green); }
+    .dir-SHORT { background: var(--red-bg);   color: var(--red);   }
+    .type-badge {
+      font-size: 10px; font-weight: 600;
+      padding: 2px 7px; border-radius: 4px;
+      text-transform: uppercase; letter-spacing: .4px;
+    }
+    .t-ACCUMULATION   { background: rgba(63,185,80,.1);   color: var(--green);  }
+    .t-DISTRIBUTION   { background: rgba(248,81,73,.1);   color: var(--red);    }
+    .t-SQUEEZE        { background: rgba(188,140,255,.15); color: var(--purple); }
+    .t-VOLUME_SPIKE   { background: rgba(240,185,11,.12);  color: var(--accent); }
+    .t-FUNDING_EXTREME{ background: rgba(255,166,87,.15);  color: var(--orange); }
+    .t-MOMENTUM       { background: rgba(88,166,255,.12);  color: var(--blue);   }
+    .head-spacer { flex: 1; }
+    .score-pill {
+      font-size: 12px; font-weight: 700;
+      padding: 2px 9px; border-radius: 12px;
+      background: var(--surface);
+    }
+    .score-hi { color: var(--green); }
+    .score-md { color: var(--accent); }
+    .score-lo { color: var(--muted); }
+    .ts-label { font-size: 11px; color: var(--muted); }
+
+    /* ── Level bar ── */
+    .level-bar-wrap {
+      padding: 4px 14px 10px;
+    }
+    .level-bar-track {
+      position: relative; height: 28px;
+      background: var(--surface);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .level-segment {
+      position: absolute; top: 0; bottom: 0;
+    }
+    .seg-loss { background: rgba(248,81,73,.18); }
+    .seg-tp1  { background: rgba(240,185,11,.12); }
+    .seg-tp2  { background: rgba(63,185,80,.14); }
+    .seg-tp3  { background: rgba(63,185,80,.22); }
+    .level-line {
+      position: absolute; top: 0; bottom: 0;
+      width: 2px;
+    }
+    .lline-sl    { background: var(--red);   }
+    .lline-entry { background: var(--accent); width: 3px; }
+    .lline-tp1   { background: rgba(63,185,80,.6); }
+    .lline-tp2   { background: var(--green); }
+    .lline-tp3   { background: var(--green); }
+    .level-label {
+      position: absolute; top: 50%;
+      transform: translateY(-50%);
+      font-size: 10px; font-weight: 600;
+      padding: 0 3px; white-space: nowrap;
+      pointer-events: none;
+    }
+    .ll-sl    { color: var(--red);   }
+    .ll-e     { color: var(--accent); }
+    .ll-tp    { color: var(--green); }
+
+    /* ── Metrics grid ── */
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      border-top: 1px solid var(--border);
+    }
+    .metric {
+      background: var(--card);
+      padding: 8px 12px;
+      display: flex; flex-direction: column; gap: 2px;
+    }
+    .metric .mk { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+    .metric .mv { font-size: 13px; font-weight: 600; font-family: monospace; }
+    .mv.pos { color: var(--green); }
+    .mv.neg { color: var(--red);   }
+    .mv.neu { color: var(--muted); }
+
+    /* ── Levels row ── */
+    .levels-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border-top: 1px solid var(--border);
+    }
+    .lv-cell {
+      background: var(--card);
+      padding: 7px 10px;
+      text-align: center;
+    }
+    .lv-cell .lk { font-size: 10px; color: var(--muted); }
+    .lv-cell .lv { font-size: 12px; font-weight: 700; font-family: monospace; }
+    .lv-sl   .lv { color: var(--red);   }
+    .lv-en   .lv { color: var(--accent);}
+    .lv-tp2  .lv { color: var(--green); }
+    .lv-tp3  .lv { color: var(--green); }
+    .lv-rr   .lv { color: var(--blue);  }
+
+    /* ── Bybit link ── */
+    .card-foot {
+      padding: 6px 14px;
+      border-top: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .bybit-link {
+      font-size: 11px; color: var(--blue);
+      text-decoration: none; display: flex; align-items: center; gap: 4px;
+    }
+    .bybit-link:hover { text-decoration: underline; }
+    .foot-spacer { flex: 1; }
+    .rr-chip {
+      font-size: 11px; font-weight: 700;
+      padding: 2px 8px; border-radius: 10px;
+      background: rgba(88,166,255,.12); color: var(--blue);
+    }
+
+    /* ── Empty ── */
+    .empty {
+      text-align: center; padding: 60px 20px; color: var(--muted);
+    }
+    .empty .ico { font-size: 42px; margin-bottom: 10px; }
+
+    @media (max-width: 480px) {
+      .levels-row { grid-template-columns: repeat(2, 1fr); }
+      .metrics    { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">📈 OI Scanner</div>
+  <div class="dot" id="dot"></div>
+  <span id="conn-label">Подключение…</span>
+  <div class="spacer"></div>
+  <div id="scan-info"></div>
+</header>
+
+<div class="stats-bar">
+  <div class="chip">
+    <span class="v" id="s-total">—</span> <span class="l">сигналов 24h</span>
+  </div>
+  <div class="chip long-chip">
+    <span class="v" id="s-long">—</span> <span class="l">LONG</span>
+  </div>
+  <div class="chip short-chip">
+    <span class="v" id="s-short">—</span> <span class="l">SHORT</span>
+  </div>
+  <div class="chip">
+    <span class="v" id="s-scans">—</span> <span class="l">сканов</span>
+  </div>
+  <div class="chip">
+    <span class="l">последний: </span><span class="v" id="s-lastscan">—</span>
+  </div>
+</div>
+
+<div class="filters" id="filters">
+  <button class="fb on" data-f="ALL">Все</button>
+  <button class="fb" data-f="LONG">🟢 LONG</button>
+  <button class="fb" data-f="SHORT">🔴 SHORT</button>
+  <button class="fb" data-f="ACCUMULATION">Аккумуляция</button>
+  <button class="fb" data-f="DISTRIBUTION">Дистрибуция</button>
+  <button class="fb" data-f="SQUEEZE">Сквиз</button>
+  <button class="fb" data-f="VOLUME_SPIKE">Объём</button>
+  <button class="fb" data-f="FUNDING_EXTREME">Фандинг</button>
+  <button class="fb" data-f="MOMENTUM">Моментум</button>
+</div>
+
+<div id="list">
+  <div class="empty"><div class="ico">⏳</div><p>Ожидание первого скана…</p></div>
+</div>
+
+<script>
+const signals = [];
+let activeFilter = 'ALL';
+
+const dot  = document.getElementById('dot');
+const conn = document.getElementById('conn-label');
+const info = document.getElementById('scan-info');
+
+// ── Price formatting ──────────────────────────────────────────────────────────
+function fmtP(p) {
+  if (!p) return '—';
+  if (p >= 10000) return p.toLocaleString('en-US', {maximumFractionDigits: 0});
+  if (p >= 1000)  return p.toLocaleString('en-US', {maximumFractionDigits: 1});
+  if (p >= 10)    return p.toFixed(2);
+  if (p >= 1)     return p.toFixed(4);
+  if (p >= 0.01)  return p.toFixed(5);
+  return p.toFixed(6);
+}
+
+function fmtT(iso) {
+  return new Date(iso).toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+}
+
+function scoreCls(s) {
+  if (s >= 70) return 'score-hi';
+  if (s >= 50) return 'score-md';
+  return 'score-lo';
+}
+
+// ── Level bar ─────────────────────────────────────────────────────────────────
+function levelBar(sig) {
+  const { entry, sl, tp1, tp2, tp3, direction } = sig;
+  if (!entry || !sl || !tp2) return '';
+
+  const isLong = direction === 'LONG';
+  const lo = isLong ? sl : tp3;
+  const hi = isLong ? tp3 : sl;
+  const span = hi - lo;
+  if (span <= 0) return '';
+
+  function pct(v) { return ((v - lo) / span * 100).toFixed(2) + '%'; }
+  function w(a, b) { return (Math.abs(b - a) / span * 100).toFixed(2) + '%'; }
+
+  const slPct    = pct(sl);
+  const entryPct = pct(entry);
+  const tp1Pct   = pct(tp1 || entry);
+  const tp2Pct   = pct(tp2);
+  const tp3Pct   = pct(tp3);
+
+  return `
+  <div class="level-bar-wrap">
+    <div class="level-bar-track">
+      ${isLong ? `
+        <div class="level-segment seg-loss" style="left:${slPct};width:${w(sl,entry)}"></div>
+        <div class="level-segment seg-tp1"  style="left:${entryPct};width:${w(entry,tp1||entry)}"></div>
+        <div class="level-segment seg-tp2"  style="left:${tp1Pct};width:${w(tp1||entry,tp2)}"></div>
+        <div class="level-segment seg-tp3"  style="left:${tp2Pct};width:${w(tp2,tp3)}"></div>
+      ` : `
+        <div class="level-segment seg-tp3"  style="left:${tp3Pct};width:${w(tp3,tp2)}"></div>
+        <div class="level-segment seg-tp2"  style="left:${tp2Pct};width:${w(tp2,tp1||entry)}"></div>
+        <div class="level-segment seg-tp1"  style="left:${tp1Pct};width:${w(tp1||entry,entry)}"></div>
+        <div class="level-segment seg-loss" style="left:${entryPct};width:${w(entry,sl)}"></div>
+      `}
+      <div class="level-line lline-sl"    style="left:${slPct}">
+        <span class="level-label ll-sl" style="left:2px">SL</span>
+      </div>
+      <div class="level-line lline-entry" style="left:${entryPct}">
+        <span class="level-label ll-e" style="left:4px">Вход</span>
+      </div>
+      <div class="level-line lline-tp2" style="left:${tp2Pct}">
+        <span class="level-label ll-tp" style="left:2px">TP2</span>
+      </div>
+      <div class="level-line lline-tp3" style="left:${tp3Pct}">
+        <span class="level-label ll-tp" style="right:2px">TP3</span>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ── Card builder ──────────────────────────────────────────────────────────────
+function card(sig) {
+  const isLong  = sig.direction === 'LONG';
+  const cardCls = isLong ? 'card long-card' : 'card short-card';
+  const dirIcon = isLong ? '🟢' : '🔴';
+
+  const oi   = sig.oi_change   >= 0 ? `<span class="mv pos">+${sig.oi_change.toFixed(1)}%</span>`
+                                     : `<span class="mv neg">${sig.oi_change.toFixed(1)}%</span>`;
+  const fund = sig.funding     >= 0 ? `<span class="mv pos">+${sig.funding.toFixed(3)}%</span>`
+                                     : `<span class="mv neg">${sig.funding.toFixed(3)}%</span>`;
+  const obCls = sig.ob_bias === 'BUY' ? 'pos' : sig.ob_bias === 'SELL' ? 'neg' : 'neu';
+
+  const slPctTxt = sig.sl_pct ? `SL −${sig.sl_pct.toFixed(2)}%` : '';
+
+  const bybitUrl = `https://www.bybit.com/trade/usdt/${sig.symbol}`;
+
+  return `
+  <div class="${cardCls}">
+    <div class="card-head">
+      <span class="sym">${sig.symbol.replace('USDT','')}<span style="color:var(--muted);font-size:12px">/USDT</span></span>
+      <span class="dir-badge dir-${sig.direction}">${dirIcon} ${sig.direction}</span>
+      <span class="type-badge t-${sig.signal_type}">${sig.signal_type.replace('_',' ')}</span>
+      <div class="head-spacer"></div>
+      <span class="score-pill ${scoreCls(sig.score)}">${sig.score}/100</span>
+      <span class="ts-label">${fmtT(sig.ts)}</span>
+    </div>
+
+    ${levelBar(sig)}
+
+    <div class="levels-row">
+      <div class="lv-cell lv-sl">
+        <div class="lk">🔴 SL</div>
+        <div class="lv">${fmtP(sig.sl)}</div>
+      </div>
+      <div class="lv-cell lv-en">
+        <div class="lk">🟡 Вход</div>
+        <div class="lv">${fmtP(sig.entry || sig.price)}</div>
+      </div>
+      <div class="lv-cell lv-tp2">
+        <div class="lk">🟢 TP2</div>
+        <div class="lv">${fmtP(sig.tp2)}</div>
+      </div>
+      <div class="lv-cell lv-tp3">
+        <div class="lk">🚀 TP3</div>
+        <div class="lv">${fmtP(sig.tp3)}</div>
+      </div>
+    </div>
+
+    <div class="metrics">
+      <div class="metric">
+        <span class="mk">Цена</span>
+        <span class="mv">${fmtP(sig.price)}</span>
+      </div>
+      <div class="metric">
+        <span class="mk">OI 4h</span>
+        ${oi}
+      </div>
+      <div class="metric">
+        <span class="mk">Объём</span>
+        <span class="mv">${sig.vol_ratio.toFixed(1)}×</span>
+      </div>
+      <div class="metric">
+        <span class="mk">Фандинг</span>
+        ${fund}
+      </div>
+      <div class="metric">
+        <span class="mk">OB</span>
+        <span class="mv ${obCls}">${sig.ob_bias}</span>
+      </div>
+      <div class="metric">
+        <span class="mk">ATR</span>
+        <span class="mv">${sig.atr_pct.toFixed(2)}%</span>
+      </div>
+    </div>
+
+    <div class="card-foot">
+      <a class="bybit-link" href="${bybitUrl}" target="_blank" rel="noopener">
+        ↗ Открыть на Bybit
+      </a>
+      <div class="foot-spacer"></div>
+      ${slPctTxt ? `<span style="font-size:11px;color:var(--muted)">${slPctTxt}</span>` : ''}
+      <span class="rr-chip">R/R 1:${(sig.rr || 2).toFixed(1)} → 1:3</span>
+    </div>
+  </div>`;
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function render() {
+  const list = document.getElementById('list');
+  let filtered = signals;
+
+  if (activeFilter !== 'ALL') {
+    filtered = signals.filter(s =>
+      s.direction === activeFilter || s.signal_type === activeFilter
+    );
+  }
+
+  if (filtered.length === 0) {
+    list.innerHTML = '<div class="empty"><div class="ico">🔍</div><p>Нет сигналов по фильтру</p></div>';
+    return;
+  }
+
+  list.innerHTML = filtered.map((s, i) => {
+    const html = card(s);
+    return i === 0 ? html.replace('class="card', 'class="card fresh') : html;
+  }).join('');
+
+  setTimeout(() => {
+    document.querySelectorAll('.fresh').forEach(el => el.classList.remove('fresh'));
+  }, 700);
+}
+
+function addSignal(sig) {
+  const idx = signals.findIndex(s => s.symbol === sig.symbol && s.signal_type === sig.signal_type);
+  if (idx !== -1) signals.splice(idx, 1);
+  signals.unshift(sig);
+  if (signals.length > 300) signals.pop();
+  render();
+}
+
+function loadHistory(data) {
+  for (const r of data) signals.push(r);
+  signals.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+  render();
+}
+
+// ── Stats ────────────────────────────────────────────────────────────────────
+async function refreshStats() {
+  try {
+    const d = await fetch('/api/stats').then(r => r.json());
+    document.getElementById('s-total').textContent  = d.total_24h ?? '—';
+    document.getElementById('s-long').textContent   = d.by_direction?.LONG  ?? 0;
+    document.getElementById('s-short').textContent  = d.by_direction?.SHORT ?? 0;
+    document.getElementById('s-scans').textContent  = d.scan_count ?? '—';
+    if (d.last_scan_at) {
+      document.getElementById('s-lastscan').textContent =
+        new Date(d.last_scan_at).toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit'});
+    }
+  } catch {}
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+let pingTimer = null;
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws    = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    dot.className = 'dot ok';
+    conn.textContent = 'Подключено';
+    pingTimer = setInterval(() => ws.readyState === 1 && ws.send('ping'), 25000);
+    refreshStats();
+  };
+
+  ws.onmessage = e => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+
+    if (msg.type === 'history') {
+      loadHistory(msg.data || []);
+    } else if (msg.type === 'signal') {
+      dot.className = 'dot scan';
+      setTimeout(() => dot.className = 'dot ok', 2000);
+      addSignal(msg.data);
+      refreshStats();
+    } else if (msg.type === 'heartbeat') {
+      const t = msg.last_scan_at
+        ? new Date(msg.last_scan_at).toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit'})
+        : '—';
+      info.innerHTML = `Скан #${msg.scan_count} · ${t} · найдено: <b>${msg.signals_found}</b>`;
+    }
+  };
+
+  ws.onerror = () => {
+    dot.className = 'dot';
+    conn.textContent = 'Ошибка';
+  };
+
+  ws.onclose = () => {
+    dot.className = 'dot';
+    conn.textContent = 'Реконнект…';
+    if (pingTimer) clearInterval(pingTimer);
+    setTimeout(connect, 3000);
+  };
+}
+
+// ── Filters ───────────────────────────────────────────────────────────────────
+document.getElementById('filters').addEventListener('click', e => {
+  const btn = e.target.closest('.fb');
+  if (!btn) return;
+  document.querySelectorAll('.fb').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  activeFilter = btn.dataset.f;
+  render();
+});
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+
+connect();
+setInterval(refreshStats, 30000);
+</script>
+</body>
+</html>

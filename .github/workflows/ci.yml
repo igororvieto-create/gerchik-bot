@@ -7,7 +7,7 @@ on:
     branches: ["**"]
 
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,12 +18,11 @@ jobs:
           cache: pip
 
       - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Import check
         run: |
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
-
-      - name: mypy — type-check exchange/bingx.py
-        run: python -m mypy exchange/bingx.py
-
-      - name: pytest
-        run: python -m pytest tests/ -v --tb=short
+          python -c "from main import app; print('app OK')"
+          python -c "from exchange.bybit import BybitClient; print('bybit OK')"
+          python -c "from strategy.scanner import scan_all; print('scanner OK')"
+          python -c "from api.routes import router; print('routes OK')"

@@ -130,6 +130,33 @@ def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float)
     return "LONG" if price_change > 0 else "SHORT"
 
 
+def _calc_levels(price: float, atr: float, direction: str) -> dict:
+    """ATR-based entry/SL/TP levels. SL = 1.5×ATR, TP targets at 1:1, 1:2, 1:3 R/R."""
+    if price <= 0 or atr <= 0:
+        return {"entry": price, "sl": 0.0, "tp1": 0.0, "tp2": 0.0, "tp3": 0.0, "rr": 0.0, "sl_pct": 0.0}
+
+    sl_dist = atr * 1.5
+    risk = sl_dist  # risk distance = SL distance
+
+    if direction == "LONG":
+        entry = price
+        sl    = price - sl_dist
+        tp1   = price + risk * 1.0
+        tp2   = price + risk * 2.0
+        tp3   = price + risk * 3.0
+    else:  # SHORT
+        entry = price
+        sl    = price + sl_dist
+        tp1   = price - risk * 1.0
+        tp2   = price - risk * 2.0
+        tp3   = price - risk * 3.0
+
+    sl_pct = sl_dist / price * 100
+    rr = 2.0  # always 1:2 at TP2
+
+    return {"entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3, "rr": rr, "sl_pct": sl_pct}
+
+
 async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]:
     symbol = ticker.get("symbol", "")
     if symbol in cfg.BLACKLIST:
@@ -185,6 +212,7 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             return None
 
         direction = _direction(sig_type, price_chg, ob_bias, funding)
+        levels = _calc_levels(price, atr, direction)
 
         details = (
             f"{sig_type} | {direction} | score={score} | "
@@ -204,6 +232,13 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             ob_bias=ob_bias,
             atr_pct=atr_pct,
             details=details,
+            entry=levels["entry"],
+            sl=levels["sl"],
+            tp1=levels["tp1"],
+            tp2=levels["tp2"],
+            tp3=levels["tp3"],
+            rr=levels["rr"],
+            sl_pct=levels["sl_pct"],
         )
     except Exception as e:
         log.debug(f"{symbol}: analysis error — {e}")

@@ -28,9 +28,22 @@ async def init_db() -> None:
                 ob_bias     TEXT,
                 atr_pct     REAL,
                 details     TEXT,
+                entry       REAL,
+                sl          REAL,
+                tp1         REAL,
+                tp2         REAL,
+                tp3         REAL,
+                rr          REAL,
+                sl_pct      REAL,
                 ts          TEXT NOT NULL
             )
         """)
+        # Migrations for existing DBs (add new columns if missing)
+        for col in ["entry REAL", "sl REAL", "tp1 REAL", "tp2 REAL", "tp3 REAL", "rr REAL", "sl_pct REAL"]:
+            try:
+                await db.execute(f"ALTER TABLE signals ADD COLUMN {col}")
+            except Exception:
+                pass
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
         await db.commit()
@@ -43,12 +56,15 @@ async def save_signal(sig: Signal) -> None:
             await db.execute(
                 """INSERT INTO signals
                    (symbol, signal_type, direction, score, price,
-                    oi_change, vol_ratio, funding, ob_bias, atr_pct, details, ts)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    oi_change, vol_ratio, funding, ob_bias, atr_pct, details,
+                    entry, sl, tp1, tp2, tp3, rr, sl_pct, ts)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     sig.symbol, sig.signal_type, sig.direction, sig.score, sig.price,
                     sig.oi_change, sig.vol_ratio, sig.funding, sig.ob_bias, sig.atr_pct,
-                    sig.details, sig.ts.isoformat(),
+                    sig.details,
+                    sig.entry, sig.sl, sig.tp1, sig.tp2, sig.tp3, sig.rr, sig.sl_pct,
+                    sig.ts.isoformat(),
                 ),
             )
             await db.commit()

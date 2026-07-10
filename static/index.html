@@ -10,6 +10,7 @@
     :root {
       --bg:      #0d1117;
       --surface: #161b22;
+      --card:    #1c2129;
       --border:  #30363d;
       --text:    #e6edf3;
       --muted:   #8b949e;
@@ -19,326 +20,569 @@
       --blue:    #58a6ff;
       --purple:  #bc8cff;
       --orange:  #ffa657;
+      --green-bg: rgba(63,185,80,.12);
+      --red-bg:   rgba(248,81,73,.12);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", monospace;
-      font-size: 14px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, monospace;
+      font-size: 13px;
       min-height: 100vh;
     }
+
+    /* ── Header ── */
     header {
       background: var(--surface);
       border-bottom: 1px solid var(--border);
-      padding: 12px 16px;
+      padding: 10px 16px;
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
       position: sticky;
       top: 0;
-      z-index: 10;
+      z-index: 20;
     }
-    header h1 { font-size: 16px; font-weight: 600; color: var(--accent); }
-    .status-dot {
+    .logo { font-size: 18px; font-weight: 700; color: var(--accent); letter-spacing: -0.5px; }
+    .dot {
       width: 8px; height: 8px; border-radius: 50%;
-      background: var(--muted);
-      transition: background 0.3s;
+      background: var(--muted); flex-shrink: 0;
+      transition: background .3s;
     }
-    .status-dot.connected { background: var(--green); }
-    .status-dot.scanning  { background: var(--accent); animation: pulse 1s infinite; }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-    #status-text { color: var(--muted); font-size: 12px; }
+    .dot.ok   { background: var(--green); }
+    .dot.scan { background: var(--accent); animation: blink 1s infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+    #conn-label { color: var(--muted); font-size: 11px; }
     .spacer { flex: 1; }
-    .scan-meta { font-size: 11px; color: var(--muted); text-align: right; }
+    #scan-info { font-size: 11px; color: var(--muted); text-align: right; line-height: 1.4; }
 
-    main { padding: 12px; max-width: 900px; margin: 0 auto; }
-
-    /* Stats bar */
-    .stats-row {
-      display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;
+    /* ── Stats bar ── */
+    .stats-bar {
+      display: flex; gap: 8px; flex-wrap: wrap;
+      padding: 10px 14px 0;
+      max-width: 960px; margin: 0 auto;
     }
-    .stat-chip {
+    .chip {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 6px;
-      padding: 6px 12px;
+      padding: 5px 11px;
       font-size: 12px;
+      white-space: nowrap;
     }
-    .stat-chip .val { font-weight: 600; color: var(--text); }
-    .stat-chip .lbl { color: var(--muted); }
+    .chip .v { font-weight: 700; }
+    .chip .l { color: var(--muted); }
+    .chip.long-chip  .v { color: var(--green); }
+    .chip.short-chip .v { color: var(--red);   }
 
-    /* Filter bar */
-    .filter-bar {
-      display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;
+    /* ── Filters ── */
+    .filters {
+      display: flex; gap: 6px; flex-wrap: wrap;
+      padding: 8px 14px;
+      max-width: 960px; margin: 0 auto;
     }
-    .filter-btn {
-      padding: 4px 10px;
-      border-radius: 20px;
+    .fb {
+      padding: 4px 11px; border-radius: 20px;
       border: 1px solid var(--border);
-      background: transparent;
-      color: var(--muted);
-      font-size: 12px;
-      cursor: pointer;
-      transition: all 0.15s;
+      background: transparent; color: var(--muted);
+      font-size: 12px; cursor: pointer;
+      transition: all .15s;
     }
-    .filter-btn:hover { border-color: var(--accent); color: var(--text); }
-    .filter-btn.active { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
+    .fb:hover { border-color: var(--accent); color: var(--text); }
+    .fb.on { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
 
-    /* Signal cards */
-    #signals-list { display: flex; flex-direction: column; gap: 8px; }
-    .signal-card {
+    /* ── Signal list ── */
+    #list {
+      display: flex; flex-direction: column; gap: 8px;
+      padding: 8px 14px 24px;
+      max-width: 960px; margin: 0 auto;
+    }
+
+    /* ── Signal card ── */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      animation: fadeIn .25s ease;
+    }
+    @keyframes fadeIn { from{opacity:0;transform:translateY(-6px)} to{opacity:1;transform:none} }
+    .card.fresh { border-color: var(--accent); }
+    .card.long-card  { border-left: 3px solid var(--green); }
+    .card.short-card { border-left: 3px solid var(--red);   }
+
+    .card-head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 14px 6px;
+      flex-wrap: wrap;
+    }
+    .sym {
+      font-size: 16px; font-weight: 700;
+      font-family: monospace;
+    }
+    .dir-badge {
+      font-size: 11px; font-weight: 700;
+      padding: 2px 8px; border-radius: 4px;
+    }
+    .dir-LONG  { background: var(--green-bg); color: var(--green); }
+    .dir-SHORT { background: var(--red-bg);   color: var(--red);   }
+    .type-badge {
+      font-size: 10px; font-weight: 600;
+      padding: 2px 7px; border-radius: 4px;
+      text-transform: uppercase; letter-spacing: .4px;
+    }
+    .t-ACCUMULATION   { background: rgba(63,185,80,.1);   color: var(--green);  }
+    .t-DISTRIBUTION   { background: rgba(248,81,73,.1);   color: var(--red);    }
+    .t-SQUEEZE        { background: rgba(188,140,255,.15); color: var(--purple); }
+    .t-VOLUME_SPIKE   { background: rgba(240,185,11,.12);  color: var(--accent); }
+    .t-FUNDING_EXTREME{ background: rgba(255,166,87,.15);  color: var(--orange); }
+    .t-MOMENTUM       { background: rgba(88,166,255,.12);  color: var(--blue);   }
+    .head-spacer { flex: 1; }
+    .score-pill {
+      font-size: 12px; font-weight: 700;
+      padding: 2px 9px; border-radius: 12px;
       background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 12px 14px;
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 4px 12px;
-      animation: slideIn 0.3s ease;
     }
-    @keyframes slideIn { from { opacity:0; transform:translateY(-8px); } to { opacity:1; transform:translateY(0); } }
-    .signal-card.new-signal { border-color: var(--accent); }
-    .signal-top {
-      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-    }
-    .sym { font-weight: 700; font-size: 15px; }
-    .badge {
-      font-size: 11px; font-weight: 600; padding: 2px 7px;
-      border-radius: 4px; letter-spacing: 0.3px;
-    }
-    .badge-LONG       { background: rgba(63,185,80,.15);  color: var(--green);  }
-    .badge-SHORT      { background: rgba(248,81,73,.15);  color: var(--red);    }
-    .badge-NEUTRAL    { background: rgba(139,148,158,.15);color: var(--muted);  }
-    .badge-ACCUMULATION  { background: rgba(63,185,80,.10);  color: var(--green);  }
-    .badge-DISTRIBUTION  { background: rgba(248,81,73,.10);  color: var(--red);    }
-    .badge-SQUEEZE       { background: rgba(188,140,255,.15);color: var(--purple); }
-    .badge-VOLUME_SPIKE  { background: rgba(240,185,11,.15); color: var(--accent); }
-    .badge-FUNDING_EXTREME{background: rgba(255,166,87,.15); color: var(--orange); }
-    .badge-MOMENTUM      { background: rgba(88,166,255,.15); color: var(--blue);   }
-    .score-bar { font-size: 12px; color: var(--muted); }
-    .score-val { font-weight: 700; }
-    .score-val.high  { color: var(--green);  }
-    .score-val.med   { color: var(--accent); }
-    .score-val.low   { color: var(--muted);  }
-    .signal-meta {
-      font-size: 12px; color: var(--muted);
-      display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px;
-    }
-    .signal-meta span { display: flex; align-items: center; gap: 3px; }
-    .meta-pos { color: var(--green); }
-    .meta-neg { color: var(--red); }
-    .signal-ts { font-size: 11px; color: var(--muted); text-align: right; white-space: nowrap; }
-    .price-val { font-weight: 600; font-size: 13px; }
+    .score-hi { color: var(--green); }
+    .score-md { color: var(--accent); }
+    .score-lo { color: var(--muted); }
+    .ts-label { font-size: 11px; color: var(--muted); }
 
-    /* Empty state */
+    /* ── Level bar ── */
+    .level-bar-wrap {
+      padding: 4px 14px 10px;
+    }
+    .level-bar-track {
+      position: relative; height: 28px;
+      background: var(--surface);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .level-segment {
+      position: absolute; top: 0; bottom: 0;
+    }
+    .seg-loss { background: rgba(248,81,73,.18); }
+    .seg-tp1  { background: rgba(240,185,11,.12); }
+    .seg-tp2  { background: rgba(63,185,80,.14); }
+    .seg-tp3  { background: rgba(63,185,80,.22); }
+    .level-line {
+      position: absolute; top: 0; bottom: 0;
+      width: 2px;
+    }
+    .lline-sl    { background: var(--red);   }
+    .lline-entry { background: var(--accent); width: 3px; }
+    .lline-tp1   { background: rgba(63,185,80,.6); }
+    .lline-tp2   { background: var(--green); }
+    .lline-tp3   { background: var(--green); }
+    .level-label {
+      position: absolute; top: 50%;
+      transform: translateY(-50%);
+      font-size: 10px; font-weight: 600;
+      padding: 0 3px; white-space: nowrap;
+      pointer-events: none;
+    }
+    .ll-sl    { color: var(--red);   }
+    .ll-e     { color: var(--accent); }
+    .ll-tp    { color: var(--green); }
+
+    /* ── Metrics grid ── */
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      border-top: 1px solid var(--border);
+    }
+    .metric {
+      background: var(--card);
+      padding: 8px 12px;
+      display: flex; flex-direction: column; gap: 2px;
+    }
+    .metric .mk { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+    .metric .mv { font-size: 13px; font-weight: 600; font-family: monospace; }
+    .mv.pos { color: var(--green); }
+    .mv.neg { color: var(--red);   }
+    .mv.neu { color: var(--muted); }
+
+    /* ── Levels row ── */
+    .levels-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border-top: 1px solid var(--border);
+    }
+    .lv-cell {
+      background: var(--card);
+      padding: 7px 10px;
+      text-align: center;
+    }
+    .lv-cell .lk { font-size: 10px; color: var(--muted); }
+    .lv-cell .lv { font-size: 12px; font-weight: 700; font-family: monospace; }
+    .lv-sl   .lv { color: var(--red);   }
+    .lv-en   .lv { color: var(--accent);}
+    .lv-tp2  .lv { color: var(--green); }
+    .lv-tp3  .lv { color: var(--green); }
+    .lv-rr   .lv { color: var(--blue);  }
+
+    /* ── Bybit link ── */
+    .card-foot {
+      padding: 6px 14px;
+      border-top: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .bybit-link {
+      font-size: 11px; color: var(--blue);
+      text-decoration: none; display: flex; align-items: center; gap: 4px;
+    }
+    .bybit-link:hover { text-decoration: underline; }
+    .foot-spacer { flex: 1; }
+    .rr-chip {
+      font-size: 11px; font-weight: 700;
+      padding: 2px 8px; border-radius: 10px;
+      background: rgba(88,166,255,.12); color: var(--blue);
+    }
+
+    /* ── Empty ── */
     .empty {
       text-align: center; padding: 60px 20px; color: var(--muted);
     }
-    .empty .icon { font-size: 40px; margin-bottom: 8px; }
+    .empty .ico { font-size: 42px; margin-bottom: 10px; }
 
-    /* Scrollable on mobile */
     @media (max-width: 480px) {
-      .signal-meta { gap: 8px; }
+      .levels-row { grid-template-columns: repeat(2, 1fr); }
+      .metrics    { grid-template-columns: repeat(2, 1fr); }
     }
   </style>
 </head>
 <body>
 
 <header>
-  <div class="status-dot" id="status-dot"></div>
-  <h1>📈 Bybit OI Scanner</h1>
-  <span id="status-text">Подключение…</span>
+  <div class="logo">📈 OI Scanner</div>
+  <div class="dot" id="dot"></div>
+  <span id="conn-label">Подключение…</span>
   <div class="spacer"></div>
-  <div class="scan-meta" id="scan-meta"></div>
+  <div id="scan-info"></div>
 </header>
 
-<main>
-  <div class="stats-row" id="stats-row">
-    <div class="stat-chip"><span class="val" id="stat-total">—</span> <span class="lbl">сигналов 24h</span></div>
-    <div class="stat-chip"><span class="val" id="stat-long">—</span> <span class="lbl">LONG</span></div>
-    <div class="stat-chip"><span class="val" id="stat-short">—</span> <span class="lbl">SHORT</span></div>
-    <div class="stat-chip"><span class="val" id="stat-scans">—</span> <span class="lbl">сканов</span></div>
+<div class="stats-bar">
+  <div class="chip">
+    <span class="v" id="s-total">—</span> <span class="l">сигналов 24h</span>
   </div>
+  <div class="chip long-chip">
+    <span class="v" id="s-long">—</span> <span class="l">LONG</span>
+  </div>
+  <div class="chip short-chip">
+    <span class="v" id="s-short">—</span> <span class="l">SHORT</span>
+  </div>
+  <div class="chip">
+    <span class="v" id="s-scans">—</span> <span class="l">сканов</span>
+  </div>
+  <div class="chip">
+    <span class="l">последний: </span><span class="v" id="s-lastscan">—</span>
+  </div>
+</div>
 
-  <div class="filter-bar" id="filter-bar">
-    <button class="filter-btn active" data-filter="ALL">Все</button>
-    <button class="filter-btn" data-filter="LONG">🟢 LONG</button>
-    <button class="filter-btn" data-filter="SHORT">🔴 SHORT</button>
-    <button class="filter-btn" data-filter="ACCUMULATION">Аккумуляция</button>
-    <button class="filter-btn" data-filter="DISTRIBUTION">Дистрибуция</button>
-    <button class="filter-btn" data-filter="SQUEEZE">Сквиз</button>
-    <button class="filter-btn" data-filter="VOLUME_SPIKE">Объём</button>
-    <button class="filter-btn" data-filter="FUNDING_EXTREME">Фандинг</button>
-  </div>
+<div class="filters" id="filters">
+  <button class="fb on" data-f="ALL">Все</button>
+  <button class="fb" data-f="LONG">🟢 LONG</button>
+  <button class="fb" data-f="SHORT">🔴 SHORT</button>
+  <button class="fb" data-f="ACCUMULATION">Аккумуляция</button>
+  <button class="fb" data-f="DISTRIBUTION">Дистрибуция</button>
+  <button class="fb" data-f="SQUEEZE">Сквиз</button>
+  <button class="fb" data-f="VOLUME_SPIKE">Объём</button>
+  <button class="fb" data-f="FUNDING_EXTREME">Фандинг</button>
+  <button class="fb" data-f="MOMENTUM">Моментум</button>
+</div>
 
-  <div id="signals-list">
-    <div class="empty"><div class="icon">⏳</div><p>Ожидание первых сигналов…</p></div>
-  </div>
-</main>
+<div id="list">
+  <div class="empty"><div class="ico">⏳</div><p>Ожидание первого скана…</p></div>
+</div>
 
 <script>
-  const signals = [];
-  let activeFilter = 'ALL';
-  let wsConnected = false;
-  let pingInterval = null;
+const signals = [];
+let activeFilter = 'ALL';
 
-  const dot  = document.getElementById('status-dot');
-  const stxt = document.getElementById('status-text');
-  const meta = document.getElementById('scan-meta');
+const dot  = document.getElementById('dot');
+const conn = document.getElementById('conn-label');
+const info = document.getElementById('scan-info');
 
-  function scoreClass(s) {
-    if (s >= 70) return 'high';
-    if (s >= 50) return 'med';
-    return 'low';
+// ── Price formatting ──────────────────────────────────────────────────────────
+function fmtP(p) {
+  if (!p) return '—';
+  if (p >= 10000) return p.toLocaleString('en-US', {maximumFractionDigits: 0});
+  if (p >= 1000)  return p.toLocaleString('en-US', {maximumFractionDigits: 1});
+  if (p >= 10)    return p.toFixed(2);
+  if (p >= 1)     return p.toFixed(4);
+  if (p >= 0.01)  return p.toFixed(5);
+  return p.toFixed(6);
+}
+
+function fmtT(iso) {
+  return new Date(iso).toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+}
+
+function scoreCls(s) {
+  if (s >= 70) return 'score-hi';
+  if (s >= 50) return 'score-md';
+  return 'score-lo';
+}
+
+// ── Level bar ─────────────────────────────────────────────────────────────────
+function levelBar(sig) {
+  const { entry, sl, tp1, tp2, tp3, direction } = sig;
+  if (!entry || !sl || !tp2) return '';
+
+  const isLong = direction === 'LONG';
+  const lo = isLong ? sl : tp3;
+  const hi = isLong ? tp3 : sl;
+  const span = hi - lo;
+  if (span <= 0) return '';
+
+  function pct(v) { return ((v - lo) / span * 100).toFixed(2) + '%'; }
+  function w(a, b) { return (Math.abs(b - a) / span * 100).toFixed(2) + '%'; }
+
+  const slPct    = pct(sl);
+  const entryPct = pct(entry);
+  const tp1Pct   = pct(tp1 || entry);
+  const tp2Pct   = pct(tp2);
+  const tp3Pct   = pct(tp3);
+
+  return `
+  <div class="level-bar-wrap">
+    <div class="level-bar-track">
+      ${isLong ? `
+        <div class="level-segment seg-loss" style="left:${slPct};width:${w(sl,entry)}"></div>
+        <div class="level-segment seg-tp1"  style="left:${entryPct};width:${w(entry,tp1||entry)}"></div>
+        <div class="level-segment seg-tp2"  style="left:${tp1Pct};width:${w(tp1||entry,tp2)}"></div>
+        <div class="level-segment seg-tp3"  style="left:${tp2Pct};width:${w(tp2,tp3)}"></div>
+      ` : `
+        <div class="level-segment seg-tp3"  style="left:${tp3Pct};width:${w(tp3,tp2)}"></div>
+        <div class="level-segment seg-tp2"  style="left:${tp2Pct};width:${w(tp2,tp1||entry)}"></div>
+        <div class="level-segment seg-tp1"  style="left:${tp1Pct};width:${w(tp1||entry,entry)}"></div>
+        <div class="level-segment seg-loss" style="left:${entryPct};width:${w(entry,sl)}"></div>
+      `}
+      <div class="level-line lline-sl"    style="left:${slPct}">
+        <span class="level-label ll-sl" style="left:2px">SL</span>
+      </div>
+      <div class="level-line lline-entry" style="left:${entryPct}">
+        <span class="level-label ll-e" style="left:4px">Вход</span>
+      </div>
+      <div class="level-line lline-tp2" style="left:${tp2Pct}">
+        <span class="level-label ll-tp" style="left:2px">TP2</span>
+      </div>
+      <div class="level-line lline-tp3" style="left:${tp3Pct}">
+        <span class="level-label ll-tp" style="right:2px">TP3</span>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ── Card builder ──────────────────────────────────────────────────────────────
+function card(sig) {
+  const isLong  = sig.direction === 'LONG';
+  const cardCls = isLong ? 'card long-card' : 'card short-card';
+  const dirIcon = isLong ? '🟢' : '🔴';
+
+  const oi   = sig.oi_change   >= 0 ? `<span class="mv pos">+${sig.oi_change.toFixed(1)}%</span>`
+                                     : `<span class="mv neg">${sig.oi_change.toFixed(1)}%</span>`;
+  const fund = sig.funding     >= 0 ? `<span class="mv pos">+${sig.funding.toFixed(3)}%</span>`
+                                     : `<span class="mv neg">${sig.funding.toFixed(3)}%</span>`;
+  const obCls = sig.ob_bias === 'BUY' ? 'pos' : sig.ob_bias === 'SELL' ? 'neg' : 'neu';
+
+  const slPctTxt = sig.sl_pct ? `SL −${sig.sl_pct.toFixed(2)}%` : '';
+
+  const bybitUrl = `https://www.bybit.com/trade/usdt/${sig.symbol}`;
+
+  return `
+  <div class="${cardCls}">
+    <div class="card-head">
+      <span class="sym">${sig.symbol.replace('USDT','')}<span style="color:var(--muted);font-size:12px">/USDT</span></span>
+      <span class="dir-badge dir-${sig.direction}">${dirIcon} ${sig.direction}</span>
+      <span class="type-badge t-${sig.signal_type}">${sig.signal_type.replace('_',' ')}</span>
+      <div class="head-spacer"></div>
+      <span class="score-pill ${scoreCls(sig.score)}">${sig.score}/100</span>
+      <span class="ts-label">${fmtT(sig.ts)}</span>
+    </div>
+
+    ${levelBar(sig)}
+
+    <div class="levels-row">
+      <div class="lv-cell lv-sl">
+        <div class="lk">🔴 SL</div>
+        <div class="lv">${fmtP(sig.sl)}</div>
+      </div>
+      <div class="lv-cell lv-en">
+        <div class="lk">🟡 Вход</div>
+        <div class="lv">${fmtP(sig.entry || sig.price)}</div>
+      </div>
+      <div class="lv-cell lv-tp2">
+        <div class="lk">🟢 TP2</div>
+        <div class="lv">${fmtP(sig.tp2)}</div>
+      </div>
+      <div class="lv-cell lv-tp3">
+        <div class="lk">🚀 TP3</div>
+        <div class="lv">${fmtP(sig.tp3)}</div>
+      </div>
+    </div>
+
+    <div class="metrics">
+      <div class="metric">
+        <span class="mk">Цена</span>
+        <span class="mv">${fmtP(sig.price)}</span>
+      </div>
+      <div class="metric">
+        <span class="mk">OI 4h</span>
+        ${oi}
+      </div>
+      <div class="metric">
+        <span class="mk">Объём</span>
+        <span class="mv">${sig.vol_ratio.toFixed(1)}×</span>
+      </div>
+      <div class="metric">
+        <span class="mk">Фандинг</span>
+        ${fund}
+      </div>
+      <div class="metric">
+        <span class="mk">OB</span>
+        <span class="mv ${obCls}">${sig.ob_bias}</span>
+      </div>
+      <div class="metric">
+        <span class="mk">ATR</span>
+        <span class="mv">${sig.atr_pct.toFixed(2)}%</span>
+      </div>
+    </div>
+
+    <div class="card-foot">
+      <a class="bybit-link" href="${bybitUrl}" target="_blank" rel="noopener">
+        ↗ Открыть на Bybit
+      </a>
+      <div class="foot-spacer"></div>
+      ${slPctTxt ? `<span style="font-size:11px;color:var(--muted)">${slPctTxt}</span>` : ''}
+      <span class="rr-chip">R/R 1:${(sig.rr || 2).toFixed(1)} → 1:3</span>
+    </div>
+  </div>`;
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function render() {
+  const list = document.getElementById('list');
+  let filtered = signals;
+
+  if (activeFilter !== 'ALL') {
+    filtered = signals.filter(s =>
+      s.direction === activeFilter || s.signal_type === activeFilter
+    );
   }
 
-  function fmtTime(isoStr) {
-    const d = new Date(isoStr);
-    return d.toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  if (filtered.length === 0) {
+    list.innerHTML = '<div class="empty"><div class="ico">🔍</div><p>Нет сигналов по фильтру</p></div>';
+    return;
   }
 
-  function fmtPrice(p) {
-    if (p >= 1000) return p.toLocaleString('en-US', {maximumFractionDigits:2});
-    if (p >= 1)    return p.toFixed(4);
-    return p.toFixed(6);
-  }
+  list.innerHTML = filtered.map((s, i) => {
+    const html = card(s);
+    return i === 0 ? html.replace('class="card', 'class="card fresh') : html;
+  }).join('');
 
-  function renderCard(sig, isNew = false) {
-    const oi    = sig.oi_change >= 0 ? `<span class="meta-pos">+${sig.oi_change.toFixed(1)}%</span>` : `<span class="meta-neg">${sig.oi_change.toFixed(1)}%</span>`;
-    const fund  = sig.funding >= 0 ? `<span class="meta-pos">+${sig.funding.toFixed(3)}%</span>` : `<span class="meta-neg">${sig.funding.toFixed(3)}%</span>`;
-    const obCls = sig.ob_bias === 'BUY' ? 'meta-pos' : sig.ob_bias === 'SELL' ? 'meta-neg' : '';
+  setTimeout(() => {
+    document.querySelectorAll('.fresh').forEach(el => el.classList.remove('fresh'));
+  }, 700);
+}
 
-    return `
-      <div class="signal-card${isNew?' new-signal':''}" data-dir="${sig.direction}" data-type="${sig.signal_type}">
-        <div>
-          <div class="signal-top">
-            <span class="sym">${sig.symbol}</span>
-            <span class="badge badge-${sig.direction}">${sig.direction}</span>
-            <span class="badge badge-${sig.signal_type}">${sig.signal_type}</span>
-          </div>
-          <div class="signal-meta">
-            <span>💰 <span class="price-val">${fmtPrice(sig.price)}</span></span>
-            <span>📊 OI ${oi}</span>
-            <span>📦 vol ${sig.vol_ratio.toFixed(1)}×</span>
-            <span>💸 ${fund}</span>
-            <span>📖 OB <span class="${obCls}">${sig.ob_bias}</span></span>
-            <span>📉 ATR ${sig.atr_pct.toFixed(2)}%</span>
-          </div>
-        </div>
-        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
-          <div class="score-bar">Score <span class="score-val ${scoreClass(sig.score)}">${sig.score}</span></div>
-          <div class="signal-ts">${fmtTime(sig.ts)}</div>
-        </div>
-      </div>`;
-  }
+function addSignal(sig) {
+  const idx = signals.findIndex(s => s.symbol === sig.symbol && s.signal_type === sig.signal_type);
+  if (idx !== -1) signals.splice(idx, 1);
+  signals.unshift(sig);
+  if (signals.length > 300) signals.pop();
+  render();
+}
 
-  function applyFilter() {
-    const list = document.getElementById('signals-list');
-    const filtered = activeFilter === 'ALL' ? signals :
-      signals.filter(s =>
-        s.direction === activeFilter || s.signal_type === activeFilter
-      );
+function loadHistory(data) {
+  for (const r of data) signals.push(r);
+  signals.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+  render();
+}
 
-    if (filtered.length === 0) {
-      list.innerHTML = '<div class="empty"><div class="icon">🔍</div><p>Нет сигналов по фильтру</p></div>';
-      return;
+// ── Stats ────────────────────────────────────────────────────────────────────
+async function refreshStats() {
+  try {
+    const d = await fetch('/api/stats').then(r => r.json());
+    document.getElementById('s-total').textContent  = d.total_24h ?? '—';
+    document.getElementById('s-long').textContent   = d.by_direction?.LONG  ?? 0;
+    document.getElementById('s-short').textContent  = d.by_direction?.SHORT ?? 0;
+    document.getElementById('s-scans').textContent  = d.scan_count ?? '—';
+    if (d.last_scan_at) {
+      document.getElementById('s-lastscan').textContent =
+        new Date(d.last_scan_at).toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit'});
     }
-    list.innerHTML = filtered.map((s, i) => renderCard(s, i === 0 && signals.length > 0)).join('');
-    // Remove 'new' class after animation
-    setTimeout(() => {
-      const cards = list.querySelectorAll('.new-signal');
-      cards.forEach(c => c.classList.remove('new-signal'));
-    }, 600);
-  }
+  } catch {}
+}
 
-  function addSignal(sig) {
-    // Deduplicate: remove older entry for same symbol+type combo
-    const idx = signals.findIndex(s => s.symbol === sig.symbol && s.signal_type === sig.signal_type);
-    if (idx !== -1) signals.splice(idx, 1);
-    signals.unshift(sig);
-    if (signals.length > 200) signals.pop();
-    applyFilter();
-  }
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+let pingTimer = null;
 
-  function loadHistory(data) {
-    for (const row of data) {
-      signals.push(row);
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws    = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    dot.className = 'dot ok';
+    conn.textContent = 'Подключено';
+    pingTimer = setInterval(() => ws.readyState === 1 && ws.send('ping'), 25000);
+    refreshStats();
+  };
+
+  ws.onmessage = e => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+
+    if (msg.type === 'history') {
+      loadHistory(msg.data || []);
+    } else if (msg.type === 'signal') {
+      dot.className = 'dot scan';
+      setTimeout(() => dot.className = 'dot ok', 2000);
+      addSignal(msg.data);
+      refreshStats();
+    } else if (msg.type === 'heartbeat') {
+      const t = msg.last_scan_at
+        ? new Date(msg.last_scan_at).toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit'})
+        : '—';
+      info.innerHTML = `Скан #${msg.scan_count} · ${t} · найдено: <b>${msg.signals_found}</b>`;
     }
-    signals.sort((a, b) => new Date(b.ts) - new Date(a.ts));
-    applyFilter();
-  }
+  };
 
-  async function loadStats() {
-    try {
-      const r = await fetch('/api/stats');
-      const d = await r.json();
-      document.getElementById('stat-total').textContent  = d.total_24h ?? '—';
-      document.getElementById('stat-long').textContent   = d.by_direction?.LONG  ?? 0;
-      document.getElementById('stat-short').textContent  = d.by_direction?.SHORT ?? 0;
-      document.getElementById('stat-scans').textContent  = d.scan_count ?? '—';
-    } catch(e) {}
-  }
+  ws.onerror = () => {
+    dot.className = 'dot';
+    conn.textContent = 'Ошибка';
+  };
 
-  function connect() {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onclose = () => {
+    dot.className = 'dot';
+    conn.textContent = 'Реконнект…';
+    if (pingTimer) clearInterval(pingTimer);
+    setTimeout(connect, 3000);
+  };
+}
 
-    ws.onopen = () => {
-      wsConnected = true;
-      dot.className  = 'status-dot connected';
-      stxt.textContent = 'Подключено';
-      pingInterval = setInterval(() => ws.readyState === 1 && ws.send('ping'), 25000);
-      loadStats();
-    };
+// ── Filters ───────────────────────────────────────────────────────────────────
+document.getElementById('filters').addEventListener('click', e => {
+  const btn = e.target.closest('.fb');
+  if (!btn) return;
+  document.querySelectorAll('.fb').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  activeFilter = btn.dataset.f;
+  render();
+});
 
-    ws.onmessage = e => {
-      try {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'history') {
-          loadHistory(msg.data || []);
-        } else if (msg.type === 'signal') {
-          addSignal(msg.data);
-          loadStats();
-        } else if (msg.type === 'heartbeat') {
-          const t = msg.last_scan_at ? new Date(msg.last_scan_at).toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit'}) : '—';
-          meta.textContent = `Скан #${msg.scan_count} | ${t} | найдено: ${msg.signals_found}`;
-          dot.className = 'status-dot connected';
-        }
-      } catch(e) {}
-    };
+// ── Boot ──────────────────────────────────────────────────────────────────────
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
 
-    ws.onerror = () => {
-      dot.className = 'status-dot';
-      stxt.textContent = 'Ошибка';
-    };
-
-    ws.onclose = () => {
-      wsConnected = false;
-      dot.className = 'status-dot';
-      stxt.textContent = 'Отключено — переподключение…';
-      if (pingInterval) clearInterval(pingInterval);
-      setTimeout(connect, 3000);
-    };
-  }
-
-  // Filter buttons
-  document.getElementById('filter-bar').addEventListener('click', e => {
-    const btn = e.target.closest('.filter-btn');
-    if (!btn) return;
-    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    activeFilter = btn.dataset.filter;
-    applyFilter();
-  });
-
-  // Service worker registration
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
-  }
-
-  connect();
-  setInterval(loadStats, 30000);
+connect();
+setInterval(refreshStats, 30000);
 </script>
 </body>
 </html>

@@ -282,7 +282,7 @@
   <div class="chip">
     <span class="l">последний: </span><span class="v" id="s-lastscan">—</span>
   </div>
-  <div class="chip" id="balance-chip" style="display:none">
+  <div class="chip" id="balance-chip">
     <span class="l">баланс: </span><span class="v" id="s-balance">—</span><span class="l"> USDT</span>
   </div>
   <div class="chip" id="pos-chip" style="display:none">
@@ -569,13 +569,7 @@ async function refreshPositions() {
     ]);
 
     const bal = typeof bd.balance === 'number' ? bd.balance : 0;
-    const balChip = document.getElementById('balance-chip');
-    if (bal > 0) {
-      document.getElementById('s-balance').textContent = bal.toFixed(2);
-      balChip.style.display = '';
-    } else {
-      balChip.style.display = 'none';
-    }
+    document.getElementById('s-balance').textContent = bal > 0 ? bal.toFixed(2) : '—';
 
     const positions = pd.positions || [];
     document.getElementById('s-positions').textContent = positions.length;

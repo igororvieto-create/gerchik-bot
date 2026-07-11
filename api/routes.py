@@ -165,7 +165,22 @@ async def diagnostic():
         if klines:
             result["kline_latest"] = klines[-1]
 
-        # Step 3: full _analyze_symbol
+        # Step 3: balance (authenticated)
+        from core.config import cfg
+        if cfg.BYBIT_API_KEY:
+            try:
+                bal = await state.client.get_balance()
+                result["balance_usdt"] = bal
+                result["balance_ok"] = bal > 0
+                if bal == 0:
+                    result["balance_warn"] = "Balance is 0 — check API key permissions or fund your account"
+            except Exception as be:
+                result["balance_error"] = str(be)
+        else:
+            result["balance_usdt"] = None
+            result["balance_warn"] = "BYBIT_API_KEY not set"
+
+        # Step 4: full _analyze_symbol
         from strategy.scanner import _analyze_symbol
         ticker = usdt[0]
         sig = await _analyze_symbol(state.client, ticker)

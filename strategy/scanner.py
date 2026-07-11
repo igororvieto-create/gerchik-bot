@@ -211,7 +211,8 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         ob_ratio, ob_bias = _ob_imbalance(ob)
 
         score, sig_type = _score_signal(oi_change, vol_ratio, funding, ob_ratio, price_chg)
-        if score < cfg.MIN_SCORE:
+        # MIN_SCORE=10 hard floor — actual display/trade thresholds in run_scan_and_broadcast
+        if score < 10:
             return None
 
         direction = _direction(sig_type, price_chg, ob_bias, funding)
@@ -321,7 +322,9 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> Non
     signals = await scan_all(client)
 
     for sig in signals:
+        # Save all signals to DB regardless of MIN_SCORE env var
         await db.save_signal(sig)
+        # Trade only if score meets TRADE_MIN_SCORE (not affected by MIN_SCORE)
         await enter_trade(client, sig)
 
         # Broadcast to all connected WebSocket clients

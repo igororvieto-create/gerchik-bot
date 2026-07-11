@@ -173,8 +173,8 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         if price <= 0:
             return None
 
-        # Cheap pre-filter: skip boring tickers
-        if abs(price_chg) < cfg.PRICE_CHANGE_MIN and abs(funding) < 0.01:
+        # Cheap pre-filter: skip truly dead tickers (threshold 0.001% funding, not 0.01%)
+        if abs(price_chg) < cfg.PRICE_CHANGE_MIN and abs(funding) < 0.001:
             return None
 
         # Fetch OI history, klines, and orderbook concurrently
@@ -245,7 +245,7 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             sl_pct=levels["sl_pct"],
         )
     except Exception as e:
-        log.debug(f"{symbol}: analysis error — {e}")
+        log.warning(f"{symbol}: analysis error — {e}")
         return None
 
 
@@ -277,6 +277,7 @@ async def scan_all(client: BybitClient) -> List[Signal]:
 
         # Process in batches to respect rate limits
         batch_size = cfg.SCAN_BATCH_SIZE
+        errors = 0
         for i in range(0, len(tickers), batch_size):
             batch = tickers[i : i + batch_size]
             results = await asyncio.gather(
@@ -286,8 +287,13 @@ async def scan_all(client: BybitClient) -> List[Signal]:
             for r in results:
                 if isinstance(r, Signal):
                     signals.append(r)
+                elif isinstance(r, Exception):
+                    errors += 1
             if i + batch_size < len(tickers):
                 await asyncio.sleep(cfg.SCAN_BATCH_DELAY)
+
+        if errors:
+            log.warning(f"scan_all: {errors} symbols failed with exceptions")
 
         signals.sort(key=lambda s: s.score, reverse=True)
         state.last_scan_at = datetime.utcnow()

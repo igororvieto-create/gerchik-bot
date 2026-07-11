@@ -21,7 +21,9 @@ class BybitClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(headers={
+                "User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)",
+            })
         return self._session
 
     async def close(self) -> None:
@@ -52,7 +54,16 @@ class BybitClient:
                 headers = self._sign(query) if auth else {}
                 async with session.get(url, headers=headers,
                                        timeout=aiohttp.ClientTimeout(total=10)) as r:
-                    data = await r.json()
+                    status = r.status
+                    text = await r.text()
+                    try:
+                        data = json.loads(text)
+                    except Exception:
+                        log.error(f"GET {path} non-JSON response HTTP {status}: {text[:300]}")
+                        if attempt == 2:
+                            return {}
+                        await __import__("asyncio").sleep(1)
+                        continue
                     if data.get("retCode", 0) != 0:
                         log.warning(f"GET {path} -> {data.get('retCode')}: {data.get('retMsg')}")
                     return data
@@ -73,7 +84,16 @@ class BybitClient:
                 headers = self._sign(raw)
                 async with session.post(url, headers=headers, data=raw,
                                         timeout=aiohttp.ClientTimeout(total=10)) as r:
-                    data = await r.json()
+                    status = r.status
+                    text = await r.text()
+                    try:
+                        data = json.loads(text)
+                    except Exception:
+                        log.error(f"POST {path} non-JSON response HTTP {status}: {text[:300]}")
+                        if attempt == 2:
+                            return {}
+                        await __import__("asyncio").sleep(1)
+                        continue
                     if data.get("retCode", 0) != 0:
                         log.warning(f"POST {path} -> {data.get('retCode')}: {data.get('retMsg')}")
                     return data
@@ -88,7 +108,10 @@ class BybitClient:
 
     async def get_tickers(self) -> List[Dict]:
         data = await self._get("/v5/market/tickers", {"category": "linear"})
-        return data.get("result", {}).get("list", [])
+        result = data.get("result", {}).get("list", [])
+        if not result:
+            log.warning(f"get_tickers returned empty list; retCode={data.get('retCode')} retMsg={data.get('retMsg')}")
+        return result
 
     async def get_klines(self, symbol: str, interval: str = "240", limit: int = 25) -> List[Dict]:
         data = await self._get("/v5/market/kline", {

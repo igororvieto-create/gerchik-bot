@@ -303,6 +303,12 @@ async def scan_all(client: BybitClient) -> List[Signal]:
 
 async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> None:
     """Called by APScheduler: scan, save to DB, broadcast via WS, push via ntfy."""
+    # Refresh balance on every scan if API keys are configured
+    if client.api_key and client.secret:
+        bal = await client.get_balance()
+        if bal > 0:
+            state.balance = bal
+
     signals = await scan_all(client)
 
     for sig in signals:

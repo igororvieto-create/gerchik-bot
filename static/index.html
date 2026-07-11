@@ -558,7 +558,7 @@ async function refreshStats() {
       document.getElementById('s-lastscan').textContent =
         new Date(d.last_scan_at).toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit'});
     }
-  } catch {}
+  } catch(e) { console.error('refreshStats:', e); }
 }
 
 async function refreshPositions() {
@@ -568,10 +568,13 @@ async function refreshPositions() {
       fetch('/api/balance').then(r => r.json()),
     ]);
 
-    const bal = bd.balance;
+    const bal = typeof bd.balance === 'number' ? bd.balance : 0;
+    const balChip = document.getElementById('balance-chip');
     if (bal > 0) {
       document.getElementById('s-balance').textContent = bal.toFixed(2);
-      document.getElementById('balance-chip').style.display = '';
+      balChip.style.display = '';
+    } else {
+      balChip.style.display = 'none';
     }
 
     const positions = pd.positions || [];
@@ -586,7 +589,7 @@ async function refreshPositions() {
     } else {
       panel.style.display = 'none';
     }
-  } catch {}
+  } catch(e) { console.error('refreshPositions:', e); }
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────

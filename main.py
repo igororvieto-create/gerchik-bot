@@ -11,6 +11,7 @@ from core.state import state
 from core import db
 from exchange.bybit import BybitClient
 from strategy.scanner import run_scan_and_broadcast
+from strategy.trader import monitor_positions
 from api.routes import router
 
 logging.basicConfig(
@@ -31,6 +32,8 @@ async def lifespan(app: FastAPI):
     log.info("DB ready")
 
     _client = BybitClient(cfg.BYBIT_API_KEY, cfg.BYBIT_SECRET)
+    log.info(f"AUTO_TRADE={'ON' if cfg.AUTO_TRADE else 'OFF'} "
+             f"api_key={'set' if cfg.BYBIT_API_KEY else 'not set'}")
 
     _scheduler = AsyncIOScheduler(timezone="UTC")
     _scheduler.add_job(
@@ -41,15 +44,21 @@ async def lifespan(app: FastAPI):
         max_instances=1,
     )
     _scheduler.add_job(
+        _monitor_job,
+        "interval",
+        seconds=30,
+        id="monitor",
+        max_instances=1,
+    )
+    _scheduler.add_job(
         _cleanup_job,
         "cron",
         hour="*/6",
         id="cleanup",
     )
     _scheduler.start()
-    log.info(f"Scheduler started — scan every {cfg.SCAN_INTERVAL_MIN} min")
+    log.info(f"Scheduler started — scan every {cfg.SCAN_INTERVAL_MIN} min, monitor every 30s")
 
-    # Run an initial scan shortly after startup
     asyncio.create_task(_delayed_initial_scan())
 
     yield
@@ -64,6 +73,11 @@ async def lifespan(app: FastAPI):
 async def _scan_job():
     if _client:
         await run_scan_and_broadcast(_client, cfg.NTFY_URL)
+
+
+async def _monitor_job():
+    if _client:
+        await monitor_positions(_client)
 
 
 async def _cleanup_job():
@@ -83,8 +97,6 @@ app.include_router(router)
 
 if __name__ == "__main__":
     import uvicorn
-    # Railway sets $PORT for web services; fall back to 8080 to match
-    # the port configured in Railway's domain settings
     port = int(os.environ.get("PORT", 8080))
     log.info(f"Starting uvicorn on port {port}")
     uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")

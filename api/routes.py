@@ -49,6 +49,23 @@ async def sw():
     return PlainTextResponse(_read_static("sw.js"), media_type="application/javascript")
 
 
+@router.get("/api/positions")
+async def get_positions():
+    positions = [p.to_dict() for p in state.positions.values()]
+    return JSONResponse({"positions": positions, "count": len(positions)})
+
+
+@router.get("/api/balance")
+async def get_balance():
+    return JSONResponse({"balance": round(state.balance, 2), "currency": "USDT"})
+
+
+@router.get("/api/trades")
+async def get_trades(limit: int = 50):
+    rows = await db.get_trades(limit=limit)
+    return JSONResponse({"trades": rows, "count": len(rows)})
+
+
 @router.get("/api/signals")
 async def get_signals(hours: int = 24, limit: int = 100):
     rows = await db.get_recent_signals(hours=hours, limit=limit)

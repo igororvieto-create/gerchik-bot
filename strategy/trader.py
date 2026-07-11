@@ -1,0 +1,125 @@
+import logging
+import math
+
+from core.config import cfg
+from core.state import Signal, Position, state
+from core import db
+from exchange.bybit import BybitClient
+
+log = logging.getLogger("trader")
+
+
+def _round_step(value: float, step: float) -> float:
+    if step <= 0:
+        return round(value, 8)
+    decimals = max(0, -int(math.floor(math.log10(step)))) if step < 1 else 0
+    return round(round(value / step) * step, decimals)
+
+
+async def enter_trade(client: BybitClient, sig: Signal) -> bool:
+    """Try to open a position based on a signal. Returns True if order placed."""
+    if not cfg.AUTO_TRADE:
+        return False
+    if not client.api_key or not client.secret:
+        log.warning("AUTO_TRADE=true but BYBIT_API_KEY/BYBIT_SECRET not set")
+        return False
+    if sig.score < cfg.TRADE_MIN_SCORE:
+        return False
+    if sig.direction == "NEUTRAL":
+        return False
+    if sig.sl_pct <= 0 or sig.entry <= 0 or sig.sl <= 0:
+        return False
+    if sig.symbol in state.positions:
+        log.debug(f"{sig.symbol}: already in position, skip")
+        return False
+    if len(state.positions) >= cfg.MAX_POSITIONS:
+        log.info(f"Max positions ({cfg.MAX_POSITIONS}) reached, skip {sig.symbol}")
+        return False
+
+    try:
+        balance = await client.get_balance()
+        if balance < 10:
+            log.warning(f"Insufficient balance: {balance:.2f} USDT")
+            return False
+
+        state.balance = balance
+
+        # Position size: risk RISK_PER_TRADE% of balance
+        risk_usdt     = balance * cfg.RISK_PER_TRADE / 100
+        position_usdt = risk_usdt / (sig.sl_pct / 100)  # notional value
+
+        # Qty precision from instrument info
+        info = await client.get_instrument_info(sig.symbol)
+        lot  = info.get("lotSizeFilter", {})
+        qty_step = float(lot.get("qtyStep",      "0.001"))
+        min_qty  = float(lot.get("minOrderQty",  "0.001"))
+
+        qty = _round_step(position_usdt / sig.entry, qty_step)
+        qty = max(qty, min_qty)
+
+        if qty * sig.entry < 5.0:
+            log.debug(f"{sig.symbol}: notional {qty*sig.entry:.2f} < 5 USDT min")
+            return False
+
+        await client.set_leverage(sig.symbol, cfg.LEVERAGE)
+
+        side   = "Buy" if sig.direction == "LONG" else "Sell"
+        result = await client.place_order(
+            symbol=sig.symbol, side=side, qty=qty, sl=sig.sl, tp=sig.tp3,
+        )
+
+        if result.get("retCode", -1) != 0:
+            log.error(f"{sig.symbol}: order failed — {result.get('retMsg')}")
+            return False
+
+        order_id = result.get("result", {}).get("orderId", "")
+        pos = Position(
+            symbol=sig.symbol, side=side,
+            entry=sig.entry, sl=sig.sl,
+            tp1=sig.tp1, tp2=sig.tp2, tp3=sig.tp3,
+            qty=qty, score=sig.score,
+            signal_type=sig.signal_type, order_id=order_id,
+        )
+        state.positions[sig.symbol] = pos
+        await db.save_trade_open(pos)
+
+        log.info(
+            f"Opened {side} {sig.symbol} qty={qty} "
+            f"entry≈{sig.entry:.4f} SL={sig.sl:.4f} TP={sig.tp3:.4f} "
+            f"risk={risk_usdt:.2f} USDT orderId={order_id}"
+        )
+        return True
+
+    except Exception as e:
+        log.error(f"enter_trade {sig.symbol}: {e}")
+        return False
+
+
+async def monitor_positions(client: BybitClient) -> None:
+    """Check if exchange positions still exist; detect SL/TP closes."""
+    if not cfg.AUTO_TRADE or not state.positions:
+        return
+    if not client.api_key:
+        return
+
+    try:
+        live     = await client.get_positions()
+        live_map = {p["symbol"]: p for p in live}
+
+        # Update balance
+        bal = await client.get_balance()
+        if bal > 0:
+            state.balance = bal
+
+        for sym in list(state.positions.keys()):
+            pos = state.positions[sym]
+            if sym not in live_map:
+                # Position closed by exchange (SL or TP hit)
+                state.positions.pop(sym, None)
+                await db.save_trade_close(pos)
+                log.info(f"{sym}: position closed on exchange (SL/TP hit)")
+            else:
+                pos.unrealised_pnl = float(live_map[sym].get("unrealisedPnl", 0))
+
+    except Exception as e:
+        log.error(f"monitor_positions error: {e}")

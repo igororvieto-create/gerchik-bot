@@ -11,6 +11,7 @@ from core.state import Signal, state
 from core import db
 from exchange.bybit import BybitClient
 from notifications.ntfy import send_push
+from strategy.trader import enter_trade
 
 log = logging.getLogger("scanner")
 
@@ -306,6 +307,7 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> Non
 
     for sig in signals:
         await db.save_signal(sig)
+        await enter_trade(client, sig)
 
         # Broadcast to all connected WebSocket clients
         msg = json.dumps({"type": "signal", "data": sig.to_dict()})

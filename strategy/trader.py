@@ -97,19 +97,22 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
 
 async def monitor_positions(client: BybitClient) -> None:
     """Check if exchange positions still exist; detect SL/TP closes."""
-    if not cfg.AUTO_TRADE or not state.positions:
+    if not cfg.AUTO_TRADE:
         return
     if not client.api_key:
         return
 
     try:
-        live     = await client.get_positions()
-        live_map = {p["symbol"]: p for p in live}
-
-        # Update balance
+        # Always update balance
         bal = await client.get_balance()
         if bal > 0:
             state.balance = bal
+
+        if not state.positions:
+            return
+
+        live     = await client.get_positions()
+        live_map = {p["symbol"]: p for p in live}
 
         for sym in list(state.positions.keys()):
             pos = state.positions[sym]

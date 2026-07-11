@@ -185,6 +185,9 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             client.get_orderbook(symbol, limit=20),
         )
 
+        if not oi_hist and not klines:
+            log.warning(f"{symbol}: klines+OI both empty — API may be rate-limited or blocked")
+
         # OI change over last 4h (oi_hist is oldest→newest after reversal in bybit.py)
         if len(oi_hist) >= 2:
             oi_old    = oi_hist[-2]["oi"]   # 4h ago
@@ -273,7 +276,11 @@ async def scan_all(client: BybitClient) -> List[Signal]:
         if cfg.TOP_N_PAIRS > 0:
             tickers = tickers[:cfg.TOP_N_PAIRS]
 
-        log.info(f"scan_all: scanning {len(tickers)} symbols")
+        log.info(f"scan_all: {len(tickers)} symbols to scan "
+                 f"(batch={cfg.SCAN_BATCH_SIZE} delay={cfg.SCAN_BATCH_DELAY}s)")
+        if not tickers:
+            log.warning("scan_all: 0 symbols after filter — Bybit API may be unreachable")
+            return []
 
         # Process in batches to respect rate limits
         batch_size = cfg.SCAN_BATCH_SIZE
@@ -293,7 +300,7 @@ async def scan_all(client: BybitClient) -> List[Signal]:
                 await asyncio.sleep(cfg.SCAN_BATCH_DELAY)
 
         if errors:
-            log.warning(f"scan_all: {errors} symbols failed with exceptions")
+            log.warning(f"scan_all: {errors}/{len(tickers)} symbols failed with exceptions")
 
         signals.sort(key=lambda s: s.score, reverse=True)
         state.last_scan_at = datetime.utcnow()

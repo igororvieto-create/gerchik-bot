@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import time
 from typing import Dict, List, Optional
 
@@ -9,7 +10,7 @@ import aiohttp
 
 log = logging.getLogger("bybit")
 
-BASE_URL = "https://api.bybit.com"
+BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api.bybit.com")
 RECV_WINDOW = 5000
 
 
@@ -18,6 +19,11 @@ class BybitClient:
         self.api_key = api_key
         self.secret = secret
         self._session: Optional[aiohttp.ClientSession] = None
+        self._proxy: Optional[str] = os.getenv("BYBIT_PROXY", "") or None
+        if self._proxy:
+            log.info(f"BybitClient: using proxy {self._proxy}")
+        else:
+            log.warning("BybitClient: no BYBIT_PROXY set — direct connection (may be blocked by exchange)")
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -52,7 +58,7 @@ class BybitClient:
             try:
                 # Refresh signature on every attempt so timestamp never expires
                 headers = self._sign(query) if auth else {}
-                async with session.get(url, headers=headers,
+                async with session.get(url, headers=headers, proxy=self._proxy,
                                        timeout=aiohttp.ClientTimeout(total=10)) as r:
                     status = r.status
                     text = await r.text()
@@ -82,7 +88,7 @@ class BybitClient:
             try:
                 # Refresh signature on every attempt so timestamp never expires
                 headers = self._sign(raw)
-                async with session.post(url, headers=headers, data=raw,
+                async with session.post(url, headers=headers, data=raw, proxy=self._proxy,
                                         timeout=aiohttp.ClientTimeout(total=10)) as r:
                     status = r.status
                     text = await r.text()

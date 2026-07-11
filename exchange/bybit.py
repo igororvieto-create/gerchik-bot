@@ -45,10 +45,11 @@ class BybitClient:
         session = await self._get_session()
         params = params or {}
         query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
-        headers = self._sign(query) if auth else {}
         url = BASE_URL + path + (f"?{query}" if query else "")
         for attempt in range(3):
             try:
+                # Refresh signature on every attempt so timestamp never expires
+                headers = self._sign(query) if auth else {}
                 async with session.get(url, headers=headers,
                                        timeout=aiohttp.ClientTimeout(total=10)) as r:
                     data = await r.json()
@@ -65,10 +66,11 @@ class BybitClient:
     async def _post(self, path: str, body: dict = None) -> Dict:
         session = await self._get_session()
         raw = json.dumps(body or {})
-        headers = self._sign(raw)
         url = BASE_URL + path
         for attempt in range(3):
             try:
+                # Refresh signature on every attempt so timestamp never expires
+                headers = self._sign(raw)
                 async with session.post(url, headers=headers, data=raw,
                                         timeout=aiohttp.ClientTimeout(total=10)) as r:
                     data = await r.json()
@@ -106,7 +108,8 @@ class BybitClient:
             "intervalTime": interval, "limit": limit,
         })
         raw = data.get("result", {}).get("list", [])
-        return [{"ts": int(r["timestamp"]), "oi": float(r["openInterest"])} for r in raw]
+        # Bybit returns newest-first; reverse to match klines (oldest → newest)
+        return [{"ts": int(r["timestamp"]), "oi": float(r["openInterest"])} for r in reversed(raw)]
 
     async def get_orderbook(self, symbol: str, limit: int = 20) -> Dict:
         data = await self._get("/v5/market/orderbook", {
@@ -137,11 +140,14 @@ class BybitClient:
                 for acc in data.get("result", {}).get("list", []):
                     for coin in acc.get("coin", []):
                         if coin.get("coin") == "USDT":
-                            # prefer availableToWithdraw, fall back to walletBalance
-                            bal = float(coin.get("availableToWithdraw") or
-                                        coin.get("walletBalance", 0))
-                            if bal > 0:
-                                return bal
+                            # Explicit float conversion to avoid "0" string truthy trap
+                            available = float(coin.get("availableToWithdraw") or 0)
+                            if available == 0:
+                                available = float(coin.get("availableBalance") or 0)
+                            if available == 0:
+                                available = float(coin.get("walletBalance") or 0)
+                            if available > 0:
+                                return available
             except Exception:
                 pass
         return 0.0
@@ -168,15 +174,26 @@ class BybitClient:
             "takeProfit":  str(round(tp, 8)),
             "slTriggerBy": "LastPrice",
             "tpTriggerBy": "LastPrice",
+            "positionIdx": 0,  # one-way mode (required for hedge-mode accounts)
         })
 
-    async def get_positions(self) -> List[Dict]:
-        """All open linear USDT perp positions."""
-        data = await self._get("/v5/position/list", {
-            "category": "linear", "settleCoin": "USDT",
-        }, auth=True)
-        return [p for p in data.get("result", {}).get("list", [])
-                if float(p.get("size", 0)) > 0]
+    async def get_positions(self) -> Optional[List[Dict]]:
+        """All open linear USDT perp positions. Returns None on API failure."""
+        positions = []
+        cursor = ""
+        while True:
+            params: Dict = {"category": "linear", "settleCoin": "USDT", "limit": "200"}
+            if cursor:
+                params["cursor"] = cursor
+            data = await self._get("/v5/position/list", params, auth=True)
+            if not data or data.get("retCode", -1) != 0:
+                return None  # signal API failure (distinct from empty list)
+            result = data.get("result", {})
+            positions.extend(result.get("list", []))
+            cursor = result.get("nextPageCursor", "")
+            if not cursor:
+                break
+        return [p for p in positions if float(p.get("size", 0)) > 0]
 
     async def close_position(self, symbol: str, side: str, qty: float) -> Dict:
         close_side = "Sell" if side == "Buy" else "Buy"
@@ -188,4 +205,5 @@ class BybitClient:
             "qty":         str(qty),
             "timeInForce": "IOC",
             "reduceOnly":  True,
+            "positionIdx": 0,
         })

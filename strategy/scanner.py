@@ -178,25 +178,27 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             return None
 
         # Fetch OI history, klines, and orderbook concurrently
+        # Request limit=26 klines: [-1]=current incomplete, [-2]=last completed
         oi_hist, klines, ob = await asyncio.gather(
             client.get_open_interest(symbol, interval="4h", limit=12),
-            client.get_klines(symbol, interval="240", limit=25),
+            client.get_klines(symbol, interval="240", limit=26),
             client.get_orderbook(symbol, limit=20),
         )
 
-        # OI change over last 4h
+        # OI change over last 4h (oi_hist is oldest→newest after reversal in bybit.py)
         if len(oi_hist) >= 2:
-            oi_old    = oi_hist[-2]["oi"]   # second-to-last (4h ago)
-            oi_new    = oi_hist[-1]["oi"]   # latest
+            oi_old    = oi_hist[-2]["oi"]   # 4h ago
+            oi_new    = oi_hist[-1]["oi"]   # current period
             oi_change = (oi_new - oi_old) / oi_old * 100 if oi_old > 0 else 0.0
         else:
             oi_change = 0.0
 
-        # Volume ratio vs 20-period avg
-        if len(klines) >= 21:
+        # Volume ratio: compare last completed 4h candle vs 20-bar avg
+        # klines[-1] is the current incomplete candle; use klines[-2] as "current"
+        if len(klines) >= 22:
             volumes  = np.array([k["volume"] for k in klines])
-            vol_avg  = float(np.mean(volumes[-21:-1]))  # 20-bar avg excluding current
-            vol_curr = float(volumes[-1])
+            vol_avg  = float(np.mean(volumes[-22:-2]))  # 20 completed bars
+            vol_curr = float(volumes[-2])               # last completed bar
             vol_ratio = vol_curr / vol_avg if vol_avg > 0 else 1.0
         else:
             vol_ratio = 1.0

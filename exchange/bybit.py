@@ -131,11 +131,15 @@ class BybitClient:
         for acc_type in ("UNIFIED", "CONTRACT"):
             data = await self._get("/v5/account/wallet-balance",
                                    {"accountType": acc_type}, auth=True)
+            if data.get("retCode", -1) != 0:
+                continue
             try:
                 for acc in data.get("result", {}).get("list", []):
                     for coin in acc.get("coin", []):
                         if coin.get("coin") == "USDT":
-                            bal = float(coin.get("walletBalance", 0))
+                            # prefer availableToWithdraw, fall back to walletBalance
+                            bal = float(coin.get("availableToWithdraw") or
+                                        coin.get("walletBalance", 0))
                             if bal > 0:
                                 return bal
             except Exception:

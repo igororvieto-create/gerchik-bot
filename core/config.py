@@ -23,12 +23,14 @@ class Config:
     )
 
     # Signal thresholds
-    MIN_SCORE:             int   = int(os.getenv("MIN_SCORE",             "10").strip())
-    OI_CHANGE_THRESHOLD:   float = float(os.getenv("OI_CHANGE_THRESHOLD", "3.0").strip())
-    VOL_SPIKE_MULT:        float = float(os.getenv("VOL_SPIKE_MULT",      "2.0").strip())
-    FUNDING_EXTREME:       float = float(os.getenv("FUNDING_EXTREME",     "0.05").strip())
-    PRICE_CHANGE_MIN:      float = float(os.getenv("PRICE_CHANGE_MIN",    "1.0").strip())
+    MIN_SCORE:              int   = int(os.getenv("MIN_SCORE",              "25").strip())
+    OI_CHANGE_THRESHOLD:    float = float(os.getenv("OI_CHANGE_THRESHOLD",  "3.0").strip())
+    VOL_SPIKE_MULT:         float = float(os.getenv("VOL_SPIKE_MULT",       "2.0").strip())
+    FUNDING_EXTREME:        float = float(os.getenv("FUNDING_EXTREME",      "0.05").strip())
+    PRICE_CHANGE_MIN:       float = float(os.getenv("PRICE_CHANGE_MIN",     "1.0").strip())
     OB_IMBALANCE_THRESHOLD: float = float(os.getenv("OB_IMBALANCE_THRESHOLD", "0.15").strip())
+    MIN_VOL_24H:            float = float(os.getenv("MIN_VOL_24H",          "5000000").strip())
+    SIGNAL_COOLDOWN_MIN:    int   = int(os.getenv("SIGNAL_COOLDOWN_MIN",    "30").strip())
 
     # Signal history
     MAX_SIGNALS_DB:  int = int(os.getenv("MAX_SIGNALS_DB",  "500").strip())

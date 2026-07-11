@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 import numpy as np
@@ -100,10 +100,11 @@ def _score_signal(
     elif ob_abs >= 0.10:
         score += 5
 
-    # Classify signal type
-    if oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change > 0:
+    # Classify signal type — require ≥0.5% price confirmation to avoid
+    # mislabelling flat-price OI expansion as directional accumulation/distribution
+    if oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change > 0.5:
         sig_type = "ACCUMULATION"
-    elif oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change < 0:
+    elif oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change < -0.5:
         sig_type = "DISTRIBUTION"
     elif oi_change <= -cfg.OI_CHANGE_THRESHOLD:
         sig_type = "SQUEEZE"
@@ -136,8 +137,9 @@ def _calc_levels(price: float, atr: float, direction: str) -> dict:
     if price <= 0 or atr <= 0:
         return {"entry": price, "sl": 0.0, "tp1": 0.0, "tp2": 0.0, "tp3": 0.0, "rr": 0.0, "sl_pct": 0.0}
 
-    sl_dist = atr * 1.5
-    risk = sl_dist  # risk distance = SL distance
+    # 2×ATR SL with a minimum 0.3% floor to avoid near-zero stops on flat coins
+    sl_dist = max(atr * 2.0, price * 0.003)
+    risk = sl_dist
 
     if direction == "LONG":
         entry = price
@@ -173,8 +175,12 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         if price <= 0:
             return None
 
-        # Cheap pre-filter: skip truly dead tickers (threshold 0.001% funding, not 0.01%)
-        if abs(price_chg) < cfg.PRICE_CHANGE_MIN and abs(funding) < 0.001:
+        # Minimum 24h volume filter — skip illiquid pairs
+        if vol_24h < cfg.MIN_VOL_24H:
+            return None
+
+        # Pre-filter: skip dead tickers (tiny move AND near-zero funding)
+        if abs(price_chg) < cfg.PRICE_CHANGE_MIN and abs(funding) < 0.01:
             return None
 
         # Fetch OI history, klines, and orderbook concurrently
@@ -188,10 +194,14 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         if not oi_hist and not klines:
             log.warning(f"{symbol}: klines+OI both empty — API may be rate-limited or blocked")
 
-        # OI change over last 4h (oi_hist is oldest→newest after reversal in bybit.py)
-        if len(oi_hist) >= 2:
-            oi_old    = oi_hist[-2]["oi"]   # 4h ago
-            oi_new    = oi_hist[-1]["oi"]   # current period
+        # OI change: compare real-time USDT OI vs previous 4h period open OI
+        # oi_hist[-2]["oi"] is coin count at previous period open; convert to USDT via price
+        if len(oi_hist) >= 2 and price > 0:
+            oi_prev_usdt = oi_hist[-2]["oi"] * price
+            oi_change = (oi_usdt_now - oi_prev_usdt) / oi_prev_usdt * 100 if oi_prev_usdt > 0 else 0.0
+        elif len(oi_hist) >= 2:
+            oi_old    = oi_hist[-2]["oi"]
+            oi_new    = oi_hist[-1]["oi"]
             oi_change = (oi_new - oi_old) / oi_old * 100 if oi_old > 0 else 0.0
         else:
             oi_change = 0.0
@@ -206,16 +216,15 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         else:
             vol_ratio = 1.0
 
-        # ATR
-        atr = _calc_atr(klines)
+        # ATR — exclude current incomplete candle (klines[-1])
+        atr = _calc_atr(klines[:-1])
         atr_pct = atr / price * 100 if price > 0 else 0.0
 
         # Orderbook
         ob_ratio, ob_bias = _ob_imbalance(ob)
 
         score, sig_type = _score_signal(oi_change, vol_ratio, funding, ob_ratio, price_chg)
-        # MIN_SCORE=10 hard floor — actual display/trade thresholds in run_scan_and_broadcast
-        if score < 10:
+        if score < cfg.MIN_SCORE:
             return None
 
         direction = _direction(sig_type, price_chg, ob_bias, funding)
@@ -334,10 +343,18 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> Non
 
     signals = await scan_all(client)
 
+    now = datetime.utcnow()
+    cooldown = timedelta(minutes=cfg.SIGNAL_COOLDOWN_MIN)
+
     for sig in signals:
-        # Save all signals to DB regardless of MIN_SCORE env var
+        # Dedup: skip if this symbol already signalled within the cooldown window
+        last_seen = state.signal_seen.get(sig.symbol)
+        if last_seen and (now - last_seen) < cooldown:
+            continue
+        state.signal_seen[sig.symbol] = now
+
         await db.save_signal(sig)
-        # Trade only if score meets TRADE_MIN_SCORE (not affected by MIN_SCORE)
+        # Trade only if score meets TRADE_MIN_SCORE
         await enter_trade(client, sig)
 
         # Broadcast to all connected WebSocket clients

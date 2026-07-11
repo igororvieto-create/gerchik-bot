@@ -65,23 +65,65 @@ async def debug():
     from core.config import cfg
     info = {
         "auto_trade":    cfg.AUTO_TRADE,
+        "min_score":     cfg.MIN_SCORE,
         "api_key_set":   bool(cfg.BYBIT_API_KEY),
         "secret_set":    bool(cfg.BYBIT_SECRET),
         "balance_state": state.balance,
         "scan_count":    state.scan_count,
         "positions":     len(state.positions),
     }
-    if state.client and cfg.BYBIT_API_KEY:
+    if state.client:
         try:
-            for acc_type in ("UNIFIED", "CONTRACT"):
-                raw = await state.client._get(
-                    "/v5/account/wallet-balance",
-                    {"accountType": acc_type}, auth=True,
-                )
-                info[f"bybit_{acc_type.lower()}"] = raw
+            # Test public API
+            tickers = await state.client.get_tickers()
+            usdt = [t for t in tickers if t.get("symbol", "").endswith("USDT")]
+            info["tickers_total"] = len(tickers)
+            info["tickers_usdt"]  = len(usdt)
+            if usdt:
+                usdt.sort(key=lambda t: float(t.get("volume24h", 0)), reverse=True)
+                info["top3_tickers"] = [
+                    {
+                        "symbol":   t["symbol"],
+                        "price_chg_pct": round(float(t.get("price24hPcnt", 0)) * 100, 2),
+                        "funding_pct":   round(float(t.get("fundingRate", 0)) * 100, 4),
+                    }
+                    for t in usdt[:3]
+                ]
         except Exception as e:
-            info["bybit_error"] = str(e)
+            info["tickers_error"] = str(e)
+
+        if cfg.BYBIT_API_KEY:
+            try:
+                for acc_type in ("UNIFIED", "CONTRACT"):
+                    raw = await state.client._get(
+                        "/v5/account/wallet-balance",
+                        {"accountType": acc_type}, auth=True,
+                    )
+                    info[f"bybit_{acc_type.lower()}"] = raw
+            except Exception as e:
+                info["bybit_error"] = str(e)
     return JSONResponse(info)
+
+
+@router.get("/api/scan")
+async def trigger_scan():
+    """Manually trigger a scan and return top signals found."""
+    from core.config import cfg
+    if state.client is None:
+        return JSONResponse({"error": "client not initialized"}, status_code=503)
+    from strategy.scanner import scan_all
+    import asyncio
+    try:
+        signals = await asyncio.wait_for(scan_all(state.client), timeout=120)
+        return JSONResponse({
+            "signals_found": len(signals),
+            "min_score":     cfg.MIN_SCORE,
+            "top10": [s.to_dict() for s in signals[:10]],
+        })
+    except asyncio.TimeoutError:
+        return JSONResponse({"error": "scan timed out (>120s)"}, status_code=504)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @router.get("/api/trades")

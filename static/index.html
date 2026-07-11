@@ -282,6 +282,18 @@
   <div class="chip">
     <span class="l">последний: </span><span class="v" id="s-lastscan">—</span>
   </div>
+  <div class="chip" id="balance-chip" style="display:none">
+    <span class="l">баланс: </span><span class="v" id="s-balance">—</span><span class="l"> USDT</span>
+  </div>
+  <div class="chip" id="pos-chip" style="display:none">
+    <span class="v" id="s-positions">0</span> <span class="l">позиций</span>
+  </div>
+</div>
+
+<!-- Open positions panel -->
+<div id="positions-panel" style="display:none;max-width:960px;margin:8px auto 0;padding:0 14px">
+  <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Открытые позиции</div>
+  <div id="positions-list"></div>
 </div>
 
 <div class="filters" id="filters">
@@ -505,6 +517,35 @@ function loadHistory(data) {
   render();
 }
 
+// ── Position card ─────────────────────────────────────────────────────────────
+function positionCard(p) {
+  const isLong  = p.direction === 'LONG';
+  const pnlCls  = p.unrealised_pnl >= 0 ? 'pos' : 'neg';
+  const pnlSign = p.unrealised_pnl >= 0 ? '+' : '';
+  const dirIcon = isLong ? '🟢' : '🔴';
+  return `
+  <div class="card ${isLong ? 'long-card' : 'short-card'}" style="margin-bottom:6px">
+    <div class="card-head">
+      <span class="sym">${p.symbol.replace('USDT','')}<span style="color:var(--muted);font-size:12px">/USDT</span></span>
+      <span class="dir-badge dir-${p.direction}">${dirIcon} ${p.direction}</span>
+      <span class="type-badge t-${p.signal_type}">${p.signal_type.replace('_',' ')}</span>
+      <div class="head-spacer"></div>
+      <span class="mv ${pnlCls}" style="font-size:13px;font-weight:700">${pnlSign}${p.unrealised_pnl.toFixed(2)} USDT</span>
+    </div>
+    <div class="levels-row">
+      <div class="lv-cell lv-sl"><div class="lk">🔴 SL</div><div class="lv">${fmtP(p.sl)}</div></div>
+      <div class="lv-cell lv-en"><div class="lk">🟡 Вход</div><div class="lv">${fmtP(p.entry)}</div></div>
+      <div class="lv-cell lv-tp2"><div class="lk">🟢 TP2</div><div class="lv">${fmtP(p.tp2)}</div></div>
+      <div class="lv-cell lv-tp3"><div class="lk">🚀 TP3</div><div class="lv">${fmtP(p.tp3)}</div></div>
+    </div>
+    <div class="metrics">
+      <div class="metric"><span class="mk">Объём</span><span class="mv">${p.qty}</span></div>
+      <div class="metric"><span class="mk">Счёт</span><span class="mv ${scoreCls(p.score)}">${p.score}/100</span></div>
+      <div class="metric"><span class="mk">Открыто</span><span class="mv neu">${fmtT(p.ts)}</span></div>
+    </div>
+  </div>`;
+}
+
 // ── Stats ────────────────────────────────────────────────────────────────────
 async function refreshStats() {
   try {
@@ -516,6 +557,34 @@ async function refreshStats() {
     if (d.last_scan_at) {
       document.getElementById('s-lastscan').textContent =
         new Date(d.last_scan_at).toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit'});
+    }
+  } catch {}
+}
+
+async function refreshPositions() {
+  try {
+    const [pd, bd] = await Promise.all([
+      fetch('/api/positions').then(r => r.json()),
+      fetch('/api/balance').then(r => r.json()),
+    ]);
+
+    const bal = bd.balance;
+    if (bal > 0) {
+      document.getElementById('s-balance').textContent = bal.toFixed(2);
+      document.getElementById('balance-chip').style.display = '';
+    }
+
+    const positions = pd.positions || [];
+    document.getElementById('s-positions').textContent = positions.length;
+    document.getElementById('pos-chip').style.display = positions.length > 0 ? '' : 'none';
+
+    const panel = document.getElementById('positions-panel');
+    const list  = document.getElementById('positions-list');
+    if (positions.length > 0) {
+      panel.style.display = '';
+      list.innerHTML = positions.map(positionCard).join('');
+    } else {
+      panel.style.display = 'none';
     }
   } catch {}
 }
@@ -582,7 +651,9 @@ if ('serviceWorker' in navigator) {
 }
 
 connect();
+refreshPositions();
 setInterval(refreshStats, 30000);
+setInterval(refreshPositions, 15000);
 </script>
 </body>
 </html>

@@ -294,6 +294,13 @@ async def scan_all(client: BybitClient) -> List[Signal]:
         state.total_signals += len(signals)
 
         log.info(f"scan_all: found {len(signals)} signals (scan #{state.scan_count})")
+        if signals:
+            top = signals[:3]
+            log.info("Top signals: " + " | ".join(
+                f"{s.symbol} score={s.score} {s.direction} {s.signal_type}" for s in top
+            ))
+        else:
+            log.info(f"scan_all: no signals above MIN_SCORE={cfg.MIN_SCORE}")
         return signals
 
     except Exception as e:

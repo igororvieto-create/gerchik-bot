@@ -93,6 +93,8 @@ class AppState:
         self.total_signals: int = 0
         self.positions: Dict[str, Position] = {}
         self.balance: float = 0.0
+        self.client: Any = None  # set by main.py after BybitClient init
+        self.last_balance_error: str = ""
 
     def add_ws(self, ws) -> None:
         self.ws_clients.add(ws)

@@ -60,6 +60,30 @@ async def get_balance():
     return JSONResponse({"balance": round(state.balance, 2), "currency": "USDT"})
 
 
+@router.get("/api/debug")
+async def debug():
+    from core.config import cfg
+    info = {
+        "auto_trade":    cfg.AUTO_TRADE,
+        "api_key_set":   bool(cfg.BYBIT_API_KEY),
+        "secret_set":    bool(cfg.BYBIT_SECRET),
+        "balance_state": state.balance,
+        "scan_count":    state.scan_count,
+        "positions":     len(state.positions),
+    }
+    if state.client and cfg.BYBIT_API_KEY:
+        try:
+            for acc_type in ("UNIFIED", "CONTRACT"):
+                raw = await state.client._get(
+                    "/v5/account/wallet-balance",
+                    {"accountType": acc_type}, auth=True,
+                )
+                info[f"bybit_{acc_type.lower()}"] = raw
+        except Exception as e:
+            info["bybit_error"] = str(e)
+    return JSONResponse(info)
+
+
 @router.get("/api/trades")
 async def get_trades(limit: int = 50):
     rows = await db.get_trades(limit=limit)

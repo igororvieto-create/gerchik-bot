@@ -32,6 +32,7 @@ async def lifespan(app: FastAPI):
     log.info("DB ready")
 
     _client = BybitClient(cfg.BYBIT_API_KEY, cfg.BYBIT_SECRET)
+    state.client = _client
     log.info(f"AUTO_TRADE={'ON' if cfg.AUTO_TRADE else 'OFF'} "
              f"api_key={'set' if cfg.BYBIT_API_KEY else 'not set'}")
 

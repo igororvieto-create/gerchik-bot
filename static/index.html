@@ -200,6 +200,35 @@
     }
     .empty .icon{font-size:48px}
 
+    /* ── Chart modal ── */
+    #chart-modal{
+      display:none;position:fixed;inset:0;z-index:100;
+      background:rgba(0,0,0,.85);
+      flex-direction:column;
+    }
+    #chart-modal.open{display:flex}
+    .chart-header{
+      background:var(--surface);
+      padding:12px 14px;
+      display:flex;align-items:center;justify-content:space-between;
+      border-bottom:1px solid var(--border);flex-shrink:0;
+    }
+    .chart-header h2{font-size:15px;font-weight:600}
+    .chart-close{
+      background:none;border:none;color:var(--muted);
+      font-size:22px;cursor:pointer;padding:0 4px;
+      line-height:1;
+    }
+    #chart-frame{
+      flex:1;border:none;width:100%;background:#131722;
+    }
+
+    .chart-btn{
+      font-size:11px;color:var(--blue);
+      background:rgba(82,136,193,.12);border-radius:6px;padding:2px 8px;
+      border:none;cursor:pointer;
+    }
+
     /* ── Keyboard ── */
     #kb{
       background:var(--surface);
@@ -250,6 +279,15 @@
     <div class="icon">🤖</div>
     <div>Ожидание сигналов...</div>
   </div>
+</div>
+
+<!-- Chart modal -->
+<div id="chart-modal">
+  <div class="chart-header">
+    <h2 id="chart-title">График</h2>
+    <button class="chart-close" onclick="closeChart()">✕</button>
+  </div>
+  <iframe id="chart-frame" allowfullscreen></iframe>
 </div>
 
 <!-- Keyboard -->
@@ -350,7 +388,10 @@ function addSig(s,prepend=false){
 
       <div class="sig-foot">
         <span class="sig-time">⏰ ${fTime(s.ts)}</span>
-        <a class="bybit-link" href="https://www.bybit.com/trade/usdt/${s.symbol}" target="_blank">↗ Bybit</a>
+        <div style="display:flex;gap:6px">
+          <button class="chart-btn" onclick="openChart('${s.symbol}')">📊 График</button>
+          <a class="bybit-link" href="https://www.bybit.com/trade/usdt/${s.symbol}" target="_blank">↗ Bybit</a>
+        </div>
       </div>
     </div>
   `;
@@ -559,6 +600,25 @@ async function doDiag(){
     addBotMsg(html);
   }catch(e){addBotMsg('❌ Ошибка диагностики')}
 }
+
+/* ── Chart ── */
+function openChart(symbol){
+  // TradingView symbol format: BYBIT:BTCUSDT.P
+  const tvSym='BYBIT:'+symbol+'.P';
+  const url=`https://s.tradingview.com/widgetembed/?frameElementId=tv_chart&symbol=${tvSym}&interval=240&theme=dark&style=1&locale=ru&toolbar_bg=%23232e3c&enable_publishing=0&hide_top_toolbar=0&hide_legend=0&save_image=0&studies=RSI%40tv-basicstudies%1FVolume%40tv-basicstudies&withdateranges=1`;
+  document.getElementById('chart-title').textContent='📊 '+symbol+' (4H)';
+  document.getElementById('chart-frame').src=url;
+  document.getElementById('chart-modal').classList.add('open');
+  document.body.style.overflow='hidden';
+}
+function closeChart(){
+  document.getElementById('chart-modal').classList.remove('open');
+  document.getElementById('chart-frame').src='';
+  document.body.style.overflow='';
+}
+document.getElementById('chart-modal').addEventListener('click',function(e){
+  if(e.target===this)closeChart();
+});
 
 /* ── Ping ── */
 setInterval(()=>{if(ws&&ws.readyState===1)ws.send('ping')},30000);

@@ -36,10 +36,14 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         log.info(f"Max positions ({cfg.MAX_POSITIONS}) reached, skip {sig.symbol}")
         return False
 
+    # Reserve slot immediately to prevent concurrent duplicate entries
+    state.positions[sig.symbol] = None  # sentinel; replaced with real Position or removed
+
     try:
         balance = await client.get_balance()
         if balance < 10:
             log.warning(f"Insufficient balance: {balance:.2f} USDT")
+            state.positions.pop(sig.symbol, None)
             return False
 
         state.balance = balance
@@ -47,6 +51,12 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         # Position size: risk RISK_PER_TRADE% of balance
         risk_usdt     = balance * cfg.RISK_PER_TRADE / 100
         position_usdt = risk_usdt / (sig.sl_pct / 100)  # notional value
+
+        # Cap notional at balance × leverage to avoid margin rejection
+        max_notional = balance * cfg.LEVERAGE
+        if position_usdt > max_notional:
+            position_usdt = max_notional
+            log.debug(f"{sig.symbol}: notional capped to {max_notional:.2f} (balance×leverage)")
 
         # Qty precision from instrument info
         info = await client.get_instrument_info(sig.symbol)
@@ -59,6 +69,7 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
 
         if qty * sig.entry < 5.0:
             log.debug(f"{sig.symbol}: notional {qty*sig.entry:.2f} < 5 USDT min")
+            state.positions.pop(sig.symbol, None)
             return False
 
         await client.set_leverage(sig.symbol, cfg.LEVERAGE)
@@ -70,6 +81,7 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
 
         if result.get("retCode", -1) != 0:
             log.error(f"{sig.symbol}: order failed — {result.get('retMsg')}")
+            state.positions.pop(sig.symbol, None)
             return False
 
         order_id = result.get("result", {}).get("orderId", "")
@@ -91,6 +103,7 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         return True
 
     except Exception as e:
+        state.positions.pop(sig.symbol, None)
         log.error(f"enter_trade {sig.symbol}: {e}")
         return False
 
@@ -111,11 +124,18 @@ async def monitor_positions(client: BybitClient) -> None:
         if not state.positions:
             return
 
-        live     = await client.get_positions()
+        live = await client.get_positions()
+        if live is None:
+            # API failure — do NOT wipe positions; wait for next cycle
+            log.warning("monitor_positions: get_positions API failed, skipping close check")
+            return
+
         live_map = {p["symbol"]: p for p in live}
 
         for sym in list(state.positions.keys()):
             pos = state.positions[sym]
+            if pos is None:
+                continue  # sentinel slot from enter_trade in progress
             if sym not in live_map:
                 # Position closed by exchange (SL or TP hit)
                 state.positions.pop(sym, None)

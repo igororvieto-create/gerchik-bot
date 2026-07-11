@@ -115,11 +115,19 @@ async def save_trade_open(pos: Position) -> None:
 async def save_trade_close(pos: Position, exit_price: float = 0.0, pnl: float = 0.0) -> None:
     try:
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                """UPDATE trades SET status='closed', exit_price=?, pnl=?, closed_at=?
-                   WHERE symbol=? AND status='open'""",
-                (exit_price, pnl, datetime.utcnow().isoformat(), pos.symbol),
-            )
+            # Filter by order_id to avoid closing the wrong row on re-entry
+            if pos.order_id:
+                await db.execute(
+                    """UPDATE trades SET status='closed', exit_price=?, pnl=?, closed_at=?
+                       WHERE symbol=? AND order_id=? AND status='open'""",
+                    (exit_price, pnl, datetime.utcnow().isoformat(), pos.symbol, pos.order_id),
+                )
+            else:
+                await db.execute(
+                    """UPDATE trades SET status='closed', exit_price=?, pnl=?, closed_at=?
+                       WHERE symbol=? AND status='open'""",
+                    (exit_price, pnl, datetime.utcnow().isoformat(), pos.symbol),
+                )
             await db.commit()
     except Exception as e:
         log.error(f"save_trade_close error: {e}")

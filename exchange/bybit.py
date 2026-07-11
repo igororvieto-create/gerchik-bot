@@ -163,22 +163,26 @@ class BybitClient:
         for acc_type in ("UNIFIED", "CONTRACT"):
             data = await self._get("/v5/account/wallet-balance",
                                    {"accountType": acc_type}, auth=True)
-            if data.get("retCode", -1) != 0:
+            ret_code = data.get("retCode", -1)
+            ret_msg  = data.get("retMsg", "no response")
+            if ret_code != 0:
+                log.warning(f"get_balance {acc_type}: retCode={ret_code} msg={ret_msg}")
                 continue
             try:
                 for acc in data.get("result", {}).get("list", []):
                     for coin in acc.get("coin", []):
                         if coin.get("coin") == "USDT":
-                            # Explicit float conversion to avoid "0" string truthy trap
                             available = float(coin.get("availableToWithdraw") or 0)
                             if available == 0:
                                 available = float(coin.get("availableBalance") or 0)
                             if available == 0:
                                 available = float(coin.get("walletBalance") or 0)
+                            log.info(f"get_balance {acc_type}: USDT found, available={available}")
                             if available > 0:
                                 return available
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning(f"get_balance {acc_type}: parse error — {e}")
+        log.warning("get_balance: returned 0 — check API key permissions and IP whitelist")
         return 0.0
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:

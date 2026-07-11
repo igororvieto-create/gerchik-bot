@@ -57,7 +57,28 @@ async def get_positions():
 
 @router.get("/api/balance")
 async def get_balance():
-    return JSONResponse({"balance": round(state.balance, 2), "currency": "USDT"})
+    bal = round(state.balance, 2)
+    result: dict = {"balance": bal, "currency": "USDT"}
+    if bal == 0 and state.client:
+        from core.config import cfg
+        if not cfg.BYBIT_API_KEY:
+            result["warn"] = "BYBIT_API_KEY not set"
+        else:
+            try:
+                for acc_type in ("UNIFIED", "CONTRACT"):
+                    raw = await state.client._get(
+                        "/v5/account/wallet-balance",
+                        {"accountType": acc_type}, auth=True,
+                    )
+                    if raw:
+                        result[f"bybit_{acc_type.lower()}"] = {
+                            "retCode": raw.get("retCode"),
+                            "retMsg":  raw.get("retMsg"),
+                        }
+                        break
+            except Exception as e:
+                result["error"] = str(e)
+    return JSONResponse(result)
 
 
 @router.get("/api/debug")

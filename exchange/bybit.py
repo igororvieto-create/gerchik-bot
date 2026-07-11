@@ -16,19 +16,25 @@ RECV_WINDOW = 5000
 
 
 class BybitClient:
-    def __init__(self, api_key: str = "", secret: str = ""):
+    def __init__(self, api_key: str = "", secret: str = "",
+                 extra_proxies: List[str] = None):
         self.api_key = api_key
         self.secret = secret
         self._session: Optional[aiohttp.ClientSession] = None
 
-        # Primary proxy from env; secondary from BYBIT_PROXY_2
-        proxy1 = os.getenv("BYBIT_PROXY", "").strip() or None
-        proxy2 = os.getenv("BYBIT_PROXY_2", "").strip() or None
-
-        # Build ordered list: configured proxies first, direct last
+        # Build proxy list: env vars → extra_proxies from Webshare → direct
+        seen: set = set()
         self._proxy_list: List[Optional[str]] = []
-        for p in (proxy1, proxy2):
-            if p and p not in self._proxy_list:
+        candidates = []
+        for p in (os.getenv("BYBIT_PROXY", "").strip(),
+                  os.getenv("BYBIT_PROXY_2", "").strip()):
+            if p:
+                candidates.append(p)
+        if extra_proxies:
+            candidates.extend(extra_proxies)
+        for p in candidates:
+            if p and p not in seen:
+                seen.add(p)
                 self._proxy_list.append(p)
         self._proxy_list.append(None)  # direct connection always last
 
@@ -37,10 +43,9 @@ class BybitClient:
         # Timestamp when we last switched away from a proxy (for retry cooldown)
         self._proxy_failed_at: float = 0.0
 
-        if proxy1:
-            log.info(f"BybitClient: primary proxy={proxy1}" +
-                     (f" fallback={proxy2}" if proxy2 else "") +
-                     " | direct connection also available")
+        n = len(self._proxy_list) - 1  # exclude the None (direct)
+        if n > 0:
+            log.info(f"BybitClient: {n} proxy(ies) configured + direct fallback")
         else:
             log.info("BybitClient: no proxy — direct connection")
 

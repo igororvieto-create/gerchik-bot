@@ -2,7 +2,9 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from typing import List
 
+import aiohttp
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 
@@ -24,6 +26,32 @@ _client: BybitClient | None = None
 _scheduler: AsyncIOScheduler | None = None
 
 
+async def _fetch_webshare_proxies() -> List[str]:
+    """Fetch fresh working proxies from Webshare API."""
+    token = os.getenv("WEBSHARE_API_TOKEN", "").strip()
+    if not token:
+        return []
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page_size=25",
+                headers={"Authorization": f"Token {token}"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as r:
+                data = await r.json()
+        proxies = []
+        for p in data.get("results", []):
+            if p.get("valid"):
+                url = (f"http://{p['username']}:{p['password']}"
+                       f"@{p['proxy_address']}:{p['port']}")
+                proxies.append(url)
+        log.info(f"Webshare: loaded {len(proxies)} proxies")
+        return proxies
+    except Exception as e:
+        log.warning(f"Webshare API fetch failed: {e}")
+        return []
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _client, _scheduler
@@ -31,7 +59,11 @@ async def lifespan(app: FastAPI):
     await db.init_db()
     log.info("DB ready")
 
-    _client = BybitClient(cfg.BYBIT_API_KEY, cfg.BYBIT_SECRET)
+    # Auto-fetch fresh proxies from Webshare if API token is configured
+    webshare_proxies = await _fetch_webshare_proxies()
+
+    _client = BybitClient(cfg.BYBIT_API_KEY, cfg.BYBIT_SECRET,
+                          extra_proxies=webshare_proxies)
     state.client = _client
     log.info(f"AUTO_TRADE={'ON' if cfg.AUTO_TRADE else 'OFF'} "
              f"api_key={'set' if cfg.BYBIT_API_KEY else 'not set'}")

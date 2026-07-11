@@ -23,7 +23,7 @@ class Config:
     )
 
     # Signal thresholds
-    MIN_SCORE:             int   = int(os.getenv("MIN_SCORE",             "40").strip())
+    MIN_SCORE:             int   = int(os.getenv("MIN_SCORE",             "25").strip())
     OI_CHANGE_THRESHOLD:   float = float(os.getenv("OI_CHANGE_THRESHOLD", "3.0").strip())
     VOL_SPIKE_MULT:        float = float(os.getenv("VOL_SPIKE_MULT",      "2.0").strip())
     FUNDING_EXTREME:       float = float(os.getenv("FUNDING_EXTREME",     "0.05").strip())

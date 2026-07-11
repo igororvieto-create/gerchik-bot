@@ -51,7 +51,7 @@ async def sw():
 
 @router.get("/api/positions")
 async def get_positions():
-    positions = [p.to_dict() for p in state.positions.values()]
+    positions = [p.to_dict() for p in state.positions.values() if p is not None]
     return JSONResponse({"positions": positions, "count": len(positions)})
 
 
@@ -124,6 +124,62 @@ async def trigger_scan():
         return JSONResponse({"error": "scan timed out (>120s)"}, status_code=504)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.get("/api/diagnostic")
+async def diagnostic():
+    """Deep pipeline test: fetches tickers + runs full analysis on top symbol."""
+    import asyncio
+    if state.client is None:
+        return JSONResponse({"error": "client not initialized"}, status_code=503)
+
+    result: dict = {}
+    try:
+        # Step 1: tickers
+        tickers = await state.client.get_tickers()
+        usdt = [t for t in tickers if t.get("symbol", "").endswith("USDT")]
+        result["tickers_total"] = len(tickers)
+        result["tickers_usdt"]  = len(usdt)
+        if not usdt:
+            result["verdict"] = "FAIL: get_tickers returned 0 USDT tickers — Bybit API unreachable or IP blocked"
+            return JSONResponse(result)
+
+        usdt.sort(key=lambda t: float(t.get("volume24h", 0)), reverse=True)
+        sym = usdt[0]["symbol"]
+        result["test_symbol"] = sym
+
+        # Step 2: per-symbol data
+        oi_hist, klines, ob = await asyncio.gather(
+            state.client.get_open_interest(sym, interval="4h", limit=12),
+            state.client.get_klines(sym, interval="240", limit=26),
+            state.client.get_orderbook(sym, limit=20),
+        )
+        result["oi_records"]    = len(oi_hist)
+        result["kline_records"] = len(klines)
+        result["ob_bids"]       = len(ob.get("bids", []))
+        result["ob_asks"]       = len(ob.get("asks", []))
+
+        if oi_hist:
+            result["oi_latest"] = oi_hist[-1]
+            result["oi_prev"]   = oi_hist[-2] if len(oi_hist) >= 2 else None
+        if klines:
+            result["kline_latest"] = klines[-1]
+
+        # Step 3: full _analyze_symbol
+        from strategy.scanner import _analyze_symbol
+        ticker = usdt[0]
+        sig = await _analyze_symbol(state.client, ticker)
+        if sig:
+            result["signal"] = sig.to_dict()
+            result["verdict"] = f"OK: signal found score={sig.score}"
+        else:
+            result["signal"] = None
+            result["verdict"] = "No signal generated (score < 10 or analysis error)"
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return JSONResponse(result)
 
 
 @router.get("/api/trades")

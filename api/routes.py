@@ -1,18 +1,26 @@
 import json
 import logging
-from datetime import datetime
-from typing import Any
+import os
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 
-from core.config import cfg
 from core.state import state
 from core import db
 
 log = logging.getLogger("api")
 router = APIRouter()
+
+_static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+
+
+def _read_static(name: str) -> str:
+    path = os.path.join(_static_dir, name)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
 
 
 @router.get("/health")
@@ -23,6 +31,22 @@ async def health():
         "last_scan_at": state.last_scan_at.isoformat() + "Z" if state.last_scan_at else None,
         "ws_clients":   len(state.ws_clients),
     }
+
+
+@router.get("/", response_class=HTMLResponse)
+async def index():
+    return HTMLResponse(_read_static("index.html"))
+
+
+@router.get("/manifest.json")
+async def manifest():
+    return JSONResponse(json.loads(_read_static("manifest.json") or "{}"))
+
+
+@router.get("/sw.js")
+async def sw():
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(_read_static("sw.js"), media_type="application/javascript")
 
 
 @router.get("/api/signals")
@@ -57,12 +81,9 @@ async def websocket_endpoint(ws: WebSocket):
     state.add_ws(ws)
     log.info(f"WS connected (total: {len(state.ws_clients)})")
     try:
-        # Send recent signals on connect
         rows = await db.get_recent_signals(hours=6, limit=50)
         await ws.send_text(json.dumps({"type": "history", "data": rows}))
-
         while True:
-            # Keep connection alive — client should send pings
             data = await ws.receive_text()
             if data == "ping":
                 await ws.send_text("pong")

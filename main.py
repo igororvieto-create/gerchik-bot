@@ -5,7 +5,6 @@ from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 
 from core.config import cfg
 from core.state import state
@@ -81,13 +80,11 @@ async def _delayed_initial_scan():
 app = FastAPI(title="Bybit OI Scanner", lifespan=lifespan)
 app.include_router(router)
 
-# Serve PWA static files
-_static_dir = os.path.join(os.path.dirname(__file__), "static")
-if os.path.isdir(_static_dir):
-    app.mount("/", StaticFiles(directory=_static_dir, html=True), name="static")
-
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
+    # Railway sets $PORT for web services; fall back to 8080 to match
+    # the port configured in Railway's domain settings
+    port = int(os.environ.get("PORT", 8080))
+    log.info(f"Starting uvicorn on port {port}")
     uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")

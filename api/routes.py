@@ -4,7 +4,7 @@ import math
 import os
 import time
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from core.state import state
@@ -297,6 +297,81 @@ async def get_stats():
         "scan_count":   state.scan_count,
         "last_scan_at": state.last_scan_at.isoformat() + "Z" if state.last_scan_at else None,
     }
+
+
+@router.get("/api/settings")
+async def get_settings():
+    from core.config import cfg
+    return JSONResponse({
+        "auto_trade":          cfg.AUTO_TRADE,
+        "min_score":           cfg.MIN_SCORE,
+        "trade_min_score":     cfg.TRADE_MIN_SCORE,
+        "risk_per_trade":      cfg.RISK_PER_TRADE,
+        "max_positions":       cfg.MAX_POSITIONS,
+        "leverage":            cfg.LEVERAGE,
+        "scan_interval_min":   cfg.SCAN_INTERVAL_MIN,
+        "signal_cooldown_min": cfg.SIGNAL_COOLDOWN_MIN,
+    })
+
+
+@router.post("/api/settings")
+async def update_settings(request: Request):
+    from core.config import cfg
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+
+    changes: dict = {}
+    if "auto_trade" in body:
+        cfg.AUTO_TRADE = bool(body["auto_trade"])
+        changes["auto_trade"] = cfg.AUTO_TRADE
+    if "min_score" in body:
+        v = int(body["min_score"])
+        if 5 <= v <= 100:
+            cfg.MIN_SCORE = v
+            changes["min_score"] = v
+    if "trade_min_score" in body:
+        v = int(body["trade_min_score"])
+        if 5 <= v <= 100:
+            cfg.TRADE_MIN_SCORE = v
+            changes["trade_min_score"] = v
+    if "risk_per_trade" in body:
+        v = float(body["risk_per_trade"])
+        if 0.1 <= v <= 5.0:
+            cfg.RISK_PER_TRADE = round(v, 2)
+            changes["risk_per_trade"] = cfg.RISK_PER_TRADE
+    if "max_positions" in body:
+        v = int(body["max_positions"])
+        if 1 <= v <= 20:
+            cfg.MAX_POSITIONS = v
+            changes["max_positions"] = v
+    if "leverage" in body:
+        v = int(body["leverage"])
+        if 1 <= v <= 50:
+            cfg.LEVERAGE = v
+            changes["leverage"] = v
+    log.info(f"Settings updated: {changes}")
+    return JSONResponse({"ok": True, "changed": changes})
+
+
+@router.post("/api/close/{symbol}")
+async def close_position_route(symbol: str):
+    if state.client is None:
+        return JSONResponse({"error": "client not initialized"}, status_code=503)
+    pos = state.positions.get(symbol)
+    if pos is None:
+        return JSONResponse({"error": f"no open position for {symbol}"}, status_code=404)
+    try:
+        result = await state.client.close_position(symbol, pos.side, pos.qty)
+        if result.get("retCode", -1) == 0:
+            state.positions.pop(symbol, None)
+            log.info(f"Position {symbol} closed via dashboard")
+            return JSONResponse({"ok": True, "symbol": symbol})
+        return JSONResponse({"error": result.get("retMsg", "unknown error")}, status_code=400)
+    except Exception as e:
+        log.error(f"close_position {symbol}: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @router.websocket("/ws")

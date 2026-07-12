@@ -19,7 +19,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 /* ── TOP BAR ── */
 .topbar{
   background:var(--surface);border-bottom:1px solid var(--border);
-  padding:0 16px;height:52px;display:flex;align-items:center;gap:10px;
+  padding:0 16px;height:52px;display:flex;align-items:center;gap:8px;
   position:sticky;top:0;z-index:30;
 }
 .brand{font-size:17px;font-weight:800;color:var(--accent);letter-spacing:-.5px}
@@ -89,15 +89,10 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .sym-name{font-size:17px;font-weight:800;font-family:monospace;cursor:pointer}
 .sym-name:hover{color:var(--accent)}
 .sym-usdt{color:var(--muted);font-size:12px;font-weight:400}
-.dir-tag{
-  font-size:11px;font-weight:700;padding:2px 9px;border-radius:5px;
-}
+.dir-tag{font-size:11px;font-weight:700;padding:2px 9px;border-radius:5px}
 .dir-tag.LONG{background:var(--green-dim);color:var(--green)}
 .dir-tag.SHORT{background:var(--red-dim);color:var(--red)}
-.type-tag{
-  font-size:10px;font-weight:700;padding:2px 8px;border-radius:5px;
-  text-transform:uppercase;letter-spacing:.5px;
-}
+.type-tag{font-size:10px;font-weight:700;padding:2px 8px;border-radius:5px;text-transform:uppercase;letter-spacing:.5px}
 .t-ACCUMULATION{background:rgba(34,197,94,.1);color:var(--green)}
 .t-DISTRIBUTION{background:rgba(239,68,68,.1);color:var(--red)}
 .t-SQUEEZE{background:rgba(168,85,247,.12);color:var(--purple)}
@@ -138,10 +133,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .pos{color:var(--green)}.neg{color:var(--red)}.neu{color:var(--muted)}
 
 /* Footer */
-.card-foot{
-  display:flex;align-items:center;gap:8px;padding:8px 14px;
-  border-top:1px solid var(--border);
-}
+.card-foot{display:flex;align-items:center;gap:8px;padding:8px 14px;border-top:1px solid var(--border)}
 .card-time{font-size:11px;color:var(--muted)}
 .card-spacer2{flex:1}
 .chart-btn{
@@ -149,43 +141,36 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;transition:all .15s;
 }
 .chart-btn:hover{border-color:var(--accent);color:var(--accent)}
-.rr-badge{
-  font-size:11px;font-weight:700;color:var(--accent);
-  background:rgba(240,185,11,.1);padding:2px 7px;border-radius:4px;
-}
+.rr-badge{font-size:11px;font-weight:700;color:var(--accent);background:rgba(240,185,11,.1);padding:2px 7px;border-radius:4px}
 
 /* ── EMPTY STATE ── */
-.empty-state{
-  text-align:center;padding:80px 20px;color:var(--muted);
-  grid-column:1/-1;
-}
+.empty-state{text-align:center;padding:80px 20px;color:var(--muted);grid-column:1/-1}
 .empty-ico{font-size:52px;margin-bottom:12px}
 .empty-title{font-size:18px;font-weight:700;color:var(--text);margin-bottom:6px}
 .empty-sub{font-size:13px;line-height:1.6;max-width:340px;margin:0 auto 16px}
 .empty-actions{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
-.ea-btn{
-  background:var(--surface);border:1px solid var(--border);color:var(--text);
-  border-radius:8px;padding:8px 18px;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s;
-}
+.ea-btn{background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 18px;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
 .ea-btn:hover{border-color:var(--accent);color:var(--accent)}
 .ea-btn.primary{background:var(--accent);border-color:var(--accent);color:#000}
 
 /* ── POSITIONS PANEL ── */
-.pos-panel{
-  max-width:1100px;margin:0 auto 12px;padding:0 16px;
-  display:none;
-}
-.pos-hdr{
-  font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;
-  letter-spacing:.5px;margin-bottom:8px;
-}
+.pos-panel{max-width:1100px;margin:0 auto 8px;padding:0 16px;display:none}
+.pos-hdr{font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
 .pos-list{display:flex;flex-direction:column;gap:6px}
 .pos-card{
   background:var(--surface);border:1px solid var(--border);border-radius:10px;
   padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
 }
 .pos-sym{font-size:15px;font-weight:700;font-family:monospace}
+.pos-meta{font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:1px}
 .pos-pnl{font-size:16px;font-weight:700;margin-left:auto}
+.pos-close-btn{
+  background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:var(--red);
+  border-radius:7px;padding:5px 12px;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;
+  flex-shrink:0;
+}
+.pos-close-btn:hover{background:var(--red);color:#fff}
+.pos-close-btn:disabled{opacity:.4;cursor:default}
 
 /* ── CHART MODAL ── */
 .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:50;align-items:center;justify-content:center;padding:12px}
@@ -198,7 +183,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .modal-frame{flex:1;border:none;width:100%;background:#131722}
 
 /* ── DIAG MODAL ── */
-.diag-box{background:var(--surface);border:1px solid var(--border);border-radius:14px;width:100%;max-width:520px;max-height:80vh;overflow-y:auto;padding:16px}
+.diag-box{background:var(--surface);border:1px solid var(--border);border-radius:14px;width:100%;max-width:520px;max-height:85vh;overflow-y:auto;padding:16px}
 .diag-hdr{display:flex;align-items:center;gap:8px;margin-bottom:12px}
 .diag-hdr h2{flex:1;font-size:15px}
 .drow{display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px}
@@ -207,16 +192,86 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .dv{word-break:break-all}
 .dok{color:var(--green)}.dwarn{color:var(--accent)}.derr{color:var(--red)}
 
+/* ── SETTINGS MODAL ── */
+.settings-box{
+  background:var(--surface);border:1px solid var(--border);border-radius:14px;
+  width:100%;max-width:480px;max-height:90vh;overflow-y:auto;padding:0;
+}
+.settings-hdr{
+  display:flex;align-items:center;padding:16px 20px;
+  border-bottom:1px solid var(--border);position:sticky;top:0;
+  background:var(--surface);z-index:1;
+}
+.settings-hdr h2{flex:1;font-size:16px;font-weight:700}
+.settings-body{padding:16px 20px;display:flex;flex-direction:column;gap:0}
+.settings-section{margin-bottom:20px}
+.settings-section-title{
+  font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.6px;margin-bottom:10px;
+}
+.srow{display:flex;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);gap:12px}
+.srow:last-child{border-bottom:none}
+.srow-label{flex:1}
+.srow-name{font-size:13px;font-weight:600;color:var(--text);display:block}
+.srow-desc{font-size:11px;color:var(--muted);margin-top:2px;display:block}
+.srow-ctrl{flex-shrink:0;display:flex;align-items:center;gap:8px}
+
+/* Toggle */
+.toggle{position:relative;width:44px;height:24px;cursor:pointer}
+.toggle input{opacity:0;width:0;height:0;position:absolute}
+.toggle-track{position:absolute;inset:0;border-radius:12px;background:var(--border);transition:background .2s}
+.toggle input:checked+.toggle-track{background:var(--green)}
+.toggle-thumb{position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:transform .2s;box-shadow:0 1px 3px rgba(0,0,0,.4)}
+.toggle input:checked~.toggle-thumb{transform:translateX(20px)}
+
+/* Range slider */
+.range-wrap{display:flex;align-items:center;gap:8px}
+.range-val{font-size:13px;font-weight:700;color:var(--accent);min-width:32px;text-align:right}
+input[type=range]{
+  -webkit-appearance:none;appearance:none;
+  width:120px;height:4px;border-radius:2px;
+  background:var(--border);outline:none;cursor:pointer;
+}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;
+  width:16px;height:16px;border-radius:50%;
+  background:var(--accent);cursor:pointer;
+}
+input[type=range]::-moz-range-thumb{
+  width:16px;height:16px;border-radius:50%;
+  background:var(--accent);cursor:pointer;border:none;
+}
+
+/* Number input */
+.num-input{
+  background:var(--card);border:1px solid var(--border);color:var(--text);
+  border-radius:7px;padding:5px 10px;font-size:13px;font-weight:600;
+  width:80px;text-align:center;outline:none;
+}
+.num-input:focus{border-color:var(--accent)}
+
+.settings-footer{
+  display:flex;gap:8px;padding:16px 20px;border-top:1px solid var(--border);
+  position:sticky;bottom:0;background:var(--surface);
+}
+.btn-save{
+  flex:1;background:var(--accent);color:#000;border:none;border-radius:8px;
+  padding:10px;font-size:14px;font-weight:700;cursor:pointer;transition:opacity .15s;
+}
+.btn-save:hover{opacity:.85}
+.btn-cancel{
+  background:var(--card);border:1px solid var(--border);color:var(--muted);
+  border-radius:8px;padding:10px 16px;font-size:14px;cursor:pointer;transition:all .15s;
+}
+.btn-cancel:hover{color:var(--text)}
+.save-msg{font-size:12px;color:var(--green);text-align:center;height:16px;margin-top:4px;padding:0 20px}
+
 /* ── ALERT BANNER ── */
 #alert{display:none;background:rgba(239,68,68,.1);border-bottom:1px solid rgba(239,68,68,.3);padding:8px 16px;font-size:12px;color:var(--red);text-align:center}
 #alert.show{display:block}
 
 /* ── SCAN INFO BAR ── */
-.scan-bar{
-  display:flex;align-items:center;gap:8px;
-  padding:6px 16px;max-width:1100px;margin:0 auto;
-  font-size:12px;color:var(--muted);
-}
+.scan-bar{display:flex;align-items:center;gap:8px;padding:6px 16px;max-width:1100px;margin:0 auto;font-size:12px;color:var(--muted)}
 .scan-pulse{width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0}
 .scan-pulse.active{background:var(--accent);animation:pulse 1.2s infinite}
 
@@ -225,6 +280,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   .signal-grid{grid-template-columns:1fr}
   .levels{grid-template-columns:repeat(2,1fr)}
   .metrics{grid-template-columns:repeat(2,1fr)}
+  input[type=range]{width:90px}
 }
 </style>
 </head>
@@ -238,6 +294,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <span class="status-txt" id="stxt">Подключение…</span>
   <div class="tb-spacer"></div>
   <button class="tb-btn" id="diag-btn" onclick="openDiag()">🔧</button>
+  <button class="tb-btn" onclick="openSettings()">⚙️</button>
   <button class="tb-btn primary" id="scan-btn" onclick="doScan()">🔍 Скан</button>
 </div>
 
@@ -293,7 +350,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <div class="empty-state">
     <div class="empty-ico">🔍</div>
     <div class="empty-title">Ожидание сигналов</div>
-    <div class="empty-sub">Сканирование рынка запустится автоматически. Или нажмите кнопку ниже для немедленного скана.</div>
+    <div class="empty-sub">Сканирование запустится автоматически. Нажмите кнопку для немедленного скана.</div>
     <div class="empty-actions">
       <button class="ea-btn primary" onclick="doScan()">🔍 Запустить скан</button>
       <button class="ea-btn" onclick="openDiag()">🔧 Диагностика</button>
@@ -321,6 +378,102 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
       <button class="modal-close" onclick="closeModal('diag-modal')">✕</button>
     </div>
     <div id="diag-body" style="font-size:12px;color:var(--muted)">Нажмите ▶ Тест…</div>
+  </div>
+</div>
+
+<!-- Settings modal -->
+<div class="modal" id="settings-modal">
+  <div class="settings-box">
+    <div class="settings-hdr">
+      <h2>⚙️ Настройки бота</h2>
+      <button class="modal-close" onclick="closeModal('settings-modal')">✕</button>
+    </div>
+    <div class="settings-body">
+
+      <div class="settings-section">
+        <div class="settings-section-title">Торговля</div>
+        <div class="srow">
+          <div class="srow-label">
+            <span class="srow-name">🤖 Авто-торговля</span>
+            <span class="srow-desc">Автоматически открывать сделки</span>
+          </div>
+          <div class="srow-ctrl">
+            <label class="toggle">
+              <input type="checkbox" id="set-auto-trade" onchange="onToggleAutoTrade(this)">
+              <span class="toggle-track"></span>
+              <span class="toggle-thumb"></span>
+            </label>
+          </div>
+        </div>
+        <div class="srow">
+          <div class="srow-label">
+            <span class="srow-name">Риск на сделку</span>
+            <span class="srow-desc">% от баланса на каждую позицию</span>
+          </div>
+          <div class="srow-ctrl">
+            <div class="range-wrap">
+              <input type="range" id="set-risk" min="0.1" max="5" step="0.1" oninput="$('rv-risk').textContent=parseFloat(this.value).toFixed(1)+'%'">
+              <span class="range-val" id="rv-risk">1.0%</span>
+            </div>
+          </div>
+        </div>
+        <div class="srow">
+          <div class="srow-label">
+            <span class="srow-name">Плечо (Leverage)</span>
+            <span class="srow-desc">Кредитное плечо для фьючерсов</span>
+          </div>
+          <div class="srow-ctrl">
+            <div class="range-wrap">
+              <input type="range" id="set-lev" min="1" max="20" step="1" oninput="$('rv-lev').textContent=this.value+'×'">
+              <span class="range-val" id="rv-lev">5×</span>
+            </div>
+          </div>
+        </div>
+        <div class="srow">
+          <div class="srow-label">
+            <span class="srow-name">Макс. позиций</span>
+            <span class="srow-desc">Одновременно открытых сделок</span>
+          </div>
+          <div class="srow-ctrl">
+            <input type="number" class="num-input" id="set-maxpos" min="1" max="20" value="3">
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-title">Сигналы</div>
+        <div class="srow">
+          <div class="srow-label">
+            <span class="srow-name">Мин. счёт (отображение)</span>
+            <span class="srow-desc">Сигналы ниже порога скрываются</span>
+          </div>
+          <div class="srow-ctrl">
+            <div class="range-wrap">
+              <input type="range" id="set-minscore" min="5" max="80" step="1" oninput="$('rv-ms').textContent=this.value">
+              <span class="range-val" id="rv-ms">25</span>
+            </div>
+          </div>
+        </div>
+        <div class="srow">
+          <div class="srow-label">
+            <span class="srow-name">Мин. счёт (торговля)</span>
+            <span class="srow-desc">Порог для открытия сделки</span>
+          </div>
+          <div class="srow-ctrl">
+            <div class="range-wrap">
+              <input type="range" id="set-tradescore" min="20" max="100" step="1" oninput="$('rv-ts').textContent=this.value">
+              <span class="range-val" id="rv-ts">60</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="save-msg" id="save-msg"></div>
+    <div class="settings-footer">
+      <button class="btn-cancel" onclick="closeModal('settings-modal')">Отмена</button>
+      <button class="btn-save" onclick="saveSettings()">💾 Сохранить</button>
+    </div>
   </div>
 </div>
 
@@ -407,8 +560,8 @@ function buildCard(s, isNew){
   </div>
   <div class="metrics">
     <div class="metric"><span class="mk">OI 4h</span>${mvSpan(s.oi_change)}</div>
-    <div class="metric"><span class="mk">Объём</span><span class="mv ${s.vol_ratio>=2?'pos':s.vol_ratio>=1.5?'':''}">${s.vol_ratio!=null?s.vol_ratio.toFixed(1)+'×':'—'}</span></div>
-    <div class="metric"><span class="mk">Фандинг</span>${mvSpan(s.funding,''+'%',3)}</div>
+    <div class="metric"><span class="mk">Объём</span><span class="mv ${s.vol_ratio>=2?'pos':''}">${s.vol_ratio!=null?s.vol_ratio.toFixed(1)+'×':'—'}</span></div>
+    <div class="metric"><span class="mk">Фандинг</span>${mvSpan(s.funding,'%',3)}</div>
     <div class="metric"><span class="mk">Стакан</span><span class="mv ${s.ob_bias==='BUY'?'pos':s.ob_bias==='SELL'?'neg':'neu'}">${esc(s.ob_bias||'—')}</span></div>
     <div class="metric"><span class="mk">ATR</span><span class="mv">${s.atr_pct!=null?s.atr_pct.toFixed(2)+'%':'—'}</span></div>
     <div class="metric"><span class="mk">SL%</span><span class="mv neu">${s.sl_pct!=null?s.sl_pct.toFixed(2)+'%':'—'}</span></div>
@@ -510,6 +663,8 @@ async function refreshBalance(){
     $('s-bal').textContent=d.balance>0?d.balance.toFixed(2):'—';
   }catch{}
 }
+
+/* ── Positions refresh ── */
 async function refreshPositions(){
   try{
     const d=await fetch('/api/positions').then(r=>r.json());
@@ -521,21 +676,99 @@ async function refreshPositions(){
       $('pos-list').innerHTML=pos.map(p=>{
         const dir=p.direction==='LONG';
         const pnl=p.unrealised_pnl||0;
-        return `<div class="pos-card">
-          <span class="pos-sym">${esc(p.symbol).replace('USDT','')}/USDT</span>
-          <span class="dir-tag ${esc(p.direction)}">${dir?'🟢':'🔴'} ${esc(p.direction)}</span>
-          <span style="font-size:12px;color:var(--muted)">Вход: ${fmtP(p.entry)}</span>
-          <span class="pos-pnl ${pnl>=0?'pos':'neg'}">${pnl>=0?'+':''}${pnl.toFixed(2)} USDT</span>
+        const pnlColor=pnl>=0?'pos':'neg';
+        const sym=esc(p.symbol);
+        return `<div class="pos-card" id="poscard-${sym}">
+          <div>
+            <span class="pos-sym">${sym.replace('USDT','')}/USDT</span>
+            <span class="dir-tag ${esc(p.direction)}" style="margin-left:6px">${dir?'🟢':'🔴'} ${esc(p.direction)}</span>
+          </div>
+          <div class="pos-meta">
+            <span>Вход: <b>${fmtP(p.entry)}</b></span>
+            <span>SL: ${fmtP(p.sl)} · TP: ${fmtP(p.tp3)}</span>
+          </div>
+          <span class="pos-pnl ${pnlColor}">${pnl>=0?'+':''}${pnl.toFixed(2)} USDT</span>
+          <button class="pos-close-btn" id="cbtn-${sym}" onclick="closePos('${sym}')">❌ Закрыть</button>
         </div>`;
       }).join('');
     } else panel.style.display='none';
   }catch{}
 }
+
+/* ── Close position ── */
+async function closePos(symbol){
+  const btn=$('cbtn-'+symbol);
+  if(!btn) return;
+  if(!confirm(`Закрыть позицию ${symbol} по рынку?`)) return;
+  btn.disabled=true; btn.textContent='⏳…';
+  try{
+    const r=await fetch('/api/close/'+symbol,{method:'POST'});
+    const d=await r.json();
+    if(d.ok){
+      const card=$('poscard-'+symbol);
+      if(card) card.remove();
+      await refreshPositions();
+    } else {
+      alert('Ошибка: '+(d.error||'неизвестно'));
+      btn.disabled=false; btn.textContent='❌ Закрыть';
+    }
+  }catch(e){
+    alert('Ошибка: '+e.message);
+    btn.disabled=false; btn.textContent='❌ Закрыть';
+  }
+}
+
 async function refreshTradeMode(){
   try{
-    const d=await fetch('/api/debug').then(r=>r.json());
+    const d=await fetch('/api/settings').then(r=>r.json());
     $('s-trade').textContent=d.auto_trade?'🤖 Авто':'👁 Мониторинг';
   }catch{}
+}
+
+/* ── Settings ── */
+async function openSettings(){
+  try{
+    const d=await fetch('/api/settings').then(r=>r.json());
+    $('set-auto-trade').checked=!!d.auto_trade;
+
+    const risk=$('set-risk'); risk.value=d.risk_per_trade??1; $('rv-risk').textContent=parseFloat(risk.value).toFixed(1)+'%';
+    const lev=$('set-lev'); lev.value=d.leverage??5; $('rv-lev').textContent=lev.value+'×';
+    $('set-maxpos').value=d.max_positions??3;
+    const ms=$('set-minscore'); ms.value=d.min_score??25; $('rv-ms').textContent=ms.value;
+    const ts=$('set-tradescore'); ts.value=d.trade_min_score??60; $('rv-ts').textContent=ts.value;
+  }catch{}
+  $('save-msg').textContent='';
+  $('settings-modal').classList.add('open');
+}
+
+function onToggleAutoTrade(el){
+  // visual only — saved on submit
+}
+
+async function saveSettings(){
+  const body={
+    auto_trade:      $('set-auto-trade').checked,
+    risk_per_trade:  parseFloat($('set-risk').value),
+    leverage:        parseInt($('set-lev').value),
+    max_positions:   parseInt($('set-maxpos').value),
+    min_score:       parseInt($('set-minscore').value),
+    trade_min_score: parseInt($('set-tradescore').value),
+  };
+  try{
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(d.ok){
+      $('save-msg').textContent='✅ Сохранено';
+      $('s-trade').textContent=body.auto_trade?'🤖 Авто':'👁 Мониторинг';
+      setTimeout(()=>{ $('save-msg').textContent=''; closeModal('settings-modal'); },1200);
+    } else {
+      $('save-msg').textContent='❌ Ошибка: '+(d.error||'');
+      $('save-msg').style.color='var(--red)';
+    }
+  }catch(e){
+    $('save-msg').textContent='❌ '+e.message;
+    $('save-msg').style.color='var(--red)';
+  }
 }
 
 /* ── Manual scan ── */
@@ -634,8 +867,8 @@ async function runDiag(){
     const row=(k,v,cls)=>`<div class="drow"><span class="dk">${esc(k)}</span><span class="dv ${cls||''}">${esc(String(v??'—'))}</span></div>`;
     let html='';
     html+=row('DB','✅ OK','dok');
-    if(d.tickers_error) html+=row('Bybit API','❌ '+d.tickers_error,'derr')+row('Решение','Добавьте BYBIT_PROXY в Railway Variables','dwarn');
-    else html+=row('Bybit API',d.tickers_total>0?`✅ ${d.tickers_total} тикеров`:'⚠ 0 тикеров',d.tickers_total>0?'dok':'dwarn');
+    if(d.tickers_error) html+=row('API Bybit','❌ '+d.tickers_error,'derr')+row('Решение','Добавьте BYBIT_PROXY в Railway Variables','dwarn');
+    else html+=row('API Bybit',d.tickers_total>0?`✅ ${d.tickers_total} тикеров`:'⚠ 0 тикеров',d.tickers_total>0?'dok':'dwarn');
     if(d.balance_warn) html+=row('Баланс','⚠ '+d.balance_warn,'dwarn');
     if(d.balance_error) html+=row('Баланс','❌ '+d.balance_error,'derr');
     if(d.balance_usdt!=null) html+=row('Баланс USDT',d.balance_usdt.toFixed(2),d.balance_usdt>0?'dok':'dwarn');

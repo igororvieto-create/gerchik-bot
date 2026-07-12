@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import time
 
@@ -11,6 +12,17 @@ from core import db
 
 log = logging.getLogger("api")
 router = APIRouter()
+
+
+def _sanitize(obj):
+    """Recursively replace NaN/Inf floats with None so json.dumps produces valid JSON."""
+    if isinstance(obj, float):
+        return None if not math.isfinite(obj) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    return obj
 
 _balance_cache: dict = {"value": 0.0, "ts": 0.0}
 _BALANCE_CACHE_TTL = 30
@@ -262,15 +274,22 @@ async def websocket_endpoint(ws: WebSocket):
     log.info(f"WS connected (total: {len(state.ws_clients)})")
     try:
         rows = await db.get_recent_signals(hours=6, limit=50)
-        await ws.send_text(json.dumps({"type": "history", "data": rows}))
+        # _sanitize converts NaN/Inf → None so json.dumps never produces invalid JSON
+        await ws.send_text(json.dumps(_sanitize({"type": "history", "data": rows})))
         while True:
-            data = await ws.receive_text()
-            if data == "ping":
+            # Use receive() directly: receive_text() returns None for binary frames
+            # in Starlette 0.37 and raises RuntimeError in newer versions.
+            msg = await ws.receive()
+            if msg["type"] == "websocket.disconnect":
+                raise WebSocketDisconnect(msg.get("code", 1000))
+            # Only handle text frames; silently ignore binary frames.
+            text = msg.get("text")
+            if text == "ping":
                 await ws.send_text("pong")
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        log.debug(f"WS error: {e}")
+        log.warning(f"WS error: {e}")
     finally:
         state.remove_ws(ws)
         log.info(f"WS disconnected (total: {len(state.ws_clients)})")

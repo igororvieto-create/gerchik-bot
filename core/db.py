@@ -8,13 +8,22 @@ import aiosqlite
 from core.state import Signal, Position
 
 log = logging.getLogger("db")
-DB_PATH = os.getenv("DB_PATH", "data/signals.db")
+# Use an absolute path anchored to this file so the DB is always found
+# at <project-root>/data/signals.db regardless of the process CWD.
+# The env-var override still works for Railway Volumes or custom mounts.
+_DEFAULT_DB = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "signals.db")
+)
+DB_PATH = os.getenv("DB_PATH", _DEFAULT_DB)
 
 
 async def init_db() -> None:
     dirpath = os.path.dirname(DB_PATH)
     if dirpath:
-        os.makedirs(dirpath, exist_ok=True)
+        try:
+            os.makedirs(dirpath, exist_ok=True)
+        except OSError as e:
+            log.warning(f"Could not create DB directory {dirpath!r}: {e}")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS signals (

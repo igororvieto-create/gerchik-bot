@@ -8,6 +8,8 @@ from exchange.bybit import BybitClient
 
 log = logging.getLogger("trader")
 
+_MONITORING = False
+
 
 def _round_step(value: float, step: float) -> float:
     if step <= 0:
@@ -112,12 +114,17 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
 
 async def monitor_positions(client: BybitClient) -> None:
     """Check if exchange positions still exist; detect SL/TP closes."""
-    if not cfg.AUTO_TRADE:
+    global _MONITORING
+    if _MONITORING:
+        log.warning("monitor_positions: previous call still running, skipping this tick")
         return
-    if not client.api_key:
-        return
-
+    _MONITORING = True
     try:
+        if not cfg.AUTO_TRADE:
+            return
+        if not client.api_key:
+            return
+
         # Always update balance
         bal = await client.get_balance()
         if bal > 0:
@@ -157,3 +164,5 @@ async def monitor_positions(client: BybitClient) -> None:
 
     except Exception as e:
         log.error(f"monitor_positions error: {e}")
+    finally:
+        _MONITORING = False

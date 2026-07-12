@@ -359,12 +359,20 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> Non
             continue
         state.signal_seen[sig.symbol] = now
 
-        await db.save_signal(sig)
+        try:
+            await db.save_signal(sig)
+        except Exception as dbe:
+            log.error(f"run_scan_and_broadcast: db.save_signal({sig.symbol}) failed — {dbe}")
+
         # Trade only if score meets TRADE_MIN_SCORE
         await enter_trade(client, sig)
 
         # Broadcast to all connected WebSocket clients
-        msg = json.dumps({"type": "signal", "data": sig.to_dict()})
+        try:
+            msg = json.dumps({"type": "signal", "data": sig.to_dict()})
+        except Exception as je:
+            log.error(f"run_scan_and_broadcast: sig.to_dict() failed for {sig.symbol} — {je}")
+            continue
         dead = set()
         for ws in state.ws_clients:
             try:
@@ -376,14 +384,17 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> Non
 
         # ntfy push for high-score signals
         if ntfy_url and sig.score >= 60:
-            icon = "🟢" if sig.direction == "LONG" else "🔴"
-            await send_push(
-                ntfy_url,
-                title=f"{icon} {sig.symbol} — {sig.signal_type}",
-                message=sig.details,
-                priority="high" if sig.score >= 75 else "default",
-                tags=["chart_with_upwards_trend"] if sig.direction == "LONG" else ["chart_with_downwards_trend"],
-            )
+            try:
+                icon = "🟢" if sig.direction == "LONG" else "🔴"
+                await send_push(
+                    ntfy_url,
+                    title=f"{icon} {sig.symbol} — {sig.signal_type}",
+                    message=sig.details,
+                    priority="high" if sig.score >= 75 else "default",
+                    tags=["chart_with_upwards_trend"] if sig.direction == "LONG" else ["chart_with_downwards_trend"],
+                )
+            except Exception as pe:
+                log.warning(f"run_scan_and_broadcast: send_push({sig.symbol}) failed — {pe}")
 
     # Broadcast scan heartbeat
     heartbeat = json.dumps({

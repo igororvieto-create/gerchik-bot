@@ -191,18 +191,16 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             client.get_orderbook(symbol, limit=20),
         )
 
-        if not oi_hist and not klines:
-            log.warning(f"{symbol}: klines+OI both empty — API may be rate-limited or blocked")
+        if not oi_hist or not klines:
+            log.warning(f"{symbol}: partial data — oi_hist={len(oi_hist)} klines={len(klines)}")
+            if not klines:
+                return None
 
-        # OI change: compare real-time USDT OI vs previous 4h period open OI
-        # oi_hist[-2]["oi"] is coin count at previous period open; convert to USDT via price
-        if len(oi_hist) >= 2 and price > 0:
-            oi_prev_usdt = oi_hist[-2]["oi"] * price
+        # OI change: compare real-time USDT OI vs start of current 4h period
+        # oi_hist[-1] is the most-recent 4h bar open (coin count); convert to USDT via price
+        if len(oi_hist) >= 1 and price > 0:
+            oi_prev_usdt = oi_hist[-1]["oi"] * price
             oi_change = (oi_usdt_now - oi_prev_usdt) / oi_prev_usdt * 100 if oi_prev_usdt > 0 else 0.0
-        elif len(oi_hist) >= 2:
-            oi_old    = oi_hist[-2]["oi"]
-            oi_new    = oi_hist[-1]["oi"]
-            oi_change = (oi_new - oi_old) / oi_old * 100 if oi_old > 0 else 0.0
         else:
             oi_change = 0.0
 
@@ -212,6 +210,11 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             volumes  = np.array([k["volume"] for k in klines])
             vol_avg  = float(np.mean(volumes[-22:-2]))  # 20 completed bars
             vol_curr = float(volumes[-2])               # last completed bar
+            vol_ratio = vol_curr / vol_avg if vol_avg > 0 else 1.0
+        elif len(klines) >= 3:
+            volumes  = np.array([k["volume"] for k in klines])
+            vol_avg  = float(np.mean(volumes[:-2])) if len(volumes) > 2 else 1.0
+            vol_curr = float(volumes[-2])
             vol_ratio = vol_curr / vol_avg if vol_avg > 0 else 1.0
         else:
             vol_ratio = 1.0
@@ -337,9 +340,12 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> Non
     """Called by APScheduler: scan, save to DB, broadcast via WS, push via ntfy."""
     # Refresh balance on every scan if API keys are configured
     if client.api_key and client.secret:
-        bal = await client.get_balance()
-        if bal > 0:
-            state.balance = bal
+        try:
+            bal = await client.get_balance()
+            if bal > 0:
+                state.balance = bal
+        except Exception as be:
+            log.warning(f"run_scan_and_broadcast: get_balance failed — {be}")
 
     signals = await scan_all(client)
 

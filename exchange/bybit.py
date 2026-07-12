@@ -217,6 +217,13 @@ class BybitClient:
         raw = data.get("result", {}).get("list", [])
         return [{"ts": int(r["timestamp"]), "oi": float(r["openInterest"])} for r in reversed(raw)]
 
+    async def get_closed_pnl(self, symbol: str, limit: int = 1) -> List[Dict]:
+        """Get recently closed P&L for a symbol (authenticated)."""
+        data = await self._get("/v5/position/closed-pnl", {
+            "category": "linear", "symbol": symbol, "limit": str(limit),
+        }, auth=True)
+        return data.get("result", {}).get("list", [])
+
     async def get_orderbook(self, symbol: str, limit: int = 20) -> Dict:
         data = await self._get("/v5/market/orderbook", {
             "category": "linear", "symbol": symbol, "limit": limit,
@@ -249,9 +256,9 @@ class BybitClient:
                 for acc in data.get("result", {}).get("list", []):
                     for coin in acc.get("coin", []):
                         if coin.get("coin") == "USDT":
-                            available = float(coin.get("availableToWithdraw") or 0)
+                            available = float(coin.get("availableBalance") or 0)
                             if available == 0:
-                                available = float(coin.get("availableBalance") or 0)
+                                available = float(coin.get("availableToWithdraw") or 0)
                             if available == 0:
                                 available = float(coin.get("walletBalance") or 0)
                             log.info(f"get_balance {acc_type}: USDT available={available}")
@@ -277,7 +284,7 @@ class BybitClient:
             "symbol":      symbol,
             "side":        side,
             "orderType":   "Market",
-            "qty":         str(qty),
+            "qty":         f"{qty:.8f}".rstrip('0').rstrip('.'),
             "timeInForce": "IOC",
             "stopLoss":    str(round(sl, 8)),
             "takeProfit":  str(round(tp, 8)),
@@ -311,7 +318,7 @@ class BybitClient:
             "symbol":      symbol,
             "side":        close_side,
             "orderType":   "Market",
-            "qty":         str(qty),
+            "qty":         f"{qty:.8f}".rstrip('0').rstrip('.'),
             "timeInForce": "IOC",
             "reduceOnly":  True,
             "positionIdx": 0,

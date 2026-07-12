@@ -12,7 +12,9 @@ DB_PATH = os.getenv("DB_PATH", "data/signals.db")
 
 
 async def init_db() -> None:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    dirpath = os.path.dirname(DB_PATH)
+    if dirpath:
+        os.makedirs(dirpath, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS signals (
@@ -123,11 +125,13 @@ async def save_trade_close(pos: Position, exit_price: float = 0.0, pnl: float = 
                     (exit_price, pnl, datetime.utcnow().isoformat(), pos.symbol, pos.order_id),
                 )
             else:
-                await db.execute(
+                cur = await db.execute(
                     """UPDATE trades SET status='closed', exit_price=?, pnl=?, closed_at=?
                        WHERE symbol=? AND status='open'""",
                     (exit_price, pnl, datetime.utcnow().isoformat(), pos.symbol),
                 )
+                if cur.rowcount > 1:
+                    log.error(f"save_trade_close: updated {cur.rowcount} rows for {pos.symbol} — missing order_id")
             await db.commit()
     except Exception as e:
         log.error(f"save_trade_close error: {e}")

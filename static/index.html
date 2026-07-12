@@ -306,7 +306,9 @@
 
 <script>
 'use strict';
-let scanCount=0, lastAt=null, sigCount=0, seenSigs=new Set();
+let scanCount=0, lastAt=null, sigCount=0, seenSigs=new Set(), scanInProgress=false;
+
+const escHtml=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 
 /* ── Format helpers ── */
 const fNum=(n,d=4)=>typeof n==='number'?n.toFixed(d):'—';
@@ -356,7 +358,7 @@ function addSig(s,prepend=false){
       <div class="sig-head">
         <span class="sym">${s.symbol}</span>
         <span class="dir ${isL?'long-dir':'short-dir'}">${isL?'🟢 LONG':'🔴 SHORT'}</span>
-        <span class="type-tag">${TYPES[s.signal_type]||s.signal_type||''}</span>
+        <span class="type-tag">${TYPES[s.signal_type]||escHtml(s.signal_type)||''}</span>
         <span class="score ${scoreClass(sc)}">${sc}/100</span>
       </div>
 
@@ -391,12 +393,14 @@ function addSig(s,prepend=false){
       <div class="sig-foot">
         <span class="sig-time">⏰ ${fTime(s.ts)}</span>
         <div style="display:flex;gap:6px">
-          <button class="chart-btn" onclick="openChart('${s.symbol}')">📊 График</button>
+          <button class="chart-btn" data-sym="${escHtml(s.symbol)}">📊 График</button>
           <a class="bybit-link" href="https://www.bybit.com/trade/usdt/${s.symbol}" target="_blank">↗ Bybit</a>
         </div>
       </div>
     </div>
   `;
+  const chartBtn=el.querySelector('.chart-btn');
+  if(chartBtn)chartBtn.onclick=()=>openChart(s.symbol);
   if(prepend)chat.insertBefore(el,chat.firstChild);
   else{chat.appendChild(el);chat.scrollTop=9e9;}
 }
@@ -449,7 +453,7 @@ function connect(){
       scanCount=m.scan_count||scanCount;
       lastAt=m.last_scan_at||lastAt;
       sigCount=m.signals_found!==undefined?m.signals_found:sigCount;
-      updateStats();refreshBalance();refreshPositions();
+      updateStats();refreshPositions();
     }
   };
   ws.onclose=()=>{
@@ -516,6 +520,8 @@ async function doBalance(){
 }
 
 async function doScan(){
+  if(scanInProgress){addBotMsg('⏳ Скан уже выполняется...');return;}
+  scanInProgress=true;
   addBotMsg('⏳ Сканирую рынок... подождите 30-60 сек');
   try{
     const d=await fetch('/api/scan').then(r=>r.json());
@@ -525,12 +531,16 @@ async function doScan(){
       html+=`<br><br><b>Топ сигналы:</b><br>`;
       d.top10.slice(0,5).forEach(s=>{
         const ic=s.direction==='LONG'?'🟢':'🔴';
-        html+=`${ic} <b>${s.symbol}</b> ${s.score}/100 — ${TYPES[s.signal_type]||s.signal_type}<br>`;
+        html+=`${ic} <b>${escHtml(s.symbol)}</b> ${s.score}/100 — ${TYPES[s.signal_type]||escHtml(s.signal_type)}<br>`;
       });
     }
     addBotMsg(html);
-    if(d.top10)d.top10.slice(0,3).forEach(s=>addSig(s));
+    if(d.top10)d.top10.slice(0,3).forEach(s=>{
+      const k=s.symbol+(s.ts||'');
+      if(!seenSigs.has(k)){seenSigs.add(k);addSig(s);}
+    });
   }catch(e){addBotMsg('❌ Ошибка сканирования')}
+  finally{scanInProgress=false;}
 }
 
 async function doSignals(){
@@ -612,11 +622,13 @@ function openChart(symbol){
   document.getElementById('chart-frame').src=url;
   document.getElementById('chart-modal').classList.add('open');
   document.body.style.overflow='hidden';
+  document.documentElement.style.overflow='hidden';
 }
 function closeChart(){
   document.getElementById('chart-modal').classList.remove('open');
   document.getElementById('chart-frame').src='';
   document.body.style.overflow='';
+  document.documentElement.style.overflow='';
 }
 document.getElementById('chart-modal').addEventListener('click',function(e){
   if(e.target===this)closeChart();

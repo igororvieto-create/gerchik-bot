@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -10,6 +11,9 @@ from core import db
 
 log = logging.getLogger("api")
 router = APIRouter()
+
+_balance_cache: dict = {"value": 0.0, "ts": 0.0}
+_BALANCE_CACHE_TTL = 30
 
 _static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 
@@ -59,23 +63,19 @@ async def get_positions():
 async def get_balance():
     bal = round(state.balance, 2)
     result: dict = {"balance": bal, "currency": "USDT"}
-    if bal == 0 and state.client:
+    now = time.time()
+    if bal == 0 and state.client and (now - _balance_cache["ts"]) > _BALANCE_CACHE_TTL:
+        _balance_cache["ts"] = now
         from core.config import cfg
         if not cfg.BYBIT_API_KEY:
             result["warn"] = "BYBIT_API_KEY not set"
         else:
             try:
-                for acc_type in ("UNIFIED", "CONTRACT"):
-                    raw = await state.client._get(
-                        "/v5/account/wallet-balance",
-                        {"accountType": acc_type}, auth=True,
-                    )
-                    if raw:
-                        result[f"bybit_{acc_type.lower()}"] = {
-                            "retCode": raw.get("retCode"),
-                            "retMsg":  raw.get("retMsg"),
-                        }
-                        break
+                fresh = await state.client.get_balance()
+                if fresh > 0:
+                    state.balance = fresh
+                    result["balance"] = round(fresh, 2)
+                    _balance_cache["value"] = fresh
             except Exception as e:
                 result["error"] = str(e)
     return JSONResponse(result)
@@ -259,8 +259,10 @@ async def websocket_endpoint(ws: WebSocket):
         rows = await db.get_recent_signals(hours=6, limit=50)
         await ws.send_text(json.dumps({"type": "history", "data": rows}))
         while True:
-            data = await ws.receive_text()
-            if data == "ping":
+            msg = await ws.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+            if msg.get("text") == "ping":
                 await ws.send_text("pong")
     except WebSocketDisconnect:
         pass

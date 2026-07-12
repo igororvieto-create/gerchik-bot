@@ -72,7 +72,9 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             state.positions.pop(sig.symbol, None)
             return False
 
-        await client.set_leverage(sig.symbol, cfg.LEVERAGE)
+        ok = await client.set_leverage(sig.symbol, cfg.LEVERAGE)
+        if not ok:
+            log.warning(f"{sig.symbol}: set_leverage({cfg.LEVERAGE}) returned False — continuing")
 
         side   = "Buy" if sig.direction == "LONG" else "Sell"
         result = await client.place_order(
@@ -138,9 +140,18 @@ async def monitor_positions(client: BybitClient) -> None:
                 continue  # sentinel slot from enter_trade in progress
             if sym not in live_map:
                 # Position closed by exchange (SL or TP hit)
+                # Fetch actual exit price and PnL before removing from state
+                exit_price, pnl = 0.0, 0.0
+                try:
+                    closed = await client.get_closed_pnl(sym, limit=1)
+                    if closed:
+                        exit_price = float(closed[0].get("avgExitPrice", 0))
+                        pnl = float(closed[0].get("closedPnl", 0))
+                except Exception as ce:
+                    log.warning(f"{sym}: could not fetch closed PnL — {ce}")
+                await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
                 state.positions.pop(sym, None)
-                await db.save_trade_close(pos)
-                log.info(f"{sym}: position closed on exchange (SL/TP hit)")
+                log.info(f"{sym}: closed (SL/TP) exit={exit_price:.4f} pnl={pnl:+.2f}")
             else:
                 pos.unrealised_pnl = float(live_map[sym].get("unrealisedPnl", 0))
 

@@ -226,8 +226,13 @@ async def diagnostic():
             result["signal"] = sig.to_dict()
             result["verdict"] = f"OK: signal found score={sig.score}"
         else:
+            from core.config import cfg as _cfg
             result["signal"] = None
-            result["verdict"] = "No signal generated (score < 10 or analysis error)"
+            result["verdict"] = (
+                f"Топ монета ({sym}) без сигнала — score < {_cfg.MIN_SCORE}. "
+                "Это норма: BTC/ETH часто не дают входов. "
+                "Реальные сигналы смотри на дашборде."
+            )
 
     except Exception as e:
         result["error"] = str(e)

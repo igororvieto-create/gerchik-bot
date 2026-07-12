@@ -259,10 +259,8 @@ async def websocket_endpoint(ws: WebSocket):
         rows = await db.get_recent_signals(hours=6, limit=50)
         await ws.send_text(json.dumps({"type": "history", "data": rows}))
         while True:
-            msg = await ws.receive()
-            if msg["type"] == "websocket.disconnect":
-                break
-            if msg.get("text") == "ping":
+            data = await ws.receive_text()
+            if data == "ping":
                 await ws.send_text("pong")
     except WebSocketDisconnect:
         pass

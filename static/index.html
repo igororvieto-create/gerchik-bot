@@ -268,7 +268,8 @@
 
 <!-- Stats -->
 <div class="stats">
-  <div class="chip">💰 <b id="s-bal">—</b> USDT</div>
+  <div class="chip" onclick="cmd('balance')" style="cursor:pointer">💰 <b id="s-bal">—</b> USDT</div>
+  <div class="chip" id="trade-chip" style="display:none">🤖 <b id="s-trade">—</b></div>
   <div class="chip">📡 сканов: <b id="s-sc">0</b></div>
   <div class="chip">📶 сигналов: <b id="s-sig">0</b></div>
   <div class="chip" id="pos-chip" style="display:none">📊 позиций: <b id="s-pos">0</b></div>
@@ -294,13 +295,13 @@
 
 <!-- Keyboard -->
 <div id="kb">
+  <button class="kb" onclick="cmd('scan')" id="btn-scan">🔍 Запустить скан</button>
   <button class="kb" onclick="cmd('status')">📊 Статус</button>
   <button class="kb" onclick="cmd('balance')">💰 Баланс</button>
-  <button class="kb" onclick="cmd('scan')">🔍 Скан</button>
-  <button class="kb" onclick="cmd('signals')">📈 Сигналы</button>
   <button class="kb" onclick="cmd('positions')">📋 Позиции</button>
-  <button class="kb" onclick="cmd('history')">📜 История</button>
-  <button class="kb primary" onclick="cmd('all')">🚀 Все сигналы</button>
+  <button class="kb" onclick="cmd('signals')">📈 Последние сигналы</button>
+  <button class="kb" onclick="cmd('history')">📜 История сделок</button>
+  <button class="kb primary" onclick="cmd('all')">🚀 Все за 24ч</button>
   <button class="kb danger" onclick="cmd('diag')">🔧 Диагностика</button>
 </div>
 
@@ -419,6 +420,19 @@ async function refreshBalance(){
   }catch(e){}
 }
 
+async function refreshTradeStatus(){
+  try{
+    const d=await fetch('/api/debug').then(r=>r.json());
+    const chip=document.getElementById('trade-chip');
+    const lbl=document.getElementById('s-trade');
+    if(d.auto_trade!==undefined){
+      chip.style.display='';
+      lbl.textContent=d.auto_trade?'Авто':'Мониторинг';
+      chip.style.color=d.auto_trade?'var(--green)':'var(--yellow)';
+    }
+  }catch(e){}
+}
+
 async function refreshPositions(){
   try{
     const d=await fetch('/api/positions').then(r=>r.json());
@@ -437,7 +451,7 @@ function connect(){
     wsR=0;
     document.getElementById('dot').className='conn-dot ok';
     document.getElementById('sub').textContent='онлайн';
-    refreshBalance();refreshPositions();
+    refreshBalance();refreshPositions();refreshTradeStatus();
   };
   ws.onmessage=e=>{
     const m=JSON.parse(e.data);
@@ -522,6 +536,8 @@ async function doBalance(){
 async function doScan(){
   if(scanInProgress){addBotMsg('⏳ Скан уже выполняется...');return;}
   scanInProgress=true;
+  const btn=document.getElementById('btn-scan');
+  if(btn){btn.textContent='⏳ Сканирую...';btn.disabled=true;}
   addBotMsg('⏳ Сканирую рынок... подождите 30-60 сек');
   try{
     const d=await fetch('/api/scan').then(r=>r.json());
@@ -540,7 +556,10 @@ async function doScan(){
       if(!seenSigs.has(k)){seenSigs.add(k);addSig(s);}
     });
   }catch(e){addBotMsg('❌ Ошибка сканирования')}
-  finally{scanInProgress=false;}
+  finally{
+    scanInProgress=false;
+    if(btn){btn.textContent='🔍 Запустить скан';btn.disabled=false;}
+  }
 }
 
 async function doSignals(){

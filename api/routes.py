@@ -235,6 +235,38 @@ async def diagnostic():
     return JSONResponse(result)
 
 
+@router.get("/api/status")
+async def get_status():
+    """Quick bot status: DB health, Bybit reachability, scan state."""
+    from core.config import cfg
+    info: dict = {
+        "db":             "ok",
+        "bybit_reachable": False,
+        "tickers_count":  0,
+        "api_key_set":    bool(cfg.BYBIT_API_KEY),
+        "auto_trade":     cfg.AUTO_TRADE,
+        "scan_count":     state.scan_count,
+        "last_scan_at":   state.last_scan_at.isoformat() + "Z" if state.last_scan_at else None,
+        "positions":      len(state.positions),
+        "ws_clients":     len(state.ws_clients),
+        "balance":        round(state.balance, 2),
+        "bybit_error":    None,
+    }
+    if state.client:
+        try:
+            tickers = await state.client.get_tickers()
+            info["bybit_reachable"] = len(tickers) > 0
+            info["tickers_count"] = len(tickers)
+        except Exception as e:
+            info["bybit_error"] = str(e)
+    try:
+        rows = await db.get_recent_signals(hours=1, limit=1)
+        info["signals_last_hour"] = len(rows)
+    except Exception as e:
+        info["db"] = f"error: {e}"
+    return JSONResponse(info)
+
+
 @router.get("/api/trades")
 async def get_trades(limit: int = 50):
     rows = await db.get_trades(limit=limit)

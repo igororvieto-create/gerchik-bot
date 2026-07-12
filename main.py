@@ -120,7 +120,7 @@ async def _cleanup_job():
 
 
 async def _delayed_initial_scan():
-    await asyncio.sleep(5)
+    await asyncio.sleep(2)
     try:
         await _scan_job()
     except Exception as e:

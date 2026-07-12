@@ -27,7 +27,6 @@ _scheduler: AsyncIOScheduler | None = None
 
 
 async def _fetch_webshare_proxies() -> List[str]:
-    """Fetch fresh working proxies from Webshare API."""
     token = os.getenv("WEBSHARE_API_TOKEN", "").strip()
     if not token:
         return []
@@ -56,11 +55,17 @@ async def _fetch_webshare_proxies() -> List[str]:
 async def lifespan(app: FastAPI):
     global _client, _scheduler
 
-    await db.init_db()
-    log.info("DB ready")
+    try:
+        await db.init_db()
+        log.info("DB ready")
+    except Exception as e:
+        log.error(f"DB init failed (continuing anyway): {e}")
 
-    # Auto-fetch fresh proxies from Webshare if API token is configured
-    webshare_proxies = await _fetch_webshare_proxies()
+    webshare_proxies: List[str] = []
+    try:
+        webshare_proxies = await _fetch_webshare_proxies()
+    except Exception as e:
+        log.warning(f"Webshare fetch failed: {e}")
 
     _client = BybitClient(cfg.BYBIT_API_KEY, cfg.BYBIT_SECRET,
                           extra_proxies=webshare_proxies)
@@ -69,28 +74,11 @@ async def lifespan(app: FastAPI):
              f"api_key={'set' if cfg.BYBIT_API_KEY else 'not set'}")
 
     _scheduler = AsyncIOScheduler(timezone="UTC")
-    _scheduler.add_job(
-        _scan_job,
-        "interval",
-        minutes=cfg.SCAN_INTERVAL_MIN,
-        id="scan",
-        max_instances=1,
-    )
-    _scheduler.add_job(
-        _monitor_job,
-        "interval",
-        seconds=30,
-        id="monitor",
-        max_instances=1,
-    )
-    _scheduler.add_job(
-        _cleanup_job,
-        "cron",
-        hour="*/6",
-        id="cleanup",
-    )
+    _scheduler.add_job(_scan_job,    "interval", minutes=cfg.SCAN_INTERVAL_MIN, id="scan",    max_instances=1)
+    _scheduler.add_job(_monitor_job, "interval", seconds=30,                    id="monitor", max_instances=1)
+    _scheduler.add_job(_cleanup_job, "cron",     hour="*/6",                    id="cleanup")
     _scheduler.start()
-    log.info(f"Scheduler started — scan every {cfg.SCAN_INTERVAL_MIN} min, monitor every 30s")
+    log.info(f"Scheduler started — scan every {cfg.SCAN_INTERVAL_MIN} min")
 
     asyncio.create_task(_delayed_initial_scan())
 
@@ -114,25 +102,26 @@ async def _monitor_job():
 
 
 async def _cleanup_job():
-    removed = await db.cleanup_old_signals(keep_hours=48)
-    if removed:
-        log.info(f"Cleanup: removed {removed} old signals")
+    try:
+        removed = await db.cleanup_old_signals(keep_hours=48)
+        if removed:
+            log.info(f"Cleanup: removed {removed} old signals")
+    except Exception as e:
+        log.warning(f"Cleanup error: {e}")
 
 
 async def _delayed_initial_scan():
-    await asyncio.sleep(2)
+    await asyncio.sleep(3)
     try:
         await _scan_job()
     except Exception as e:
         log.error(f"Initial scan failed (non-fatal): {e}")
 
 
-app = FastAPI(title="Bybit OI Scanner", lifespan=lifespan)
+app = FastAPI(title="Gerchik Bot", lifespan=lifespan)
 app.include_router(router)
-
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
-    log.info(f"Starting uvicorn on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

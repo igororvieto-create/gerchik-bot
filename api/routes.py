@@ -27,6 +27,11 @@ def _read_static(name: str) -> str:
         return ""
 
 
+@router.get("/ping")
+async def ping():
+    return "pong"
+
+
 @router.get("/health")
 async def health():
     return {

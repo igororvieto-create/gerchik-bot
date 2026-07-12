@@ -120,8 +120,11 @@ async def _cleanup_job():
 
 
 async def _delayed_initial_scan():
-    await asyncio.sleep(3)
-    await _scan_job()
+    await asyncio.sleep(5)
+    try:
+        await _scan_job()
+    except Exception as e:
+        log.error(f"Initial scan failed (non-fatal): {e}")
 
 
 app = FastAPI(title="Bybit OI Scanner", lifespan=lifespan)

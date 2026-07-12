@@ -478,18 +478,30 @@ async function triggerScan() {
   }
 }
 
-/* ── WebSocket ── */
-let wsR = 0, pingTimer = null;
+/* ── WebSocket + HTTP polling fallback ── */
+let wsR = 0, pingTimer = null, wsOk = false;
+
+function setStatus(cls, text) {
+  document.getElementById('dot').className = 'dot ' + cls;
+  document.getElementById('conn-label').textContent = text;
+}
+
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  let ws;
+  try { ws = new WebSocket(`${proto}://${location.host}/ws`); } catch(e) { fallbackPoll(); return; }
   const dot  = document.getElementById('dot');
   const conn = document.getElementById('conn-label');
 
+  const timeout = setTimeout(() => {
+    if (!wsOk) { ws.close(); fallbackPoll(); }
+  }, 8000);
+
   ws.onopen = () => {
+    wsOk = true;
+    clearTimeout(timeout);
     wsR = 0;
-    dot.className = 'dot ok';
-    conn.textContent = 'Подключено';
+    setStatus('ok', 'Подключено');
     pingTimer = setInterval(() => ws.readyState === 1 && ws.send('ping'), 25000);
     refreshStats(); refreshBalance(); refreshPositions(); refreshTradeStatus();
   };
@@ -512,12 +524,56 @@ function connect() {
     }
   };
 
-  ws.onerror = () => { dot.className = 'dot'; conn.textContent = 'Ошибка'; };
+  ws.onerror = () => { clearTimeout(timeout); };
   ws.onclose = () => {
-    dot.className = 'dot'; conn.textContent = 'Реконнект…';
+    clearTimeout(timeout);
     clearInterval(pingTimer);
-    setTimeout(connect, Math.min(1000 * 2 ** wsR++, 30000));
+    wsOk = false;
+    if (wsR < 3) {
+      setStatus('', 'Реконнект…');
+      setTimeout(connect, Math.min(1000 * 2 ** wsR++, 15000));
+    } else {
+      setStatus('', 'HTTP режим');
+      fallbackPoll();
+    }
   };
+}
+
+/* ── HTTP polling fallback (when WS unavailable) ── */
+let pollTimer = null;
+async function fallbackPoll() {
+  if (pollTimer) return;
+  setStatus('scan', 'HTTP режим');
+  await pollOnce();
+  pollTimer = setInterval(pollOnce, 30000);
+}
+
+async function pollOnce() {
+  try {
+    const [sr, sigR] = await Promise.all([
+      fetch('/api/stats').then(r => r.json()).catch(() => ({})),
+      fetch('/api/signals?hours=6&limit=50').then(r => r.json()).catch(() => ({})),
+    ]);
+    if (sr.scan_count !== undefined) {
+      document.getElementById('s-scans').textContent  = sr.scan_count;
+      document.getElementById('s-total').textContent  = sr.total_24h ?? '—';
+      document.getElementById('s-long').textContent   = sr.by_direction?.LONG  ?? 0;
+      document.getElementById('s-short').textContent  = sr.by_direction?.SHORT ?? 0;
+      if (sr.last_scan_at) {
+        document.getElementById('s-lastscan').textContent =
+          new Date(sr.last_scan_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+        document.getElementById('scan-info').textContent =
+          `Скан #${sr.scan_count} · найдено: ${sr.total_24h ?? 0}`;
+      }
+    }
+    const rows = sigR.signals || [];
+    if (rows.length) loadHistory(rows);
+    setStatus('ok', 'HTTP режим');
+    await refreshBalance();
+    await refreshPositions();
+  } catch(e) {
+    setStatus('', 'Ошибка');
+  }
 }
 
 /* ── Toolbar ── */

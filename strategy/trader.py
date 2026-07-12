@@ -54,11 +54,13 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         risk_usdt     = balance * cfg.RISK_PER_TRADE / 100
         position_usdt = risk_usdt / (sig.sl_pct / 100)  # notional value
 
-        # Cap notional at balance × leverage to avoid margin rejection
-        max_notional = balance * cfg.LEVERAGE
+        # Cap by max margin: never use more than MAX_MARGIN_PCT% of balance as margin
+        max_notional_margin = balance * cfg.MAX_MARGIN_PCT / 100 * cfg.LEVERAGE
+        # Also cap at balance × leverage to avoid margin rejection
+        max_notional = min(balance * cfg.LEVERAGE, max_notional_margin)
         if position_usdt > max_notional:
             position_usdt = max_notional
-            log.debug(f"{sig.symbol}: notional capped to {max_notional:.2f} (balance×leverage)")
+            log.debug(f"{sig.symbol}: notional capped to {max_notional:.2f}")
 
         # Qty precision from instrument info
         info = await client.get_instrument_info(sig.symbol)
@@ -79,8 +81,9 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             log.warning(f"{sig.symbol}: set_leverage({cfg.LEVERAGE}) returned False — continuing")
 
         side   = "Buy" if sig.direction == "LONG" else "Sell"
+        # Use TP2 (1:2 R:R) as primary target — more likely to be hit than TP3
         result = await client.place_order(
-            symbol=sig.symbol, side=side, qty=qty, sl=sig.sl, tp=sig.tp3,
+            symbol=sig.symbol, side=side, qty=qty, sl=sig.sl, tp=sig.tp2,
         )
 
         if result.get("retCode", -1) != 0:

@@ -21,6 +21,7 @@ class BybitClient:
         self.api_key = api_key
         self.secret = secret
         self._session: Optional[aiohttp.ClientSession] = None
+        self._instrument_cache: Dict[str, Dict] = {}
 
         # Build proxy list: env vars → extra_proxies from Webshare → direct
         seen: set = set()
@@ -106,7 +107,7 @@ class BybitClient:
                 break
             tried.append(proxy)
             try:
-                kw: Dict = {"headers": headers, "timeout": aiohttp.ClientTimeout(total=10)}
+                kw: Dict = {"headers": headers, "timeout": aiohttp.ClientTimeout(total=10, connect=3)}
                 if proxy:
                     kw["proxy"] = proxy
                 async with session.get(url, **kw) as r:
@@ -127,7 +128,7 @@ class BybitClient:
             tried.append(proxy)
             try:
                 kw: Dict = {"headers": headers, "data": data,
-                            "timeout": aiohttp.ClientTimeout(total=10)}
+                            "timeout": aiohttp.ClientTimeout(total=10, connect=3)}
                 if proxy:
                     kw["proxy"] = proxy
                 async with session.post(url, **kw) as r:
@@ -160,7 +161,7 @@ class BybitClient:
                 if attempt == 2:
                     log.error(f"GET {path} failed after retries: {e}")
                     return {}
-                await asyncio.sleep(1)
+                await asyncio.sleep(2 ** attempt)
         return {}
 
     async def _post(self, path: str, body: dict = None) -> Dict:
@@ -185,7 +186,7 @@ class BybitClient:
                 if attempt == 2:
                     log.error(f"POST {path} failed after retries: {e}")
                     return {}
-                await asyncio.sleep(1)
+                await asyncio.sleep(2 ** attempt)
         return {}
 
     # ── Public market data ────────────────────────────────────────────────────
@@ -234,11 +235,16 @@ class BybitClient:
         return {"bids": bids, "asks": asks}
 
     async def get_instrument_info(self, symbol: str) -> Dict:
+        if symbol in self._instrument_cache:
+            return self._instrument_cache[symbol]
         data = await self._get("/v5/market/instruments-info", {
             "category": "linear", "symbol": symbol,
         })
         items = data.get("result", {}).get("list", [])
-        return items[0] if items else {}
+        info = items[0] if items else {}
+        if info:
+            self._instrument_cache[symbol] = info
+        return info
 
     # ── Authenticated trading ─────────────────────────────────────────────────
 
@@ -288,7 +294,7 @@ class BybitClient:
             "timeInForce": "IOC",
             "stopLoss":    str(round(sl, 8)),
             "takeProfit":  str(round(tp, 8)),
-            "slTriggerBy": "LastPrice",
+            "slTriggerBy": "MarkPrice",
             "tpTriggerBy": "LastPrice",
             "positionIdx": 0,
         })

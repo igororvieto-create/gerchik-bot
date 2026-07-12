@@ -270,6 +270,16 @@ input[type=range]::-moz-range-thumb{
 #alert{display:none;background:rgba(239,68,68,.1);border-bottom:1px solid rgba(239,68,68,.3);padding:8px 16px;font-size:12px;color:var(--red);text-align:center}
 #alert.show{display:block}
 
+/* ── TOAST ── */
+#toast{
+  position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);
+  background:var(--surface);border:1px solid var(--border);border-radius:10px;
+  padding:10px 18px;font-size:13px;font-weight:600;z-index:100;
+  transition:transform .3s,opacity .3s;opacity:0;pointer-events:none;white-space:nowrap;
+  box-shadow:0 4px 20px rgba(0,0,0,.4);
+}
+#toast.show{transform:translateX(-50%) translateY(0);opacity:1}
+
 /* ── SCAN INFO BAR ── */
 .scan-bar{display:flex;align-items:center;gap:8px;padding:6px 16px;max-width:1100px;margin:0 auto;font-size:12px;color:var(--muted)}
 .scan-pulse{width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0}
@@ -287,12 +297,14 @@ input[type=range]::-moz-range-thumb{
 <body>
 
 <div id="alert"></div>
+<div id="toast"></div>
 
 <div class="topbar">
   <div class="brand">📈 Gerchik<span>Bot</span></div>
   <div class="status-dot" id="sdot"></div>
   <span class="status-txt" id="stxt">Подключение…</span>
   <div class="tb-spacer"></div>
+  <button class="tb-btn" onclick="openHistory()">📜</button>
   <button class="tb-btn" id="diag-btn" onclick="openDiag()">🔧</button>
   <button class="tb-btn" onclick="openSettings()">⚙️</button>
   <button class="tb-btn primary" id="scan-btn" onclick="doScan()">🔍 Скан</button>
@@ -378,6 +390,17 @@ input[type=range]::-moz-range-thumb{
       <button class="modal-close" onclick="closeModal('diag-modal')">✕</button>
     </div>
     <div id="diag-body" style="font-size:12px;color:var(--muted)">Нажмите ▶ Тест…</div>
+  </div>
+</div>
+
+<!-- History modal -->
+<div class="modal" id="history-modal">
+  <div class="diag-box" style="max-width:600px">
+    <div class="diag-hdr">
+      <h2>📜 История сделок</h2>
+      <button class="modal-close" onclick="closeModal('history-modal')">✕</button>
+    </div>
+    <div id="history-body" style="font-size:12px"></div>
   </div>
 </div>
 
@@ -485,6 +508,18 @@ const signals = [];
 let activeFilter = 'ALL', activeSort = 'score';
 let wsOk = false, wsR = 0, pollTimer = null, scanBusy = false;
 let gScanCount = 0, gLastScan = '';
+let toastTimer = null;
+
+/* ── Toast ── */
+function toast(msg, color){
+  const t=$('toast');
+  t.textContent=msg;
+  t.style.borderColor=color||'var(--border)';
+  t.style.color=color||'var(--text)';
+  t.classList.add('show');
+  if(toastTimer) clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>t.classList.remove('show'),3000);
+}
 
 /* ── Helpers ── */
 const $ = id => document.getElementById(id);
@@ -598,11 +633,16 @@ function render(){
 }
 
 function addOrUpdate(sig){
+  const isReallyNew = signals.findIndex(s=>s.symbol===sig.symbol&&s.signal_type===sig.signal_type)===-1;
   sig._new=true;
   const i=signals.findIndex(s=>s.symbol===sig.symbol&&s.signal_type===sig.signal_type);
   if(i!==-1) signals.splice(i,1);
   signals.unshift(sig);
   if(signals.length>400) signals.pop();
+  if(isReallyNew){
+    const icon=sig.direction==='LONG'?'🟢':'🔴';
+    toast(`${icon} ${sig.symbol} · ${sig.signal_type} · счёт ${sig.score}`, sig.direction==='LONG'?'var(--green)':'var(--red)');
+  }
   render();
 }
 function loadHistory(rows){ signals.length=0; rows.forEach(r=>signals.push(r)); render(); }
@@ -886,11 +926,50 @@ async function runDiag(){
   }catch(e){ $('diag-body').innerHTML=`<div class="drow"><span class="dv derr">Ошибка: ${esc(String(e))}</span></div>`; }
 }
 
+/* ── History ── */
+async function openHistory(){
+  $('history-modal').classList.add('open');
+  $('history-body').innerHTML='<div style="color:var(--muted);padding:12px">⏳ Загрузка…</div>';
+  try{
+    const d=await fetch('/api/trades?limit=30').then(r=>r.json());
+    const trades=d.trades||[];
+    if(!trades.length){ $('history-body').innerHTML='<div style="color:var(--muted);padding:12px">Сделок ещё нет</div>'; return; }
+    let totalPnl=0;
+    const rows=trades.map(t=>{
+      const pnl=t.pnl||0; totalPnl+=pnl;
+      const side=t.side==='Buy'?'🟢 LONG':'🔴 SHORT';
+      const status=t.status==='open'?'<span style="color:var(--accent)">Открыта</span>':'<span style="color:var(--muted)">Закрыта</span>';
+      const pnlCls=pnl>0?'dok':pnl<0?'derr':'';
+      const dt=t.closed_at?new Date(t.closed_at).toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):new Date(t.opened_at).toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'});
+      return `<div class="drow">
+        <span class="dk" style="min-width:90px">${esc(t.symbol).replace('USDT','')}/USDT</span>
+        <span class="dv" style="min-width:80px">${side}</span>
+        <span class="dv" style="min-width:60px">${status}</span>
+        <span class="dv ${pnlCls}" style="min-width:70px;text-align:right">${pnl!==0?(pnl>0?'+':'')+pnl.toFixed(2)+' $':'—'}</span>
+        <span class="dv" style="color:var(--muted);font-size:10px;margin-left:auto">${dt}</span>
+      </div>`;
+    }).join('');
+    const pnlColor=totalPnl>0?'var(--green)':totalPnl<0?'var(--red)':'var(--muted)';
+    $('history-body').innerHTML=`
+      <div style="padding:8px 0;margin-bottom:4px;display:flex;justify-content:space-between;font-weight:700">
+        <span>Всего сделок: ${trades.length}</span>
+        <span style="color:${pnlColor}">${totalPnl>0?'+':''}${totalPnl.toFixed(2)} USDT</span>
+      </div>${rows}`;
+  }catch(e){ $('history-body').innerHTML=`<div style="color:var(--red);padding:12px">Ошибка: ${esc(String(e))}</div>`; }
+}
+
 /* ── Boot ── */
 connect();
 setInterval(refreshStats,30000);
 setInterval(refreshBalance,60000);
-setInterval(refreshPositions,15000);
+setInterval(refreshPositions,5000);  // faster: every 5s
+
+// Auto-scan on load if no signals after 4s
+setTimeout(async()=>{
+  if(signals.length===0 && !scanBusy){
+    await doScan();
+  }
+}, 4000);
 </script>
 </body>
 </html>

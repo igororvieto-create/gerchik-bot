@@ -31,7 +31,12 @@ def _calc_atr(klines: list, period: int = 14) -> float:
             np.abs(lows[1:]  - closes[:-1]),
         ),
     )
-    return float(np.mean(tr[-period:]))
+    # Wilder's smoothing (EMA-style) instead of simple mean
+    tr_slice = tr[-period:]
+    atr_val = float(tr_slice[0])
+    for t in tr_slice[1:]:
+        atr_val = (atr_val * (period - 1) + float(t)) / period
+    return atr_val
 
 
 def _ob_imbalance(ob: dict) -> tuple[float, str]:
@@ -70,7 +75,9 @@ def _score_signal(
     elif oi_abs >= 5:
         score += 20
     elif oi_abs >= 3:
-        score += 10
+        score += 12
+    elif oi_abs >= 2:
+        score += 6
 
     # Volume spike component (0-30 pts)
     if vol_ratio >= 4:
@@ -81,6 +88,8 @@ def _score_signal(
         score += 15
     elif vol_ratio >= 1.5:
         score += 8
+    elif vol_ratio >= 1.3:
+        score += 4
 
     # Funding extremity (0-15 pts)
     fund_abs = abs(funding)
@@ -89,7 +98,9 @@ def _score_signal(
     elif fund_abs >= 0.05:
         score += 10
     elif fund_abs >= 0.03:
-        score += 5
+        score += 6
+    elif fund_abs >= 0.01:
+        score += 3
 
     # Orderbook imbalance (0-15 pts)
     ob_abs = abs(ob_ratio)
@@ -98,13 +109,15 @@ def _score_signal(
     elif ob_abs >= 0.20:
         score += 10
     elif ob_abs >= 0.10:
-        score += 5
+        score += 6
+    elif ob_abs >= 0.05:
+        score += 3
 
-    # Classify signal type — require ≥0.5% price confirmation to avoid
+    # Classify signal type — require ≥0.3% price confirmation to avoid
     # mislabelling flat-price OI expansion as directional accumulation/distribution
-    if oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change > 0.5:
+    if oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change > 0.3:
         sig_type = "ACCUMULATION"
-    elif oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change < -0.5:
+    elif oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change < -0.3:
         sig_type = "DISTRIBUTION"
     elif oi_change <= -cfg.OI_CHANGE_THRESHOLD:
         sig_type = "SQUEEZE"
@@ -137,8 +150,8 @@ def _calc_levels(price: float, atr: float, direction: str) -> dict:
     if price <= 0 or atr <= 0:
         return {"entry": price, "sl": 0.0, "tp1": 0.0, "tp2": 0.0, "tp3": 0.0, "rr": 0.0, "sl_pct": 0.0}
 
-    # 2×ATR SL with a minimum 0.3% floor to avoid near-zero stops on flat coins
-    sl_dist = max(atr * 2.0, price * 0.003)
+    # 1.5×ATR SL — tighter than 2× gives better R:R while still avoiding noise
+    sl_dist = max(atr * 1.5, price * 0.003)
     risk = sl_dist
 
     if direction == "LONG":
@@ -186,7 +199,7 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         # Fetch OI history, klines, and orderbook concurrently
         # Request limit=26 klines: [-1]=current incomplete, [-2]=last completed
         oi_hist, klines, ob = await asyncio.gather(
-            client.get_open_interest(symbol, interval="4h", limit=12),
+            client.get_open_interest(symbol, interval="4h", limit=2),
             client.get_klines(symbol, interval="240", limit=26),
             client.get_orderbook(symbol, limit=20),
         )

@@ -25,6 +25,8 @@ async def init_db() -> None:
         except OSError as e:
             log.warning(f"Could not create DB directory {dirpath!r}: {e}")
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,7 +82,9 @@ async def init_db() -> None:
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol_ts ON signals(symbol, ts)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status, opened_at)")
         await db.commit()
     log.info(f"DB initialised at {DB_PATH}")
 
@@ -181,6 +185,11 @@ async def cleanup_old_signals(keep_hours: int = 48) -> int:
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             cur = await db.execute("DELETE FROM signals WHERE ts < ?", (cutoff,))
+            # Also purge closed trades older than 90 days
+            old_trades = (datetime.utcnow() - timedelta(days=90)).isoformat()
+            await db.execute(
+                "DELETE FROM trades WHERE status='closed' AND closed_at < ?", (old_trades,)
+            )
             await db.commit()
             return cur.rowcount
     except Exception as e:

@@ -191,7 +191,18 @@ async def cleanup_old_signals(keep_hours: int = 48) -> int:
                 "DELETE FROM trades WHERE status='closed' AND closed_at < ?", (old_trades,)
             )
             await db.commit()
-            return cur.rowcount
+            removed = cur.rowcount
+
+        # Evict stale entries from in-memory cooldown dict to prevent unbounded growth
+        from core.state import state
+        cutoff_dt = datetime.utcnow() - timedelta(hours=keep_hours)
+        stale = [sym for sym, ts in state.signal_seen.items() if ts < cutoff_dt]
+        for sym in stale:
+            state.signal_seen.pop(sym, None)
+        if stale:
+            log.info(f"cleanup: evicted {len(stale)} stale signal_seen entries")
+
+        return removed
     except Exception as e:
         log.error(f"cleanup error: {e}")
         return 0

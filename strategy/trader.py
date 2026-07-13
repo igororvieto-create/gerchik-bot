@@ -123,8 +123,8 @@ async def monitor_positions(client: BybitClient) -> None:
         return
     _MONITORING = True
     try:
-        if not cfg.AUTO_TRADE:
-            return
+        # Always monitor even if AUTO_TRADE was toggled off mid-session —
+        # otherwise open positions become orphaned (never recorded as closed)
         if not client.api_key:
             return
 

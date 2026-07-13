@@ -44,5 +44,10 @@ class Config:
     LEVERAGE:        int   = int(os.getenv("LEVERAGE",          "5").strip())
     TRADE_MIN_SCORE: int   = int(os.getenv("TRADE_MIN_SCORE",   "60").strip())
 
+    # Risk guards
+    MAX_SAME_DIRECTION:     int   = int(os.getenv("MAX_SAME_DIRECTION",     "2").strip())
+    DAILY_LOSS_LIMIT_PCT:   float = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "3.0").strip())
+    ABORT_ON_LEVERAGE_FAIL: bool  = os.getenv("ABORT_ON_LEVERAGE_FAIL", "true").strip().lower() == "true"
+
 
 cfg = Config()

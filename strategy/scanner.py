@@ -56,62 +56,83 @@ def _ob_imbalance(ob: dict) -> tuple[float, str]:
 
 
 def _classify(oi_change: float, vol_ratio: float, funding: float, price_change: float) -> str:
-    """Classify the signal type from market data."""
-    fund_abs = abs(funding)
+    """Classify signal type from OI/volume/funding movement. Pure classification,
+    independent of scoring — kept separate so direction/confidence logic can run
+    before we decide how much to trust the signal."""
     if oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change < -0.3:
-        return "DISTRIBUTION"
+        return "DISTRIBUTION"   # OI rises + price falls = bearish positioning
     elif oi_change >= cfg.OI_CHANGE_THRESHOLD:
-        return "ACCUMULATION"
+        return "ACCUMULATION"   # OI rises + flat/rising price = bullish positioning
     elif oi_change <= -cfg.OI_CHANGE_THRESHOLD:
-        return "SQUEEZE"
+        return "SQUEEZE"        # OI falls sharply = positions closing/liquidating
     elif vol_ratio >= cfg.VOL_SPIKE_MULT * 1.5:
         return "VOLUME_SPIKE"
-    elif fund_abs >= cfg.FUNDING_EXTREME:
+    elif abs(funding) >= cfg.FUNDING_EXTREME:
         return "FUNDING_EXTREME"
     else:
         return "MOMENTUM"
 
 
 def _direction(
-    sig_type: str, price_change: float, ob_bias: str, funding: float, ob_ratio: float
+    sig_type: str,
+    price_change: float,
+    ob_bias: str,
+    funding: float,
+    ob_ratio: float,
 ) -> tuple[str, float]:
-    """Return (direction, confidence) where confidence is fraction of votes agreeing."""
+    """
+    Determine trade direction AND a confidence score (0-1) reflecting how many
+    independent signals (price action, orderbook, funding) actually agree with
+    that direction. This is what was missing before: OI/volume told us a move
+    was happening, but nothing checked whether the other factors confirmed it,
+    which is how a SQUEEZE with -17% OI and a SELL-leaning orderbook still came
+    out as a 95-score LONG.
+    """
     votes: list[str] = []
+
+    # Price-action vote (ignore near-flat moves — noise, not signal)
     if abs(price_change) > 0.1:
         votes.append("LONG" if price_change > 0 else "SHORT")
+
+    # Orderbook vote
     if ob_bias != "NEUTRAL":
         votes.append("LONG" if ob_bias == "BUY" else "SHORT")
+
+    # Funding vote — negative funding means shorts pay longs (squeeze-up pressure),
+    # positive funding means longs pay shorts (squeeze-down pressure)
     if abs(funding) >= 0.01:
-        # Positive funding = longs pay shorts → contrarian SHORT signal
-        votes.append("SHORT" if funding > 0 else "LONG")
+        votes.append("LONG" if funding < 0 else "SHORT")
 
     if sig_type == "ACCUMULATION":
         primary = "LONG"
     elif sig_type == "DISTRIBUTION":
         primary = "SHORT"
     elif sig_type == "SQUEEZE":
-        if votes:
-            long_votes = sum(1 for v in votes if v == "LONG")
-            short_votes = len(votes) - long_votes
-            if long_votes > short_votes:
-                primary = "LONG"
-            elif short_votes > long_votes:
-                primary = "SHORT"
-            else:
-                primary = "LONG" if price_change > 0 else "SHORT"
+        # Sharp OI drop is direction-neutral by itself — it can be a short squeeze
+        # (bullish) or long capitulation (bearish). Let orderbook + funding votes
+        # decide; only fall back to raw price change if those are tied/absent.
+        long_votes  = votes.count("LONG")
+        short_votes = votes.count("SHORT")
+        if long_votes > short_votes:
+            primary = "LONG"
+        elif short_votes > long_votes:
+            primary = "SHORT"
         else:
             primary = "LONG" if price_change > 0 else "SHORT"
     elif sig_type == "FUNDING_EXTREME":
         primary = "SHORT" if funding > 0 else "LONG"
-    elif ob_bias != "NEUTRAL":
-        primary = "LONG" if ob_bias == "BUY" else "SHORT"
     else:
-        primary = "LONG" if price_change > 0 else "SHORT"
+        if ob_bias != "NEUTRAL":
+            primary = "LONG" if ob_bias == "BUY" else "SHORT"
+        else:
+            primary = "LONG" if price_change > 0 else "SHORT"
 
     if votes:
         agree = sum(1 for v in votes if v == primary)
         confidence = agree / len(votes)
     else:
+        # No independent votes available at all — treat as low-confidence,
+        # not neutral, so it doesn't silently sail through un-penalized.
         confidence = 0.4
 
     return primary, confidence
@@ -124,7 +145,10 @@ def _score_signal(
     ob_ratio: float,
     confidence: float,
 ) -> int:
-    """Score 0-100, capped by directional confluence (confidence)."""
+    """Score 0-100. Magnitude components (how big the anomaly is) are computed
+    first, then capped by confluence — how many independent factors actually
+    agree with the chosen direction. A huge OI/volume anomaly with contradicting
+    orderbook/funding no longer reaches a top score."""
     score = 0
 
     # OI change component (0-40 pts)
@@ -152,7 +176,9 @@ def _score_signal(
     elif vol_ratio >= 1.3:
         score += 4
 
-    # Funding extremity (0-15 pts) — raised thresholds vs old version
+    # Funding extremity (0-15 pts) — thresholds raised; 0.1% was triggering
+    # max points on almost any funding print, effectively making this
+    # component binary instead of graduated
     fund_abs = abs(funding)
     if fund_abs >= 0.5:
         score += 15
@@ -176,13 +202,18 @@ def _score_signal(
 
     raw_score = min(score, 100)
 
-    # Confluence cap: contradicting signals reduce maximum achievable score
+    # --- Confluence cap: this is the fix for the contradicting-signal bug ---
+    # confidence is the fraction of independent votes (price/OB/funding) that
+    # agree with the chosen direction. Low confidence means the magnitude is
+    # real but direction is guesswork — cap the score hard rather than let
+    # raw magnitude points carry it to 90+.
     if confidence < 0.34:
         raw_score = min(raw_score, 35)
     elif confidence < 0.5:
         raw_score = min(raw_score, 55)
     elif confidence < 0.75:
         raw_score = min(raw_score, 75)
+    # confidence >= 0.75: no cap, raw magnitude score stands
 
     return raw_score
 
@@ -281,8 +312,14 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         # Orderbook
         ob_ratio, ob_bias = _ob_imbalance(ob)
 
+        # 1) classify signal type from raw OI/volume/funding movement
         sig_type = _classify(oi_change, vol_ratio, funding, price_chg)
+
+        # 2) resolve direction + confluence confidence BEFORE scoring, so score
+        #    can be capped when factors disagree with the chosen direction
         direction, confidence = _direction(sig_type, price_chg, ob_bias, funding, ob_ratio)
+
+        # 3) score with confluence cap applied
         score = _score_signal(oi_change, vol_ratio, funding, ob_ratio, confidence)
         if score < cfg.MIN_SCORE:
             return None

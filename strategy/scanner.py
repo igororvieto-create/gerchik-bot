@@ -90,10 +90,15 @@ def _direction(
     elif sig_type == "DISTRIBUTION":
         primary = "SHORT"
     elif sig_type == "SQUEEZE":
-        # Use vote majority if available, otherwise fall back to price direction
         if votes:
             long_votes = sum(1 for v in votes if v == "LONG")
-            primary = "LONG" if long_votes > len(votes) / 2 else "SHORT"
+            short_votes = len(votes) - long_votes
+            if long_votes > short_votes:
+                primary = "LONG"
+            elif short_votes > long_votes:
+                primary = "SHORT"
+            else:
+                primary = "LONG" if price_change > 0 else "SHORT"
         else:
             primary = "LONG" if price_change > 0 else "SHORT"
     elif sig_type == "FUNDING_EXTREME":

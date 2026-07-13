@@ -55,14 +55,71 @@ def _ob_imbalance(ob: dict) -> tuple[float, str]:
     return ratio, "NEUTRAL"
 
 
+def _classify(oi_change: float, vol_ratio: float, funding: float, price_change: float) -> str:
+    """Classify the signal type from market data."""
+    fund_abs = abs(funding)
+    if oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change < -0.3:
+        return "DISTRIBUTION"
+    elif oi_change >= cfg.OI_CHANGE_THRESHOLD:
+        return "ACCUMULATION"
+    elif oi_change <= -cfg.OI_CHANGE_THRESHOLD:
+        return "SQUEEZE"
+    elif vol_ratio >= cfg.VOL_SPIKE_MULT * 1.5:
+        return "VOLUME_SPIKE"
+    elif fund_abs >= cfg.FUNDING_EXTREME:
+        return "FUNDING_EXTREME"
+    else:
+        return "MOMENTUM"
+
+
+def _direction(
+    sig_type: str, price_change: float, ob_bias: str, funding: float, ob_ratio: float
+) -> tuple[str, float]:
+    """Return (direction, confidence) where confidence is fraction of votes agreeing."""
+    votes: list[str] = []
+    if abs(price_change) > 0.1:
+        votes.append("LONG" if price_change > 0 else "SHORT")
+    if ob_bias != "NEUTRAL":
+        votes.append("LONG" if ob_bias == "BUY" else "SHORT")
+    if abs(funding) >= 0.01:
+        # Positive funding = longs pay shorts → contrarian SHORT signal
+        votes.append("SHORT" if funding > 0 else "LONG")
+
+    if sig_type == "ACCUMULATION":
+        primary = "LONG"
+    elif sig_type == "DISTRIBUTION":
+        primary = "SHORT"
+    elif sig_type == "SQUEEZE":
+        # Use vote majority if available, otherwise fall back to price direction
+        if votes:
+            long_votes = sum(1 for v in votes if v == "LONG")
+            primary = "LONG" if long_votes > len(votes) / 2 else "SHORT"
+        else:
+            primary = "LONG" if price_change > 0 else "SHORT"
+    elif sig_type == "FUNDING_EXTREME":
+        primary = "SHORT" if funding > 0 else "LONG"
+    elif ob_bias != "NEUTRAL":
+        primary = "LONG" if ob_bias == "BUY" else "SHORT"
+    else:
+        primary = "LONG" if price_change > 0 else "SHORT"
+
+    if votes:
+        agree = sum(1 for v in votes if v == primary)
+        confidence = agree / len(votes)
+    else:
+        confidence = 0.4
+
+    return primary, confidence
+
+
 def _score_signal(
     oi_change: float,
     vol_ratio: float,
     funding: float,
     ob_ratio: float,
-    price_change: float,
-) -> tuple[int, str]:
-    """Score 0-100 and classify signal type."""
+    confidence: float,
+) -> int:
+    """Score 0-100, capped by directional confluence (confidence)."""
     score = 0
 
     # OI change component (0-40 pts)
@@ -90,15 +147,15 @@ def _score_signal(
     elif vol_ratio >= 1.3:
         score += 4
 
-    # Funding extremity (0-15 pts)
+    # Funding extremity (0-15 pts) — raised thresholds vs old version
     fund_abs = abs(funding)
-    if fund_abs >= 0.1:
+    if fund_abs >= 0.5:
         score += 15
-    elif fund_abs >= 0.05:
+    elif fund_abs >= 0.25:
         score += 10
-    elif fund_abs >= 0.03:
+    elif fund_abs >= 0.1:
         score += 6
-    elif fund_abs >= 0.01:
+    elif fund_abs >= 0.03:
         score += 3
 
     # Orderbook imbalance (0-15 pts)
@@ -112,35 +169,17 @@ def _score_signal(
     elif ob_abs >= 0.05:
         score += 3
 
-    # Classify signal type based on OI direction, then price for ACCUMULATION/DISTRIBUTION
-    if oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change < -0.3:
-        sig_type = "DISTRIBUTION"   # OI rises + price falls = bearish positioning
-    elif oi_change >= cfg.OI_CHANGE_THRESHOLD:
-        sig_type = "ACCUMULATION"   # OI rises + flat/rising price = bullish positioning
-    elif oi_change <= -cfg.OI_CHANGE_THRESHOLD:
-        sig_type = "SQUEEZE"
-    elif vol_ratio >= cfg.VOL_SPIKE_MULT * 1.5:
-        sig_type = "VOLUME_SPIKE"
-    elif fund_abs >= cfg.FUNDING_EXTREME:
-        sig_type = "FUNDING_EXTREME"
-    else:
-        sig_type = "MOMENTUM"
+    raw_score = min(score, 100)
 
-    return min(score, 100), sig_type
+    # Confluence cap: contradicting signals reduce maximum achievable score
+    if confidence < 0.34:
+        raw_score = min(raw_score, 35)
+    elif confidence < 0.5:
+        raw_score = min(raw_score, 55)
+    elif confidence < 0.75:
+        raw_score = min(raw_score, 75)
 
-
-def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float) -> str:
-    if sig_type == "ACCUMULATION":
-        return "LONG"
-    if sig_type == "DISTRIBUTION":
-        return "SHORT"
-    if sig_type == "SQUEEZE":
-        return "LONG" if price_change > 0 else "SHORT"
-    if sig_type == "FUNDING_EXTREME":
-        return "SHORT" if funding > 0 else "LONG"
-    if ob_bias != "NEUTRAL":
-        return "LONG" if ob_bias == "BUY" else "SHORT"
-    return "LONG" if price_change > 0 else "SHORT"
+    return raw_score
 
 
 def _calc_levels(price: float, atr: float, direction: str) -> dict:
@@ -237,15 +276,16 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         # Orderbook
         ob_ratio, ob_bias = _ob_imbalance(ob)
 
-        score, sig_type = _score_signal(oi_change, vol_ratio, funding, ob_ratio, price_chg)
+        sig_type = _classify(oi_change, vol_ratio, funding, price_chg)
+        direction, confidence = _direction(sig_type, price_chg, ob_bias, funding, ob_ratio)
+        score = _score_signal(oi_change, vol_ratio, funding, ob_ratio, confidence)
         if score < cfg.MIN_SCORE:
             return None
 
-        direction = _direction(sig_type, price_chg, ob_bias, funding)
         levels = _calc_levels(price, atr, direction)
 
         details = (
-            f"{sig_type} | {direction} | score={score} | "
+            f"{sig_type} | {direction} | score={score} | conf={confidence:.2f} | "
             f"OI {oi_change:+.1f}% | vol {vol_ratio:.1f}x | "
             f"funding {funding:+.3f}% | OB {ob_bias} | ATR {atr_pct:.2f}%"
         )

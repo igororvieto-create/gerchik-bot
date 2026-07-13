@@ -104,7 +104,7 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
 
         log.info(
             f"Opened {side} {sig.symbol} qty={qty} "
-            f"entry≈{sig.entry:.4f} SL={sig.sl:.4f} TP={sig.tp3:.4f} "
+            f"entry≈{sig.entry:.4f} SL={sig.sl:.4f} TP={sig.tp2:.4f} "
             f"risk={risk_usdt:.2f} USDT orderId={order_id}"
         )
         return True

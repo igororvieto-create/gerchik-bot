@@ -145,14 +145,16 @@ async def debug():
 
 @router.get("/api/scan")
 async def trigger_scan():
-    """Manually trigger a scan and return top signals found."""
+    """Manually trigger a scan: saves signals to DB, pushes via WS, returns top results."""
     from core.config import cfg
     if state.client is None:
         return JSONResponse({"error": "client not initialized"}, status_code=503)
-    from strategy.scanner import scan_all
+    from strategy.scanner import run_scan_and_broadcast
     import asyncio
     try:
-        signals = await asyncio.wait_for(scan_all(state.client), timeout=120)
+        signals = await asyncio.wait_for(
+            run_scan_and_broadcast(state.client, cfg.NTFY_URL), timeout=120
+        )
         return JSONResponse({
             "signals_found": len(signals),
             "min_score":     cfg.MIN_SCORE,
@@ -328,34 +330,37 @@ async def update_settings(request: Request):
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
 
     changes: dict = {}
-    if "auto_trade" in body:
-        cfg.AUTO_TRADE = bool(body["auto_trade"])
-        changes["auto_trade"] = cfg.AUTO_TRADE
-    if "min_score" in body:
-        v = int(body["min_score"])
-        if 5 <= v <= 100:
-            cfg.MIN_SCORE = v
-            changes["min_score"] = v
-    if "trade_min_score" in body:
-        v = int(body["trade_min_score"])
-        if 5 <= v <= 100:
-            cfg.TRADE_MIN_SCORE = v
-            changes["trade_min_score"] = v
-    if "risk_per_trade" in body:
-        v = float(body["risk_per_trade"])
-        if 0.1 <= v <= 5.0:
-            cfg.RISK_PER_TRADE = round(v, 2)
-            changes["risk_per_trade"] = cfg.RISK_PER_TRADE
-    if "max_positions" in body:
-        v = int(body["max_positions"])
-        if 1 <= v <= 20:
-            cfg.MAX_POSITIONS = v
-            changes["max_positions"] = v
-    if "leverage" in body:
-        v = int(body["leverage"])
-        if 1 <= v <= 50:
-            cfg.LEVERAGE = v
-            changes["leverage"] = v
+    try:
+        if "auto_trade" in body:
+            cfg.AUTO_TRADE = bool(body["auto_trade"])
+            changes["auto_trade"] = cfg.AUTO_TRADE
+        if "min_score" in body:
+            v = int(body["min_score"])
+            if 5 <= v <= 100:
+                cfg.MIN_SCORE = v
+                changes["min_score"] = v
+        if "trade_min_score" in body:
+            v = int(body["trade_min_score"])
+            if 5 <= v <= 100:
+                cfg.TRADE_MIN_SCORE = v
+                changes["trade_min_score"] = v
+        if "risk_per_trade" in body:
+            v = float(body["risk_per_trade"])
+            if 0.1 <= v <= 5.0:
+                cfg.RISK_PER_TRADE = round(v, 2)
+                changes["risk_per_trade"] = cfg.RISK_PER_TRADE
+        if "max_positions" in body:
+            v = int(body["max_positions"])
+            if 1 <= v <= 20:
+                cfg.MAX_POSITIONS = v
+                changes["max_positions"] = v
+        if "leverage" in body:
+            v = int(body["leverage"])
+            if 1 <= v <= 50:
+                cfg.LEVERAGE = v
+                changes["leverage"] = v
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": f"invalid parameter value: {exc}"}, status_code=400)
     log.info(f"Settings updated: {changes}")
     return JSONResponse({"ok": True, "changed": changes})
 
@@ -364,13 +369,16 @@ async def update_settings(request: Request):
 async def close_position_route(symbol: str):
     if state.client is None:
         return JSONResponse({"error": "client not initialized"}, status_code=503)
+    from core.state import Position
     pos = state.positions.get(symbol)
-    if pos is None:
+    if not isinstance(pos, Position):
+        # None means either absent or enter_trade sentinel (entry still in-flight)
         return JSONResponse({"error": f"no open position for {symbol}"}, status_code=404)
     try:
         result = await state.client.close_position(symbol, pos.side, pos.qty)
         if result.get("retCode", -1) == 0:
             state.positions.pop(symbol, None)
+            await db.save_trade_close(pos)
             log.info(f"Position {symbol} closed via dashboard")
             return JSONResponse({"ok": True, "symbol": symbol})
         return JSONResponse({"error": result.get("retMsg", "unknown error")}, status_code=400)

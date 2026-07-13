@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlencode
 
 import aiohttp
 
@@ -140,7 +141,7 @@ class BybitClient:
 
     async def _get(self, path: str, params: Dict = None, auth: bool = False) -> Dict:
         params = params or {}
-        query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+        query = urlencode(sorted(params.items()))
         url = BASE_URL + path + (f"?{query}" if query else "")
         for attempt in range(3):
             try:

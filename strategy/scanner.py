@@ -31,10 +31,9 @@ def _calc_atr(klines: list, period: int = 14) -> float:
             np.abs(lows[1:]  - closes[:-1]),
         ),
     )
-    # Wilder's smoothing (EMA-style) instead of simple mean
-    tr_slice = tr[-period:]
-    atr_val = float(tr_slice[0])
-    for t in tr_slice[1:]:
+    # Proper Wilder's: seed with SMA of first 'period' TR bars, then EMA the rest
+    atr_val = float(np.mean(tr[:period]))
+    for t in tr[period:]:
         atr_val = (atr_val * (period - 1) + float(t)) / period
     return atr_val
 
@@ -113,12 +112,11 @@ def _score_signal(
     elif ob_abs >= 0.05:
         score += 3
 
-    # Classify signal type — require ≥0.3% price confirmation to avoid
-    # mislabelling flat-price OI expansion as directional accumulation/distribution
-    if oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change > 0.3:
-        sig_type = "ACCUMULATION"
-    elif oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change < -0.3:
-        sig_type = "DISTRIBUTION"
+    # Classify signal type based on OI direction, then price for ACCUMULATION/DISTRIBUTION
+    if oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change < -0.3:
+        sig_type = "DISTRIBUTION"   # OI rises + price falls = bearish positioning
+    elif oi_change >= cfg.OI_CHANGE_THRESHOLD:
+        sig_type = "ACCUMULATION"   # OI rises + flat/rising price = bullish positioning
     elif oi_change <= -cfg.OI_CHANGE_THRESHOLD:
         sig_type = "SQUEEZE"
     elif vol_ratio >= cfg.VOL_SPIKE_MULT * 1.5:
@@ -349,7 +347,7 @@ async def scan_all(client: BybitClient) -> List[Signal]:
         _SCANNING = False
 
 
-async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> None:
+async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> List[Signal]:
     """Called by APScheduler: scan, save to DB, broadcast via WS, push via ntfy."""
     # Refresh balance on every scan if API keys are configured
     if client.api_key and client.secret:
@@ -424,3 +422,5 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> Non
             dead.add(ws)
     for ws in dead:
         state.remove_ws(ws)
+
+    return signals

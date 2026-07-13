@@ -705,7 +705,10 @@ async function refreshBalance(){
 }
 
 /* ── Positions refresh ── */
+let _posRefreshInFlight=false;
 async function refreshPositions(){
+  if(_posRefreshInFlight) return;
+  _posRefreshInFlight=true;
   try{
     const d=await fetch('/api/positions').then(r=>r.json());
     const pos=(d.positions||[]).filter(Boolean);
@@ -725,7 +728,7 @@ async function refreshPositions(){
           </div>
           <div class="pos-meta">
             <span>Вход: <b>${fmtP(p.entry)}</b></span>
-            <span>SL: ${fmtP(p.sl)} · TP: ${fmtP(p.tp3)}</span>
+            <span>SL: ${fmtP(p.sl)} · TP: ${fmtP(p.tp2)}</span>
           </div>
           <span class="pos-pnl ${pnlColor}">${pnl>=0?'+':''}${pnl.toFixed(2)} USDT</span>
           <button class="pos-close-btn" id="cbtn-${sym}" onclick="closePos('${sym}')">❌ Закрыть</button>
@@ -733,6 +736,7 @@ async function refreshPositions(){
       }).join('');
     } else panel.style.display='none';
   }catch{}
+  finally{ _posRefreshInFlight=false; }
 }
 
 /* ── Close position ── */
@@ -940,7 +944,7 @@ async function openHistory(){
       const side=t.side==='Buy'?'🟢 LONG':'🔴 SHORT';
       const status=t.status==='open'?'<span style="color:var(--accent)">Открыта</span>':'<span style="color:var(--muted)">Закрыта</span>';
       const pnlCls=pnl>0?'dok':pnl<0?'derr':'';
-      const dt=t.closed_at?new Date(t.closed_at).toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):new Date(t.opened_at).toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'});
+      const dt=t.closed_at?new Date(t.closed_at).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):new Date(t.opened_at).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit'});
       return `<div class="drow">
         <span class="dk" style="min-width:90px">${esc(t.symbol).replace('USDT','')}/USDT</span>
         <span class="dv" style="min-width:80px">${side}</span>

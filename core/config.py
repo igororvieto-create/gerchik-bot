@@ -23,7 +23,7 @@ class Config:
     )
 
     # Signal thresholds
-    MIN_SCORE:              int   = int(os.getenv("MIN_SCORE",              "20").strip())
+    MIN_SCORE:              int   = int(os.getenv("MIN_SCORE",              "40").strip())
     OI_CHANGE_THRESHOLD:    float = float(os.getenv("OI_CHANGE_THRESHOLD",  "2.0").strip())
     VOL_SPIKE_MULT:         float = float(os.getenv("VOL_SPIKE_MULT",       "1.5").strip())
     FUNDING_EXTREME:        float = float(os.getenv("FUNDING_EXTREME",      "0.03").strip())
@@ -42,7 +42,7 @@ class Config:
     MAX_MARGIN_PCT:  float = float(os.getenv("MAX_MARGIN_PCT",  "10.0").strip())
     MAX_POSITIONS:   int   = int(os.getenv("MAX_POSITIONS",     "3").strip())
     LEVERAGE:        int   = int(os.getenv("LEVERAGE",          "5").strip())
-    TRADE_MIN_SCORE: int   = int(os.getenv("TRADE_MIN_SCORE",   "55").strip())
+    TRADE_MIN_SCORE: int   = int(os.getenv("TRADE_MIN_SCORE",   "60").strip())
 
 
 cfg = Config()

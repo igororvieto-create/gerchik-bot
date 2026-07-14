@@ -23,6 +23,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stdout,
+    force=True,   # сносит хендлеры, поставленные библиотеками при импорте (apscheduler и др.)
 )
 log = logging.getLogger("main")
 

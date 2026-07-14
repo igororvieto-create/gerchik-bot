@@ -4,7 +4,8 @@
 FastAPI + uvicorn на Railway, дашборд в static/index.html, БД — aiosqlite.
 
 ## Структура
-- `strategy/scanner.py` — скоринг-движок: _classify → _direction (voting + confidence) → _score_signal (confluence caps)
+- `strategy/scanner.py` — скоринг-движок: VSA + ключевые уровни (swing) + MTF-фильтр + MIN_RR;
+  _direction (voting + confidence) → _apply_confluence_cap. Confluence-капы удалять НЕЛЬЗЯ.
 - `strategy/trader.py` — вход/мониторинг позиций, риск-гарды
 - `core/config.py` — все параметры (env vars)
 - `core/state.py` — in-memory состояние (Signal, Position, state singleton)

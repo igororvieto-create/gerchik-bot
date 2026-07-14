@@ -32,6 +32,14 @@ class Config:
     MIN_VOL_24H:            float = float(os.getenv("MIN_VOL_24H",          "2000000").strip())
     SIGNAL_COOLDOWN_MIN:    int   = int(os.getenv("SIGNAL_COOLDOWN_MIN",    "20").strip())
 
+    # Gerchik methodology: key levels, MTF, R:R
+    MIN_RR:             float = float(os.getenv("MIN_RR",             "3.0").strip())
+    KEY_LEVEL_LOOKBACK: int   = int(os.getenv("KEY_LEVEL_LOOKBACK",   "20").strip())
+    KEY_LEVEL_WING:     int   = int(os.getenv("KEY_LEVEL_WING",       "2").strip())
+    KEY_LEVEL_ATR_MULT: float = float(os.getenv("KEY_LEVEL_ATR_MULT", "1.0").strip())
+    REQUIRE_MTF_ALIGN:  bool  = os.getenv("REQUIRE_MTF_ALIGN", "true").strip().lower() == "true"
+    MTF_TREND_LOOKBACK: int   = int(os.getenv("MTF_TREND_LOOKBACK",   "6").strip())
+
     # Signal history
     MAX_SIGNALS_DB:  int = int(os.getenv("MAX_SIGNALS_DB",  "500").strip())
     SIGNAL_TTL_HOURS: int = int(os.getenv("SIGNAL_TTL_HOURS", "24").strip())

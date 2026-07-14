@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from typing import List
 
@@ -16,9 +17,12 @@ from strategy.scanner import run_scan_and_broadcast
 from strategy.trader import monitor_positions
 from api.routes import router
 
+# stdout, не stderr: Railway помечает весь stderr как severity=error,
+# из-за чего обычные INFO-строки выглядят в логах как ошибки
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout,
 )
 log = logging.getLogger("main")
 

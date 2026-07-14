@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import numpy as np
@@ -26,6 +26,37 @@ KEY_LEVEL_WING     = getattr(cfg, "KEY_LEVEL_WING", 2)         # "плечи" ф
 KEY_LEVEL_ATR_MULT = getattr(cfg, "KEY_LEVEL_ATR_MULT", 1.0)   # макс. расстояние цены до уровня (в ATR)
 REQUIRE_MTF_ALIGN  = getattr(cfg, "REQUIRE_MTF_ALIGN", True)   # жёсткий фильтр по совпадению трендов TF
 MTF_TREND_LOOKBACK = getattr(cfg, "MTF_TREND_LOOKBACK", 6)     # свечей назад для определения тренда
+MIN_LISTING_AGE_DAYS = getattr(cfg, "MIN_LISTING_AGE_DAYS", 14)  # не торговать свежие листинги младше N дней
+
+# Дата листинга не меняется — кэшируем per-symbol, чтобы не дёргать
+# get_instrument_info на каждый скан для одних и тех же пар.
+_LISTING_AGE_CACHE: dict[str, float] = {}  # symbol -> launchTime (ms since epoch)
+
+
+async def _is_listing_old_enough(client: BybitClient, symbol: str) -> bool:
+    """
+    True = пара торгуется достаточно давно (или дата листинга недоступна —
+    fail-open с warning, чтобы баг в одном поле не остановил весь бот).
+    False = слишком свежий листинг, пропускаем как требует инвариант
+    "не торговать новостные/листинговые спайки".
+    """
+    launch_ms = _LISTING_AGE_CACHE.get(symbol)
+    if launch_ms is None:
+        try:
+            info = await client.get_instrument_info(symbol)
+            launch_ms = float(info.get("launchTime") or 0)
+        except Exception as e:
+            log.warning(f"{symbol}: get_instrument_info (listing age) failed — {e}")
+            return True  # fail-open: не блокируем торговлю из-за сбоя API
+        if launch_ms > 0:
+            _LISTING_AGE_CACHE[symbol] = launch_ms
+        else:
+            # Бирже нечего вернуть по launchTime — не можем оценить возраст,
+            # пропускаем как "недостаточно данных", а не как "слишком молодой".
+            return True
+
+    age_days = (datetime.now(timezone.utc).timestamp() * 1000 - launch_ms) / 86_400_000
+    return age_days >= MIN_LISTING_AGE_DAYS
 
 
 def _calc_atr(klines: list, period: int = 14) -> float:
@@ -381,6 +412,12 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         if abs(price_chg) < cfg.PRICE_CHANGE_MIN and abs(funding) < 0.01:
             return None
 
+        # Инвариант: не торговать новостные/листинговые спайки. Проверяем
+        # ДО тяжёлых запросов (klines/orderbook/OI), чтобы не тратить на
+        # свежие листинги лишние вызовы API.
+        if not await _is_listing_old_enough(client, symbol):
+            return None
+
         # Добавили 1h klines для MTF-подтверждения тренда наряду с 4h
         oi_hist, klines, ob, klines_1h = await asyncio.gather(
             client.get_open_interest(symbol, interval="4h", limit=2),
@@ -454,13 +491,23 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         if REQUIRE_MTF_ALIGN:
             trend_4h = _trend_direction(klines)
             trend_1h = _trend_direction(klines_1h)
-            wanted = "UP" if direction == "LONG" else "DOWN"
             opposite = "DOWN" if direction == "LONG" else "UP"
             if trend_4h == opposite or trend_1h == opposite:
                 return None  # таймфреймы против направления сделки — пропускаем
 
-        # Требуем, чтобы цена была НЕДАЛЕКО от ключевого уровня (вход от уровня, не с потолка)
-        if level_dist_atr is None or level_dist_atr > KEY_LEVEL_ATR_MULT:
+        # Требуем, чтобы цена была НЕДАЛЕКО от уровня, который реально станет
+        # SL-якорем для этого direction (resistance для SHORT, support для
+        # LONG). Раньше здесь проверялась близость к ЛЮБОМУ ближайшему уровню
+        # (level_dist_atr = min(support, resistance)), а SL в _calc_levels
+        # ставится за уровнем В СТОРОНУ СДЕЛКИ — это два разных уровня, и
+        # сигнал мог пройти фильтр "рядом с уровнем" по одной стороне, а SL
+        # уехать далеко на другой (реальный кейс: HOME/USDT, SL%=23% при
+        # ATR%=3.27%, в 7 раз шире нормы).
+        relevant_level = support if direction == "LONG" else resistance
+        if relevant_level is None or atr <= 0:
+            return None
+        relevant_dist_atr = abs(price - relevant_level) / atr
+        if relevant_dist_atr > KEY_LEVEL_ATR_MULT:
             return None
 
         levels = _calc_levels(price, atr, direction, support, resistance)

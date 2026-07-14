@@ -39,6 +39,7 @@ class Config:
     KEY_LEVEL_ATR_MULT: float = float(os.getenv("KEY_LEVEL_ATR_MULT", "1.0").strip())
     REQUIRE_MTF_ALIGN:  bool  = os.getenv("REQUIRE_MTF_ALIGN", "true").strip().lower() == "true"
     MTF_TREND_LOOKBACK: int   = int(os.getenv("MTF_TREND_LOOKBACK",   "6").strip())
+    MIN_LISTING_AGE_DAYS: int = int(os.getenv("MIN_LISTING_AGE_DAYS", "14").strip())
 
     # Signal history
     MAX_SIGNALS_DB:  int = int(os.getenv("MAX_SIGNALS_DB",  "500").strip())

@@ -96,6 +96,10 @@ async def get_balance():
                     _balance_cache["value"] = fresh
             except Exception as e:
                 result["error"] = str(e)
+    # Surface the exact Bybit-side reason recorded by the client (IP whitelist,
+    # missing permissions, empty account, ...) — a bare 0.0 is undiagnosable
+    if result["balance"] == 0 and state.last_balance_error and "error" not in result:
+        result["error"] = state.last_balance_error
     return JSONResponse(result)
 
 

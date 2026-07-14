@@ -250,15 +250,22 @@ class BybitClient:
     # ── Authenticated trading ─────────────────────────────────────────────────
 
     async def get_balance(self) -> float:
-        """Return available USDT balance (tries UNIFIED then CONTRACT account)."""
+        """Return available USDT balance (tries UNIFIED then CONTRACT account).
+        Records the reason for a zero result in state.last_balance_error so the
+        API/dashboard can show it, not just the server log."""
+        from core.state import state
+        errors: list = []
+        key_worked = False
         for acc_type in ("UNIFIED", "CONTRACT"):
             data = await self._get("/v5/account/wallet-balance",
                                    {"accountType": acc_type}, auth=True)
             ret_code = data.get("retCode", -1)
             ret_msg  = data.get("retMsg", "no response")
             if ret_code != 0:
+                errors.append(f"{acc_type}: retCode={ret_code} {ret_msg}")
                 log.warning(f"get_balance {acc_type}: retCode={ret_code} msg={ret_msg}")
                 continue
+            key_worked = True
             try:
                 for acc in data.get("result", {}).get("list", []):
                     for coin in acc.get("coin", []):
@@ -270,10 +277,20 @@ class BybitClient:
                                 available = float(coin.get("walletBalance") or 0)
                             log.info(f"get_balance {acc_type}: USDT available={available}")
                             if available > 0:
+                                state.last_balance_error = ""
                                 return available
             except Exception as e:
+                errors.append(f"{acc_type}: parse error {e}")
                 log.warning(f"get_balance {acc_type}: parse error — {e}")
-        log.warning("get_balance: 0 — check API key permissions and IP whitelist")
+        if key_worked and not errors:
+            # API key is fine — the account simply holds no USDT
+            state.last_balance_error = (
+                "API key OK, but USDT balance is 0 on UNIFIED/CONTRACT — "
+                "transfer funds to the Unified Trading account"
+            )
+        else:
+            state.last_balance_error = "; ".join(errors) if errors else "no response from Bybit"
+        log.warning(f"get_balance: 0 — {state.last_balance_error}")
         return 0.0
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:

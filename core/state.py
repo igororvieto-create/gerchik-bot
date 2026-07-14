@@ -95,6 +95,7 @@ class AppState:
         self.balance: float = 0.0
         self.client: Any = None  # set by main.py after BybitClient init
         self.last_balance_error: str = ""
+        self.last_scan_error: str = ""  # non-empty if the most recent scan failed
         self.signal_seen: Dict[str, datetime] = {}  # symbol → last broadcast time
 
     def add_ws(self, ws) -> None:

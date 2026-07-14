@@ -554,6 +554,7 @@ async def scan_all(client: BybitClient) -> List[Signal]:
         state.last_scan_at = datetime.utcnow()
         state.scan_count += 1
         state.total_signals += len(signals)
+        state.last_scan_error = ""
 
         log.info(f"scan_all: found {len(signals)} signals (scan #{state.scan_count})")
         if signals:
@@ -566,7 +567,12 @@ async def scan_all(client: BybitClient) -> List[Signal]:
         return signals
 
     except Exception as e:
-        log.error(f"scan_all error: {e}")
+        # Неудачный скан тоже учитываем: иначе счётчик замирает, дашборд
+        # вечно показывает старый номер скана и сбой снаружи не виден
+        state.last_scan_at = datetime.utcnow()
+        state.scan_count += 1
+        state.last_scan_error = str(e)
+        log.error(f"scan_all error (scan #{state.scan_count}): {e}")
         return []
     finally:
         _SCANNING = False
@@ -632,6 +638,7 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> Lis
         "scan_count":   state.scan_count,
         "last_scan_at": state.last_scan_at.isoformat() + "Z" if state.last_scan_at else None,
         "signals_found": len(signals),
+        "scan_error":   state.last_scan_error or None,
     })
     dead = set()
     for ws in state.ws_clients:

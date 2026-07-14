@@ -51,6 +51,7 @@ async def health():
         "scan_count":   state.scan_count,
         "last_scan_at": state.last_scan_at.isoformat() + "Z" if state.last_scan_at else None,
         "ws_clients":   len(state.ws_clients),
+        "scan_error":   state.last_scan_error or None,
     }
 
 

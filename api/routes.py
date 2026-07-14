@@ -173,19 +173,34 @@ async def trigger_scan():
 
 @router.get("/api/diagnostic")
 async def diagnostic():
-    """Deep pipeline test: fetches tickers + runs full analysis on top symbol."""
+    """Deep pipeline test: fetches tickers + runs full analysis on top symbol.
+
+    ФИКС: раньше get_tickers() был внутри общего try/except, и на его сбое
+    result["tickers_error"] никогда не устанавливался — только result["error"].
+    Фронтенд (runDiag() в index.html) ждёт именно tickers_error, чтобы
+    показать подсказку "Добавьте BYBIT_PROXY в Railway Variables" — она
+    никогда не срабатывала. Теперь get_tickers() обёрнут отдельно.
+    """
     import asyncio
     if state.client is None:
         return JSONResponse({"error": "client not initialized"}, status_code=503)
 
     result: dict = {}
     try:
-        # Step 1: tickers
-        tickers = await state.client.get_tickers()
+        # Step 1: tickers — отдельный try/except, чтобы гарантированно
+        # заполнить tickers_error при сбое (его ждёт фронтенд)
+        try:
+            tickers = await state.client.get_tickers()
+        except Exception as te:
+            result["tickers_error"] = str(te)
+            result["verdict"] = f"FAIL: get_tickers raised {te} — Bybit API unreachable or IP blocked"
+            return JSONResponse(result)
+
         usdt = [t for t in tickers if t.get("symbol", "").endswith("USDT")]
         result["tickers_total"] = len(tickers)
         result["tickers_usdt"]  = len(usdt)
         if not usdt:
+            result["tickers_error"] = "get_tickers returned 0 USDT tickers"
             result["verdict"] = "FAIL: get_tickers returned 0 USDT tickers — Bybit API unreachable or IP blocked"
             return JSONResponse(result)
 

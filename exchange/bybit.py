@@ -282,11 +282,14 @@ class BybitClient:
             except Exception as e:
                 errors.append(f"{acc_type}: parse error {e}")
                 log.warning(f"get_balance {acc_type}: parse error — {e}")
-        if key_worked and not errors:
-            # API key is fine — the account simply holds no USDT
+        if key_worked:
+            # At least one account type answered with retCode=0 — the key is
+            # fine, the account simply holds no USDT. Errors from the other
+            # account type (e.g. "CONTRACT not supported" on UTA accounts)
+            # are noise for this diagnosis.
             state.last_balance_error = (
-                "API key OK, but USDT balance is 0 on UNIFIED/CONTRACT — "
-                "transfer funds to the Unified Trading account"
+                "API key OK, but USDT balance is 0 on the Unified Trading account — "
+                "transfer funds (Funding → Unified Trading)"
             )
         else:
             state.last_balance_error = "; ".join(errors) if errors else "no response from Bybit"

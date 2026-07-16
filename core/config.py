@@ -55,7 +55,8 @@ class Config:
 
     # Risk guards
     MAX_SAME_DIRECTION:     int   = int(os.getenv("MAX_SAME_DIRECTION",     "2").strip())
-    DAILY_LOSS_LIMIT_PCT:   float = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "3.0").strip())
+    # 6% допускает 2 стопа при риске 3% или 6 стопов при риске 1%
+    DAILY_LOSS_LIMIT_PCT:   float = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "6.0").strip())
     ABORT_ON_LEVERAGE_FAIL: bool  = os.getenv("ABORT_ON_LEVERAGE_FAIL", "true").strip().lower() == "true"
 
 

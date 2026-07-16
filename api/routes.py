@@ -366,7 +366,8 @@ async def update_settings(request: Request):
                 changes["trade_min_score"] = v
         if "risk_per_trade" in body:
             v = float(body["risk_per_trade"])
-            if 0.1 <= v <= 5.0:
+            # Инвариант проекта: риск на сделку 1-3%, потолок жёсткий
+            if 0.1 <= v <= 3.0:
                 cfg.RISK_PER_TRADE = round(v, 2)
                 changes["risk_per_trade"] = cfg.RISK_PER_TRADE
         if "max_positions" in body:

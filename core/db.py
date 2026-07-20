@@ -138,13 +138,16 @@ async def save_trade_close(pos: Position, exit_price: float = 0.0, pnl: float = 
                     (exit_price, pnl, datetime.utcnow().isoformat(), pos.symbol, pos.order_id),
                 )
             else:
-                cur = await db.execute(
+                # No order_id: close only the MOST RECENT open row — a blanket
+                # WHERE symbol+status would stamp every stale open row (e.g.
+                # left over from a crash) with this trade's exit/pnl
+                await db.execute(
                     """UPDATE trades SET status='closed', exit_price=?, pnl=?, closed_at=?
-                       WHERE symbol=? AND status='open'""",
+                       WHERE id = (SELECT id FROM trades
+                                   WHERE symbol=? AND status='open'
+                                   ORDER BY opened_at DESC LIMIT 1)""",
                     (exit_price, pnl, datetime.utcnow().isoformat(), pos.symbol),
                 )
-                if cur.rowcount > 1:
-                    log.error(f"save_trade_close: updated {cur.rowcount} rows for {pos.symbol} — missing order_id")
             await db.commit()
     except Exception as e:
         log.error(f"save_trade_close error: {e}")
@@ -166,6 +169,24 @@ async def get_recent_signals(hours: int = 24, limit: int = 200) -> List[Dict]:
         return []
 
 
+async def get_realized_pnl_since(closed_after_iso: str) -> float:
+    """Sum of realized PnL for trades closed at/after the given ISO timestamp.
+    Used to rebuild the daily circuit-breaker counter after a process restart —
+    in-memory-only accounting would reset the halt on every deploy/crash."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT COALESCE(SUM(pnl), 0) FROM trades "
+                "WHERE status='closed' AND closed_at >= ?",
+                (closed_after_iso,),
+            ) as cur:
+                row = await cur.fetchone()
+        return float(row[0] or 0.0)
+    except Exception as e:
+        log.error(f"get_realized_pnl_since error: {e}")
+        return 0.0
+
+
 async def get_trades(limit: int = 50) -> List[Dict]:
     try:
         async with aiosqlite.connect(DB_PATH) as db:
@@ -181,17 +202,26 @@ async def get_trades(limit: int = 50) -> List[Dict]:
 
 
 async def cleanup_old_signals(keep_hours: int = 48) -> int:
+    from core.config import cfg
     cutoff = (datetime.utcnow() - timedelta(hours=keep_hours)).isoformat()
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             cur = await db.execute("DELETE FROM signals WHERE ts < ?", (cutoff,))
+            removed = cur.rowcount
+            # Row-count cap (MAX_SIGNALS_DB) on top of the time-based retention —
+            # a noisy market can write thousands of rows inside 48h
+            cur2 = await db.execute(
+                """DELETE FROM signals WHERE id NOT IN
+                   (SELECT id FROM signals ORDER BY ts DESC LIMIT ?)""",
+                (max(cfg.MAX_SIGNALS_DB, 1),),
+            )
+            removed += cur2.rowcount
             # Also purge closed trades older than 90 days
             old_trades = (datetime.utcnow() - timedelta(days=90)).isoformat()
             await db.execute(
                 "DELETE FROM trades WHERE status='closed' AND closed_at < ?", (old_trades,)
             )
             await db.commit()
-            removed = cur.rowcount
 
         # Evict stale entries from in-memory cooldown dict to prevent unbounded growth
         from core.state import state

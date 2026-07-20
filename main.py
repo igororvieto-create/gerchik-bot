@@ -85,10 +85,14 @@ async def lifespan(app: FastAPI):
     _scheduler.start()
     log.info(f"Scheduler started — scan every {cfg.SCAN_INTERVAL_MIN} min")
 
-    asyncio.create_task(_delayed_initial_scan())
+    # Держим ссылку на таск: голый create_task() может быть собран GC до
+    # завершения, а при shutdown его нужно отменить, чтобы он не проснулся
+    # после закрытия aiohttp-сессии ("Session is closed" спам)
+    initial_scan_task = asyncio.create_task(_delayed_initial_scan())
 
     yield
 
+    initial_scan_task.cancel()
     if _scheduler and _scheduler.running:
         _scheduler.shutdown(wait=False)
     if _client:

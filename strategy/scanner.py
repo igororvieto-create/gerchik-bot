@@ -17,16 +17,9 @@ log = logging.getLogger("scanner")
 
 _SCANNING = False
 
-# --- Новые настраиваемые пороги (можно вынести в core/config.py; сейчас
-# читаются через getattr с безопасными дефолтами, чтобы не требовать
-# правки cfg прямо сейчас) ---
-MIN_RR             = getattr(cfg, "MIN_RR", 3.0)              # Герчик: минимум 3:1
-KEY_LEVEL_LOOKBACK = getattr(cfg, "KEY_LEVEL_LOOKBACK", 20)    # свечей для поиска swing high/low
-KEY_LEVEL_WING     = getattr(cfg, "KEY_LEVEL_WING", 2)         # "плечи" фрактала для пивота
-KEY_LEVEL_ATR_MULT = getattr(cfg, "KEY_LEVEL_ATR_MULT", 1.0)   # макс. расстояние цены до уровня (в ATR)
-REQUIRE_MTF_ALIGN  = getattr(cfg, "REQUIRE_MTF_ALIGN", True)   # жёсткий фильтр по совпадению трендов TF
-MTF_TREND_LOOKBACK = getattr(cfg, "MTF_TREND_LOOKBACK", 6)     # свечей назад для определения тренда
-MIN_LISTING_AGE_DAYS = getattr(cfg, "MIN_LISTING_AGE_DAYS", 14)  # не торговать свежие листинги младше N дней
+# Все пороги читаются из cfg НАПРЯМУЮ в функциях (не снапшотятся в
+# модульные константы при импорте) — иначе изменения через /api/settings
+# молча не доходили бы до сканера до рестарта процесса.
 
 # Дата листинга не меняется — кэшируем per-symbol, чтобы не дёргать
 # get_instrument_info на каждый скан для одних и тех же пар.
@@ -56,7 +49,7 @@ async def _is_listing_old_enough(client: BybitClient, symbol: str) -> bool:
             return True
 
     age_days = (datetime.now(timezone.utc).timestamp() * 1000 - launch_ms) / 86_400_000
-    return age_days >= MIN_LISTING_AGE_DAYS
+    return age_days >= cfg.MIN_LISTING_AGE_DAYS
 
 
 def _calc_atr(klines: list, period: int = 14) -> float:
@@ -96,8 +89,10 @@ def _ob_imbalance(ob: dict) -> tuple[float, str]:
     return ratio, "NEUTRAL"
 
 
-def _trend_direction(klines: list, lookback: int = MTF_TREND_LOOKBACK) -> str:
+def _trend_direction(klines: list, lookback: int = None) -> str:
     """Грубый тренд TF: сравниваем текущий закрытый close с close N баров назад."""
+    if lookback is None:
+        lookback = cfg.MTF_TREND_LOOKBACK
     completed = klines[:-1]  # исключаем незакрытую свечу
     if len(completed) <= lookback:
         return "NEUTRAL"
@@ -113,13 +108,17 @@ def _trend_direction(klines: list, lookback: int = MTF_TREND_LOOKBACK) -> str:
     return "NEUTRAL"
 
 
-def _find_swing_levels(klines: list, lookback: int = KEY_LEVEL_LOOKBACK,
-                        wing: int = KEY_LEVEL_WING) -> tuple[Optional[float], Optional[float]]:
+def _find_swing_levels(klines: list, lookback: int = None,
+                        wing: int = None) -> tuple[Optional[float], Optional[float]]:
     """
     Простой фрактальный поиск ближайших swing low / swing high (support/resistance)
     за последние `lookback` завершённых свечей. Возвращает (support, resistance) —
     самый последний найденный пивот в каждую сторону, либо None если не найден.
     """
+    if lookback is None:
+        lookback = cfg.KEY_LEVEL_LOOKBACK
+    if wing is None:
+        wing = cfg.KEY_LEVEL_WING
     completed = klines[:-1]
     window = completed[-lookback:] if len(completed) > lookback else completed
     n = len(window)
@@ -249,7 +248,7 @@ def _score_signal(
             score += 10
         elif level_dist_atr <= 0.5:
             score += 7
-        elif level_dist_atr <= KEY_LEVEL_ATR_MULT:
+        elif level_dist_atr <= cfg.KEY_LEVEL_ATR_MULT:
             score += 4
 
     # Классификация типа сигнала (как раньше, по OI/price)
@@ -375,7 +374,7 @@ def _calc_levels(price: float, atr: float, direction: str,
     # 1R/2R/3R сетке, т.к. TP3 и так на 3R.
     if target_level is not None:
         achievable = abs(target_level - price) / risk
-        if achievable < MIN_RR:
+        if achievable < cfg.MIN_RR:
             return None  # недостаточно места до цели для честного 3:1 — не торгуем
 
     if direction == "LONG":
@@ -387,7 +386,7 @@ def _calc_levels(price: float, atr: float, direction: str,
 
     return {
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
-        "rr": MIN_RR, "sl_pct": sl_pct,
+        "rr": 2.0, "sl_pct": sl_pct,  # trader targets TP2 = 2R — report the actual trade R:R
     }
 
 
@@ -397,11 +396,13 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         return None
 
     try:
-        price       = float(ticker.get("lastPrice",     0))
-        price_chg   = float(ticker.get("price24hPcnt",  0)) * 100
-        funding     = float(ticker.get("fundingRate",   0)) * 100
-        vol_24h     = float(ticker.get("volume24h",     0))
-        oi_usdt_now = float(ticker.get("openInterestValue", 0))
+        # `or 0`: Bybit шлёт пустые строки в этих полях для части контрактов
+        # (пре-опен, нет фандинга) — float('') роняет анализ символа навсегда
+        price       = float(ticker.get("lastPrice")     or 0)
+        price_chg   = float(ticker.get("price24hPcnt")  or 0) * 100
+        funding     = float(ticker.get("fundingRate")   or 0) * 100
+        vol_24h     = float(ticker.get("volume24h")     or 0)
+        oi_usdt_now = float(ticker.get("openInterestValue") or 0)
 
         if price <= 0:
             return None
@@ -418,12 +419,16 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         if not await _is_listing_old_enough(client, symbol):
             return None
 
-        # Добавили 1h klines для MTF-подтверждения тренда наряду с 4h
+        # Добавили 1h klines для MTF-подтверждения тренда наряду с 4h.
+        # limit 4h-свечей масштабируется под лукбеки: захардкоженные 26 при
+        # KEY_LEVEL_LOOKBACK/MTF_TREND_LOOKBACK > 25 молча отключали бы
+        # 4h-часть MTF-фильтра (NEUTRAL) и урезали окно поиска уровней.
+        kline_4h_limit = max(26, cfg.KEY_LEVEL_LOOKBACK + 2, cfg.MTF_TREND_LOOKBACK + 3)
         oi_hist, klines, ob, klines_1h = await asyncio.gather(
             client.get_open_interest(symbol, interval="4h", limit=2),
-            client.get_klines(symbol, interval="240", limit=26),
+            client.get_klines(symbol, interval="240", limit=kline_4h_limit),
             client.get_orderbook(symbol, limit=20),
-            client.get_klines(symbol, interval="60", limit=max(MTF_TREND_LOOKBACK + 3, 10)),
+            client.get_klines(symbol, interval="60", limit=max(cfg.MTF_TREND_LOOKBACK + 3, 10)),
         )
 
         if not oi_hist or not klines:
@@ -431,8 +436,13 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             if not klines:
                 return None
 
-        if len(oi_hist) >= 1 and price > 0:
-            oi_prev_usdt = oi_hist[-1]["oi"] * price
+        # Базлайн OI — ПРЕДЫДУЩИЙ 4h-снапшот (oi_hist[0]), а не свежайший:
+        # список отсортирован по возрастанию времени, и oi_hist[-1] — это
+        # начало ТЕКУЩЕГО периода. Сравнение с ним сразу после границы 4h
+        # давало oi_change ≈ 0 и систематически глушило OI-сигналы.
+        if oi_hist and price > 0:
+            baseline = oi_hist[0] if len(oi_hist) >= 2 else oi_hist[-1]
+            oi_prev_usdt = baseline["oi"] * price
             oi_change = (oi_usdt_now - oi_prev_usdt) / oi_prev_usdt * 100 if oi_prev_usdt > 0 else 0.0
         else:
             oi_change = 0.0
@@ -488,7 +498,7 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
 
         # MTF-фильтр: тренд на 1h не должен противоречить тренду на 4h и направлению сделки.
         # Это жёсткий отсекающий фильтр (не просто очки в score), как требует методология.
-        if REQUIRE_MTF_ALIGN:
+        if cfg.REQUIRE_MTF_ALIGN:
             trend_4h = _trend_direction(klines)
             trend_1h = _trend_direction(klines_1h)
             opposite = "DOWN" if direction == "LONG" else "UP"
@@ -503,11 +513,20 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         # сигнал мог пройти фильтр "рядом с уровнем" по одной стороне, а SL
         # уехать далеко на другой (реальный кейс: HOME/USDT, SL%=23% при
         # ATR%=3.27%, в 7 раз шире нормы).
+        # Уровень обязан быть С ПРАВИЛЬНОЙ СТОРОНЫ цены (support НИЖЕ для
+        # LONG, resistance ВЫШЕ для SHORT) — abs() принимал бы и уровень с
+        # неправильной стороны (лонг сразу под свежепробитой поддержкой),
+        # при этом _calc_levels молча падал бы на generic 1.5×ATR стоп без
+        # реального уровня за спиной.
         relevant_level = support if direction == "LONG" else resistance
         if relevant_level is None or atr <= 0:
             return None
+        if direction == "LONG" and relevant_level >= price:
+            return None
+        if direction == "SHORT" and relevant_level <= price:
+            return None
         relevant_dist_atr = abs(price - relevant_level) / atr
-        if relevant_dist_atr > KEY_LEVEL_ATR_MULT:
+        if relevant_dist_atr > cfg.KEY_LEVEL_ATR_MULT:
             return None
 
         levels = _calc_levels(price, atr, direction, support, resistance)
@@ -659,7 +678,9 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> Lis
             log.error(f"run_scan_and_broadcast: sig.to_dict() failed for {sig.symbol} — {je}")
             continue
         dead = set()
-        for ws in state.ws_clients:
+        # снапшот list(...): подключение/отключение клиента во время await
+        # мутирует set и роняет итерацию RuntimeError'ом, обрывая весь скан
+        for ws in list(state.ws_clients):
             try:
                 await ws.send_text(msg)
             except Exception:
@@ -688,7 +709,7 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> Lis
         "scan_error":   state.last_scan_error or None,
     })
     dead = set()
-    for ws in state.ws_clients:
+    for ws in list(state.ws_clients):
         try:
             await ws.send_text(heartbeat)
         except Exception:

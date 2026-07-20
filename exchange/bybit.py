@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
@@ -305,7 +306,13 @@ class BybitClient:
 
     async def place_order(self, symbol: str, side: str, qty: float,
                           sl: float, tp: float) -> Dict:
-        """Market order with stop-loss and take-profit."""
+        """Market order with stop-loss and take-profit.
+
+        orderLinkId: _post retries on network exceptions (including a response
+        timeout AFTER Bybit already accepted the order). Without an idempotency
+        key each retry would be a brand-new market order — doubling or tripling
+        the position versus the risk-sized qty. A stable client order id makes
+        Bybit reject the duplicate instead."""
         return await self._post("/v5/order/create", {
             "category":    "linear",
             "symbol":      symbol,
@@ -318,6 +325,7 @@ class BybitClient:
             "slTriggerBy": "MarkPrice",
             "tpTriggerBy": "LastPrice",
             "positionIdx": 0,
+            "orderLinkId": f"gb-{uuid.uuid4().hex[:24]}",
         })
 
     async def get_positions(self) -> Optional[List[Dict]]:
@@ -349,4 +357,5 @@ class BybitClient:
             "timeInForce": "IOC",
             "reduceOnly":  True,
             "positionIdx": 0,
+            "orderLinkId": f"gb-close-{uuid.uuid4().hex[:18]}",
         })

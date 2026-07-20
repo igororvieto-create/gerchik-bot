@@ -5,13 +5,21 @@ import os
 import time
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
+from fastapi.responses import JSONResponse as _BaseJSONResponse
 
 from core.state import state
 from core import db
 
 log = logging.getLogger("api")
 router = APIRouter()
+
+
+class JSONResponse(_BaseJSONResponse):
+    """JSONResponse with explicit charset: starlette sends bare
+    'application/json' (no charset for non-text/* types), and some mobile
+    HTTP stacks then decode Cyrillic UTF-8 bodies as Latin-1 → mojibake."""
+    media_type = "application/json; charset=utf-8"
 
 
 def _sanitize(obj):
@@ -74,7 +82,9 @@ async def sw():
 @router.get("/api/positions")
 async def get_positions():
     positions = [p.to_dict() for p in state.positions.values() if p is not None]
-    return JSONResponse({"positions": positions, "count": len(positions)})
+    # _sanitize: unrealised_pnl is parsed from Bybit strings — a single NaN
+    # would make JSONResponse raise (json.dumps allow_nan=False) and 500 the route
+    return JSONResponse(_sanitize({"positions": positions, "count": len(positions)}))
 
 
 @router.get("/api/balance")
@@ -160,11 +170,11 @@ async def trigger_scan():
         signals = await asyncio.wait_for(
             run_scan_and_broadcast(state.client, cfg.NTFY_URL), timeout=120
         )
-        return JSONResponse({
+        return JSONResponse(_sanitize({
             "signals_found": len(signals),
             "min_score":     cfg.MIN_SCORE,
             "top10": [s.to_dict() for s in signals[:10]],
-        })
+        }))
     except asyncio.TimeoutError:
         return JSONResponse({"error": "scan timed out (>120s)"}, status_code=504)
     except Exception as e:
@@ -259,7 +269,7 @@ async def diagnostic():
     except Exception as e:
         result["error"] = str(e)
 
-    return JSONResponse(result)
+    return JSONResponse(_sanitize(result))
 
 
 @router.get("/api/status")
@@ -377,7 +387,8 @@ async def update_settings(request: Request):
                 changes["max_positions"] = v
         if "leverage" in body:
             v = int(body["leverage"])
-            if 1 <= v <= 50:
+            # Инвариант проекта: плечо максимум 3-5x — потолок жёсткий
+            if 1 <= v <= 5:
                 cfg.LEVERAGE = v
                 changes["leverage"] = v
     except (TypeError, ValueError) as exc:
@@ -391,6 +402,8 @@ async def close_position_route(symbol: str):
     if state.client is None:
         return JSONResponse({"error": "client not initialized"}, status_code=503)
     from core.state import Position
+    from strategy.trader import fetch_matching_closed_pnl, record_realized_close
+    import asyncio as _asyncio
     pos = state.positions.get(symbol)
     if not isinstance(pos, Position):
         # None means either absent or enter_trade sentinel (entry still in-flight)
@@ -399,9 +412,16 @@ async def close_position_route(symbol: str):
         result = await state.client.close_position(symbol, pos.side, pos.qty)
         if result.get("retCode", -1) == 0:
             state.positions.pop(symbol, None)
-            await db.save_trade_close(pos)
-            log.info(f"Position {symbol} closed via dashboard")
-            return JSONResponse({"ok": True, "symbol": symbol})
+            # Fetch the real exit price / PnL (same path as monitor_positions) —
+            # otherwise history stores exit=0/pnl=0 and, worse, the realized
+            # loss never reaches the daily circuit breaker
+            await _asyncio.sleep(1.0)  # give Bybit a moment to write closed-pnl
+            exit_price, pnl = await fetch_matching_closed_pnl(state.client, pos)
+            await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
+            record_realized_close(pnl)
+            log.info(f"Position {symbol} closed via dashboard exit={exit_price:.4f} pnl={pnl:+.2f}")
+            return JSONResponse({"ok": True, "symbol": symbol,
+                                 "exit_price": exit_price, "pnl": pnl})
         return JSONResponse({"error": result.get("retMsg", "unknown error")}, status_code=400)
     except Exception as e:
         log.error(f"close_position {symbol}: {e}")

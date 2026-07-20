@@ -99,6 +99,8 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .t-VOLUME_SPIKE{background:rgba(240,185,11,.1);color:var(--accent)}
 .t-FUNDING_EXTREME{background:rgba(59,130,246,.1);color:var(--blue)}
 .t-MOMENTUM{background:rgba(249,115,22,.1);color:var(--orange)}
+.t-VSA_CLIMAX{background:rgba(168,85,247,.14);color:var(--purple)}
+.t-VSA_ABSORPTION{background:rgba(59,130,246,.12);color:var(--blue)}
 .card-spacer{flex:1}
 .score-ring{
   width:40px;height:40px;border-radius:50%;
@@ -447,7 +449,7 @@ input[type=range]::-moz-range-thumb{
           </div>
           <div class="srow-ctrl">
             <div class="range-wrap">
-              <input type="range" id="set-lev" min="1" max="20" step="1" oninput="$('rv-lev').textContent=this.value+'×'">
+              <input type="range" id="set-lev" min="1" max="5" step="1" oninput="$('rv-lev').textContent=this.value+'×'">
               <span class="range-val" id="rv-lev">5×</span>
             </div>
           </div>
@@ -731,7 +733,7 @@ async function refreshPositions(){
             <span>SL: ${fmtP(p.sl)} · TP: ${fmtP(p.tp2)}</span>
           </div>
           <span class="pos-pnl ${pnlColor}">${pnl>=0?'+':''}${pnl.toFixed(2)} USDT</span>
-          <button class="pos-close-btn" id="cbtn-${sym}" onclick="closePos('${sym}')">❌ Закрыть</button>
+          <button class="pos-close-btn" id="cbtn-${sym}" data-sym="${sym}" onclick="closePos(this.dataset.sym)">❌ Закрыть</button>
         </div>`;
       }).join('');
     } else panel.style.display='none';
@@ -740,10 +742,12 @@ async function refreshPositions(){
 }
 
 /* ── Close position ── */
+let _closeInFlight=false;
 async function closePos(symbol){
   const btn=$('cbtn-'+symbol);
-  if(!btn) return;
+  if(!btn||_closeInFlight) return;
   if(!confirm(`Закрыть позицию ${symbol} по рынку?`)) return;
+  _closeInFlight=true;
   btn.disabled=true; btn.textContent='⏳…';
   try{
     const r=await fetch('/api/close/'+symbol,{method:'POST'});
@@ -758,8 +762,9 @@ async function closePos(symbol){
     }
   }catch(e){
     alert('Ошибка: '+e.message);
-    btn.disabled=false; btn.textContent='❌ Закрыть';
-  }
+    const b=$('cbtn-'+symbol); // после ре-рендера старый btn мог отвалиться от DOM
+    if(b){ b.disabled=false; b.textContent='❌ Закрыть'; }
+  }finally{ _closeInFlight=false; }
 }
 
 async function refreshTradeMode(){
@@ -824,7 +829,9 @@ async function doScan(){
   $('scan-pulse').className='scan-pulse active';
   $('scan-info').textContent='Сканирование рынка…';
   try{
-    const d=await fetch('/api/scan').then(r=>r.json());
+    const r=await fetch('/api/scan');
+    const d=await r.json();
+    if(!r.ok||d.error) throw new Error(d.error||('HTTP '+r.status));
     $('scan-info').textContent=`Скан завершён · найдено: ${d.signals_found??0} · мин счёт: ${d.min_score??'—'}`;
     if(d.top10) d.top10.forEach(s=>addOrUpdate(s));
     await refreshStats();
@@ -849,7 +856,13 @@ function connect(){
   ws.onopen=()=>{
     wsOk=true; clearTimeout(timer); wsR=0;
     setStatus('ok','Подключено');
-    setInterval(()=>ws.readyState===1&&ws.send('ping'), 25000);
+    // WS жив — глушим HTTP-поллинг, иначе он каждые 30с затирает свежие
+    // WS-сигналы содержимым БД и мигает статусом "HTTP режим"
+    if(pollTimer){ clearInterval(pollTimer); pollTimer=null; }
+    // один ping-таймер на страницу: без clearInterval каждый реконнект
+    // добавлял бы новый вечный таймер (утечка + пинг мёртвых сокетов)
+    if(window._wsPing) clearInterval(window._wsPing);
+    window._wsPing=setInterval(()=>ws.readyState===1&&ws.send('ping'), 25000);
     refreshStats(); refreshBalance(); refreshPositions(); refreshTradeMode();
   };
   ws.onmessage=e=>{
@@ -858,7 +871,9 @@ function connect(){
     else if(m.type==='signal'){ addOrUpdate(m.data); refreshStats(); $('scan-pulse').className='scan-pulse active'; setTimeout(()=>$('scan-pulse').className='scan-pulse',2000); }
     else if(m.type==='heartbeat'){
       const t=m.last_scan_at?new Date(m.last_scan_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}):'—';
-      $('scan-info').textContent=`Скан #${m.scan_count||0} · ${t} · найдено: ${m.signals_found??0}`;
+      $('scan-info').textContent=m.scan_error
+        ?`⚠ Скан #${m.scan_count||0} · ${t} · ошибка: ${m.scan_error}`
+        :`Скан #${m.scan_count||0} · ${t} · найдено: ${m.signals_found??0}`;
       gScanCount=m.scan_count||0;
     }
   };

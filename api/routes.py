@@ -412,11 +412,13 @@ async def close_position_route(symbol: str):
         result = await state.client.close_position(symbol, pos.side, pos.qty)
         if result.get("retCode", -1) == 0:
             state.positions.pop(symbol, None)
-            # Fetch the real exit price / PnL (same path as monitor_positions) —
-            # otherwise history stores exit=0/pnl=0 and, worse, the realized
-            # loss never reaches the daily circuit breaker
-            await _asyncio.sleep(1.0)  # give Bybit a moment to write closed-pnl
-            exit_price, pnl = await fetch_matching_closed_pnl(state.client, pos)
+            # Fetch the real exit price / PnL (same path as monitor_positions).
+            # Retries: Bybit's closed-pnl record can lag several seconds —
+            # a single attempt would permanently record pnl=0 and the loss
+            # would bypass the daily circuit breaker
+            await _asyncio.sleep(1.0)
+            exit_price, pnl = await fetch_matching_closed_pnl(
+                state.client, pos, attempts=4, delay=1.5)
             await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
             record_realized_close(pnl)
             log.info(f"Position {symbol} closed via dashboard exit={exit_price:.4f} pnl={pnl:+.2f}")

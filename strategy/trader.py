@@ -11,6 +11,7 @@ from exchange.bybit import BybitClient
 log = logging.getLogger("trader")
 
 _MONITORING = False
+_DAILY_LOCK = asyncio.Lock()
 
 # Skip exchange-side "position disappeared" detection for positions younger
 # than this: a monitor tick whose get_positions() request was already in
@@ -30,55 +31,90 @@ def _today_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-async def _ensure_daily_state() -> None:
-    """Init/rollover daily-loss tracking on `state` at UTC midnight.
-    On rollover (including process start) the counter is rebuilt from the DB,
-    so a deploy or crash mid-day cannot silently reset the circuit breaker."""
-    today = _today_utc()
-    if getattr(state, "daily_pnl_date", None) != today:
-        state.daily_pnl_date = today
-        state.daily_realized_pnl = await db.get_realized_pnl_since(f"{today}T00:00:00")
-        state.trading_halted = False
-        if state.balance > 0 and state.daily_realized_pnl < 0:
-            loss_pct = -state.daily_realized_pnl / state.balance * 100
-            if loss_pct >= cfg.DAILY_LOSS_LIMIT_PCT:
-                state.trading_halted = True
-                log.warning(
-                    f"daily state restored from DB: loss {loss_pct:.2f}% >= "
-                    f"{cfg.DAILY_LOSS_LIMIT_PCT}% — trading stays halted"
-                )
-
-
-def record_realized_close(pnl: float) -> None:
-    """Accumulate realized PnL into the daily circuit breaker and halt new
-    entries when the limit is breached. Single entry point used by BOTH the
-    monitor loop and the manual dashboard close — a close path that skips this
-    lets losses bypass the daily limit."""
-    state.daily_realized_pnl = getattr(state, "daily_realized_pnl", 0.0) + pnl
-    if state.balance > 0:
+def _reevaluate_halt() -> bool:
+    """Authoritative halt check: computed from daily PnL and CURRENT balance.
+    Must be re-run after balance becomes known — a restore that happened while
+    balance was still 0 (process startup) could not evaluate the limit."""
+    if state.trading_halted:
+        return True
+    if state.balance > 0 and state.daily_realized_pnl < 0:
         loss_pct = -state.daily_realized_pnl / state.balance * 100
-        if loss_pct >= cfg.DAILY_LOSS_LIMIT_PCT and not getattr(state, "trading_halted", False):
+        if loss_pct >= cfg.DAILY_LOSS_LIMIT_PCT:
             state.trading_halted = True
             log.error(
                 f"DAILY LOSS LIMIT HIT: {loss_pct:.2f}% >= "
                 f"{cfg.DAILY_LOSS_LIMIT_PCT}% — halting new trades until UTC reset"
             )
+            return True
+    return False
 
 
-async def fetch_matching_closed_pnl(client: BybitClient, pos: Position) -> tuple[float, float]:
+async def _ensure_daily_state() -> None:
+    """Rollover daily-loss tracking at UTC midnight; on rollover (including
+    process start) the counter is rebuilt from the DB so a deploy or crash
+    mid-day cannot silently reset the circuit breaker. Lock-protected:
+    daily_pnl_date is stamped only AFTER the restore completes, so concurrent
+    callers can't observe a half-restored state."""
+    today = _today_utc()
+    if state.daily_pnl_date == today:
+        return
+    async with _DAILY_LOCK:
+        if state.daily_pnl_date == today:
+            return
+        pnl = await db.get_realized_pnl_since(f"{today}T00:00:00")
+        state.daily_realized_pnl = pnl
+        state.trading_halted = False
+        state.daily_pnl_date = today
+        _reevaluate_halt()  # no-op while balance is 0; re-run later in enter_trade
+
+
+def record_realized_close(pnl: float) -> None:
+    """Accumulate realized PnL into the daily circuit breaker. Single entry
+    point used by the monitor loop, the manual dashboard close AND emergency
+    closes — a close path that skips this lets losses bypass the daily limit."""
+    state.daily_realized_pnl += pnl
+    _reevaluate_halt()
+
+
+async def fetch_matching_closed_pnl(client: BybitClient, pos: Position,
+                                    attempts: int = 1, delay: float = 1.5) -> tuple[float, float]:
     """(exit_price, pnl) for THIS position's close. Bybit's closed-pnl list can
     lag and/or lead: closed[0] may be a previous trade on the same symbol.
-    Match by record time >= position open time instead of blindly taking [0]."""
-    opened_ms = pos.ts.timestamp() * 1000
-    try:
-        closed = await client.get_closed_pnl(pos.symbol, limit=5)
-        for rec in closed:
-            rec_ms = float(rec.get("updatedTime") or rec.get("createdTime") or 0)
-            if rec_ms >= opened_ms - 60_000:  # 1min slack for clock skew
-                return float(rec.get("avgExitPrice", 0)), float(rec.get("closedPnl", 0))
-    except Exception as ce:
-        log.warning(f"{pos.symbol}: could not fetch closed PnL — {ce}")
+    Match by record time >= position open time instead of blindly taking [0].
+    Retries because the record may take a few seconds to appear after a close.
+
+    tz: pos.ts is naive-UTC; naive .timestamp() would use the process's LOCAL
+    timezone — replace(tzinfo=utc) keeps this correct even if TZ != UTC."""
+    opened_ms = pos.ts.replace(tzinfo=timezone.utc).timestamp() * 1000
+    for i in range(attempts):
+        if i:
+            await asyncio.sleep(delay)
+        try:
+            closed = await client.get_closed_pnl(pos.symbol, limit=5)
+            for rec in closed:
+                rec_ms = float(rec.get("updatedTime") or rec.get("createdTime") or 0)
+                if rec_ms >= opened_ms - 60_000:  # 1min slack for clock skew
+                    return float(rec.get("avgExitPrice", 0)), float(rec.get("closedPnl", 0))
+        except Exception as ce:
+            log.warning(f"{pos.symbol}: could not fetch closed PnL (attempt {i+1}) — {ce}")
     return 0.0, 0.0
+
+
+async def _record_round_trip(client: BybitClient, pos: Position,
+                             attempts: int = 3) -> None:
+    """Persist an open+close round trip (used by emergency close) and feed
+    the realized PnL into the circuit breaker — fees/slippage of an aborted
+    entry are real losses and must not vanish from the books."""
+    try:
+        await db.save_trade_open(pos)
+    except Exception as e:
+        log.error(f"{pos.symbol}: save_trade_open (round-trip) failed — {e}")
+    exit_price, pnl = await fetch_matching_closed_pnl(client, pos, attempts=attempts)
+    try:
+        await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
+    except Exception as e:
+        log.error(f"{pos.symbol}: save_trade_close (round-trip) failed — {e}")
+    record_realized_close(pnl)
 
 
 async def enter_trade(client: BybitClient, sig: Signal) -> bool:
@@ -132,6 +168,13 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             return False
 
         state.balance = balance
+
+        # Authoritative halt re-check now that balance is known: the startup
+        # restore runs with balance=0 and cannot evaluate the limit itself
+        if _reevaluate_halt():
+            log.warning(f"{sig.symbol}: daily loss limit (post-balance check) — skip")
+            state.positions.pop(sig.symbol, None)
+            return False
 
         # Position size: risk RISK_PER_TRADE% of balance
         risk_usdt     = balance * cfg.RISK_PER_TRADE / 100
@@ -188,10 +231,22 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             symbol=sig.symbol, side=side, qty=qty, sl=sig.sl, tp=sig.tp2,
         )
 
-        if result.get("retCode", -1) != 0:
-            log.error(f"{sig.symbol}: order failed — {result.get('retMsg')}")
-            state.positions.pop(sig.symbol, None)
-            return False
+        ret_code = result.get("retCode", -1)
+        ret_msg  = str(result.get("retMsg", ""))
+        if ret_code != 0:
+            # Duplicate orderLinkId (110072): the FIRST attempt actually
+            # filled and only its response was lost to a timeout — the retry
+            # got rejected as a duplicate. Treating this as failure would
+            # leave a live UNTRACKED position; reconcile as success instead.
+            if ret_code == 110072 or "duplicate" in ret_msg.lower():
+                log.warning(
+                    f"{sig.symbol}: duplicate orderLinkId — first attempt filled, "
+                    f"reconciling as success"
+                )
+            else:
+                log.error(f"{sig.symbol}: order failed — {ret_msg}")
+                state.positions.pop(sig.symbol, None)
+                return False
 
         order_id = result.get("result", {}).get("orderId", "")
         pos = Position(
@@ -212,12 +267,12 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         # NOT confirm the exchange attached stopLoss/takeProfit. Verify by
         # reading the live position back.
         #
-        # Distinguish three outcomes:
+        # Three outcomes:
         #  - verified protected  -> proceed
-        #  - verified UNPROTECTED (position visible, SL/TP zero) -> emergency close
-        #  - could NOT verify (API failure / propagation lag)    -> DO NOT close;
-        #    keep tracking and let the next monitor tick re-check. Closing a
-        #    healthy position on a transient API hiccup pays the spread twice.
+        #  - verified UNPROTECTED -> emergency close (recorded as a round trip)
+        #  - could NOT verify (API failure / propagation lag) -> keep tracked;
+        #    monitor_positions re-checks SL attachment on every tick and
+        #    re-attaches or closes if it's really missing.
         exch_sl = exch_tp = 0.0
         verified = False
         for attempt in range(3):
@@ -251,18 +306,22 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             except Exception as ce:
                 log.critical(f"{sig.symbol}: emergency close FAILED — {ce}")
             if close_ok:
+                # The aborted entry still paid fees/slippage — record the
+                # round trip so history and the daily breaker see the loss
+                await asyncio.sleep(1.0)
+                await _record_round_trip(client, pos)
                 state.positions.pop(sig.symbol, None)
                 return False
-            # Close failed: position is live and unprotected — KEEP it tracked
-            # so monitor_positions keeps watching; manual intervention needed.
+            # Close failed: position is live and unprotected — KEEP it tracked;
+            # monitor_positions will re-attach SL or close it on its next tick.
             log.critical(
                 f"{sig.symbol}: UNPROTECTED position remains open and tracked — "
-                f"manual intervention required"
+                f"monitor will retry protection"
             )
         elif not verified:
             log.error(
                 f"{sig.symbol}: could not verify SL/TP attachment (API failures "
-                f"or propagation lag) — keeping position tracked, monitor will re-check"
+                f"or propagation lag) — keeping position tracked, monitor re-checks SL"
             )
 
         try:
@@ -292,7 +351,9 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
 
 
 async def monitor_positions(client: BybitClient) -> None:
-    """Check if exchange positions still exist; detect SL/TP closes."""
+    """Check if exchange positions still exist; detect SL/TP closes; verify
+    every live position still carries a stop-loss (recurring bug #1) and
+    re-attach or emergency-close if it doesn't."""
     global _MONITORING
     if _MONITORING:
         log.warning("monitor_positions: previous call still running, skipping this tick")
@@ -310,6 +371,7 @@ async def monitor_positions(client: BybitClient) -> None:
         bal = await client.get_balance()
         if bal > 0:
             state.balance = bal
+            _reevaluate_halt()
 
         if not state.positions:
             return
@@ -336,7 +398,7 @@ async def monitor_positions(client: BybitClient) -> None:
                     log.debug(f"{sym}: {age_s:.0f}s old, absent from snapshot — grace period")
                     continue
                 # Position closed by exchange (SL or TP hit)
-                exit_price, pnl = await fetch_matching_closed_pnl(client, pos)
+                exit_price, pnl = await fetch_matching_closed_pnl(client, pos, attempts=2)
                 await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
                 state.positions.pop(sym, None)
                 log.info(f"{sym}: closed (SL/TP) exit={exit_price:.4f} pnl={pnl:+.2f}")
@@ -344,7 +406,38 @@ async def monitor_positions(client: BybitClient) -> None:
                 # Daily circuit breaker (shared path with manual close)
                 record_realized_close(pnl)
             else:
-                pos.unrealised_pnl = float(live_map[sym].get("unrealisedPnl", 0))
+                lp = live_map[sym]
+                pos.unrealised_pnl = float(lp.get("unrealisedPnl", 0))
+
+                # Continuous SL verification — the "monitor re-checks" that
+                # enter_trade's unverified path relies on. A live position
+                # without a stop-loss is the recurring bug #1 made real.
+                exch_sl = float(lp.get("stopLoss") or 0)
+                if exch_sl <= 0:
+                    log.error(f"{sym}: live position has NO stop-loss — re-attaching SL/TP")
+                    reattached = False
+                    try:
+                        reattached = await client.set_trading_stop(sym, sl=pos.sl, tp=pos.tp2)
+                    except Exception as se:
+                        log.error(f"{sym}: set_trading_stop raised — {se}")
+                    if not reattached:
+                        log.critical(f"{sym}: could not re-attach SL — emergency closing")
+                        try:
+                            res = await client.close_position(sym, pos.side, pos.qty)
+                            if res.get("retCode", -1) == 0:
+                                exit_price, pnl = await fetch_matching_closed_pnl(
+                                    client, pos, attempts=2)
+                                await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
+                                record_realized_close(pnl)
+                                state.positions.pop(sym, None)
+                                log.info(f"{sym}: emergency-closed (no SL) pnl={pnl:+.2f}")
+                            else:
+                                log.critical(
+                                    f"{sym}: emergency close rejected — "
+                                    f"{res.get('retMsg')} — will retry next tick"
+                                )
+                        except Exception as ce:
+                            log.critical(f"{sym}: emergency close failed — {ce} — will retry next tick")
 
     except Exception as e:
         log.error(f"monitor_positions error: {e}")

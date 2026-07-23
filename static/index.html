@@ -355,6 +355,7 @@ input[type=range]::-moz-range-thumb{
   <button class="fchip" data-f="VOLUME_SPIKE">Объём</button>
   <button class="fchip" data-f="FUNDING_EXTREME">Фандинг</button>
   <button class="fchip" data-f="MOMENTUM">Моментум</button>
+  <button class="fchip" data-f="VSA">VSA</button>
   <div class="sep"></div>
   <button class="fchip on" data-s="score">↓ Счёт</button>
   <button class="fchip" data-s="time">↓ Время</button>
@@ -615,7 +616,7 @@ function buildCard(s, isNew){
 /* ── Render grid ── */
 function render(){
   let data=[...signals];
-  if(activeFilter!=='ALL') data=data.filter(s=>s.direction===activeFilter||s.signal_type===activeFilter);
+  if(activeFilter!=='ALL') data=data.filter(s=>s.direction===activeFilter||s.signal_type===activeFilter||(activeFilter==='VSA'&&(s.signal_type||'').startsWith('VSA_')));
   data.sort((a,b)=>activeSort==='score'?(b.score-a.score)||(new Date(b.ts)-new Date(a.ts)):new Date(b.ts)-new Date(a.ts));
   const grid=$('grid');
   if(!data.length){
@@ -758,7 +759,8 @@ async function closePos(symbol){
       await refreshPositions();
     } else {
       alert('Ошибка: '+(d.error||'неизвестно'));
-      btn.disabled=false; btn.textContent='❌ Закрыть';
+      const b=$('cbtn-'+symbol); // после ре-рендера старый btn отвязан от DOM
+      if(b){ b.disabled=false; b.textContent='❌ Закрыть'; }
     }
   }catch(e){
     alert('Ошибка: '+e.message);
@@ -781,7 +783,10 @@ async function openSettings(){
     $('set-auto-trade').checked=!!d.auto_trade;
 
     const risk=$('set-risk'); risk.value=d.risk_per_trade??1; $('rv-risk').textContent=parseFloat(risk.value).toFixed(1)+'%';
-    const lev=$('set-lev'); lev.value=d.leverage??5; $('rv-lev').textContent=lev.value+'×';
+    const lev=$('set-lev'); lev.value=Math.min(d.leverage??5,5);
+    // метка показывает РЕАЛЬНОЕ значение бэкенда: молчаливый браузерный кламп
+    // до 5 скрывал бы, что бот всё ещё торгует с прежним плечом >5
+    $('rv-lev').textContent=(d.leverage??5)+'×'+((d.leverage??5)>5?' ⚠':'');
     $('set-maxpos').value=d.max_positions??3;
     const ms=$('set-minscore'); ms.value=d.min_score??25; $('rv-ms').textContent=ms.value;
     const ts=$('set-tradescore'); ts.value=d.trade_min_score??60; $('rv-ts').textContent=ts.value;
@@ -830,7 +835,7 @@ async function doScan(){
   $('scan-info').textContent='Сканирование рынка…';
   try{
     const r=await fetch('/api/scan');
-    const d=await r.json();
+    const d=await r.json().catch(()=>({}));  // 502 от шлюза приходит HTML'ем
     if(!r.ok||d.error) throw new Error(d.error||('HTTP '+r.status));
     $('scan-info').textContent=`Скан завершён · найдено: ${d.signals_found??0} · мин счёт: ${d.min_score??'—'}`;
     if(d.top10) d.top10.forEach(s=>addOrUpdate(s));
@@ -887,6 +892,7 @@ function connect(){
 
 /* ── HTTP fallback ── */
 async function pollOnce(){
+  if(wsOk) return;  // WS восстановился — не затираем его данные/статус
   try{
     const[sr,sgr]=await Promise.all([
       fetch('/api/stats').then(r=>r.json()).catch(()=>({})),
@@ -904,6 +910,7 @@ async function pollOnce(){
         $('scan-info').textContent=`Скан #${sr.scan_count} · ${t}`;
       }
     }
+    if(wsOk) return;  // WS реконнектнулся, пока fetch'и были в полёте
     const rows=sgr.signals||[];
     if(rows.length) loadHistory(rows);
     setStatus('ok','HTTP режим');

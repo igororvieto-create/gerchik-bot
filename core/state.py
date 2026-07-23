@@ -97,6 +97,11 @@ class AppState:
         self.last_balance_error: str = ""
         self.last_scan_error: str = ""  # non-empty if the most recent scan failed
         self.signal_seen: Dict[str, datetime] = {}  # symbol → last broadcast time
+        # Daily circuit breaker — defined here (not attached lazily) so a read
+        # before the first _ensure_daily_state() can never raise AttributeError
+        self.daily_pnl_date: Optional[str] = None
+        self.daily_realized_pnl: float = 0.0
+        self.trading_halted: bool = False
 
     def add_ws(self, ws) -> None:
         self.ws_clients.add(ws)

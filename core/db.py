@@ -52,7 +52,8 @@ async def init_db() -> None:
             )
         """)
         for col in ["entry REAL", "sl REAL", "tp1 REAL", "tp2 REAL",
-                    "tp3 REAL", "rr REAL", "sl_pct REAL"]:
+                    "tp3 REAL", "rr REAL", "sl_pct REAL",
+                    "outcome TEXT", "outcome_price REAL", "outcome_at TEXT"]:
             try:
                 await db.execute(f"ALTER TABLE signals ADD COLUMN {col}")
             except Exception:
@@ -167,6 +168,62 @@ async def get_recent_signals(hours: int = 24, limit: int = 200) -> List[Dict]:
     except Exception as e:
         log.error(f"get_recent_signals error: {e}")
         return []
+
+
+async def get_pending_signals(max_age_hours: int = 48) -> List[Dict]:
+    """Signals without a recorded outcome, young enough to still evaluate."""
+    cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat()
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT id, symbol, direction, entry, sl, tp2, ts FROM signals
+                   WHERE outcome IS NULL AND ts >= ?
+                     AND entry > 0 AND sl > 0 AND tp2 > 0""",
+                (cutoff,),
+            ) as cur:
+                rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        log.error(f"get_pending_signals error: {e}")
+        return []
+
+
+async def set_signal_outcome(signal_id: int, outcome: str, price: float) -> None:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE signals SET outcome=?, outcome_price=?, outcome_at=? WHERE id=?",
+                (outcome, price, datetime.utcnow().isoformat(), signal_id),
+            )
+            await db.commit()
+    except Exception as e:
+        log.error(f"set_signal_outcome error: {e}")
+
+
+async def get_outcome_stats(days: int = 7) -> Dict:
+    """Forward-test scoreboard: how many signals hit TP2 before SL and vice versa."""
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    stats = {"win": 0, "loss": 0, "expired": 0, "open": 0, "winrate": None}
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                """SELECT COALESCE(outcome, 'OPEN') o, COUNT(*) c FROM signals
+                   WHERE ts >= ? GROUP BY o""",
+                (cutoff,),
+            ) as cur:
+                for o, c in await cur.fetchall():
+                    if o == "WIN":       stats["win"] = c
+                    elif o == "LOSS":    stats["loss"] = c
+                    elif o == "EXPIRED": stats["expired"] = c
+                    else:                stats["open"] = c
+        decided = stats["win"] + stats["loss"]
+        if decided:
+            stats["winrate"] = round(stats["win"] / decided * 100, 1)
+        return stats
+    except Exception as e:
+        log.error(f"get_outcome_stats error: {e}")
+        return stats
 
 
 async def get_realized_pnl_since(closed_after_iso: str) -> float:

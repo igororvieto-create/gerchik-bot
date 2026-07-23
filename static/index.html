@@ -333,6 +333,11 @@ input[type=range]::-moz-range-thumb{
     <div class="stat-value" id="s-pos">0</div>
     <div class="stat-sub" id="s-trade">—</div>
   </div>
+  <div class="stat-card">
+    <div class="stat-label">Винрейт 7д</div>
+    <div class="stat-value v-accent" id="s-wr">—</div>
+    <div class="stat-sub" id="s-wr-sub">форвард-тест сигналов</div>
+  </div>
 </div>
 
 <div class="scan-bar">
@@ -691,6 +696,12 @@ async function refreshStats(){
     $('s-short').textContent=d.by_direction?.SHORT??0;
     $('s-scans').textContent=d.scan_count??0;
     gScanCount=d.scan_count??0;
+    const oc=d.outcomes_7d;
+    if(oc){
+      $('s-wr').textContent=oc.winrate!=null?oc.winrate+'%':'—';
+      $('s-wr').className='stat-value '+(oc.winrate==null?'':oc.winrate>=50?'v-green':'v-red');
+      $('s-wr-sub').textContent=`${oc.win}W · ${oc.loss}L · ${oc.expired}E · ${oc.open} ждут`;
+    }
     if(d.last_scan_at){
       const t=new Date(d.last_scan_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
       $('s-lastscan').textContent=t;

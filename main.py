@@ -15,6 +15,7 @@ from core import db
 from exchange.bybit import BybitClient
 from strategy.scanner import run_scan_and_broadcast
 from strategy.trader import monitor_positions
+from strategy.evaluator import evaluate_signal_outcomes
 from api.routes import router
 
 # stdout, не stderr: Railway помечает весь stderr как severity=error,
@@ -82,6 +83,7 @@ async def lifespan(app: FastAPI):
     _scheduler.add_job(_scan_job,    "interval", minutes=cfg.SCAN_INTERVAL_MIN, id="scan",    max_instances=1)
     _scheduler.add_job(_monitor_job, "interval", seconds=30,                    id="monitor", max_instances=1)
     _scheduler.add_job(_cleanup_job, "cron",     hour="*/6",                    id="cleanup")
+    _scheduler.add_job(_outcome_job, "interval", minutes=30,                    id="outcomes", max_instances=1)
     _scheduler.start()
     log.info(f"Scheduler started — scan every {cfg.SCAN_INTERVAL_MIN} min")
 
@@ -108,6 +110,11 @@ async def _scan_job():
 async def _monitor_job():
     if _client:
         await monitor_positions(_client)
+
+
+async def _outcome_job():
+    if _client:
+        await evaluate_signal_outcomes(_client)
 
 
 async def _cleanup_job():

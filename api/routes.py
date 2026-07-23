@@ -327,10 +327,12 @@ async def get_stats():
     for r in rows:
         by_type[r["signal_type"]] = by_type.get(r["signal_type"], 0) + 1
         by_dir[r["direction"]]    = by_dir.get(r["direction"], 0) + 1
+    outcomes = await db.get_outcome_stats(days=7)
     return {
         "total_24h":    len(rows),
         "by_type":      by_type,
         "by_direction": by_dir,
+        "outcomes_7d":  outcomes,
         "scan_count":   state.scan_count,
         "last_scan_at": state.last_scan_at.isoformat() + "Z" if state.last_scan_at else None,
     }

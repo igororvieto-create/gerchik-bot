@@ -23,7 +23,7 @@ class Config:
     )
 
     # Signal thresholds
-    MIN_SCORE:              int   = int(os.getenv("MIN_SCORE",              "40").strip())
+    MIN_SCORE:              int   = int(os.getenv("MIN_SCORE",              "30").strip())
     OI_CHANGE_THRESHOLD:    float = float(os.getenv("OI_CHANGE_THRESHOLD",  "2.0").strip())
     VOL_SPIKE_MULT:         float = float(os.getenv("VOL_SPIKE_MULT",       "1.5").strip())
     FUNDING_EXTREME:        float = float(os.getenv("FUNDING_EXTREME",      "0.03").strip())
@@ -36,7 +36,7 @@ class Config:
     MIN_RR:             float = float(os.getenv("MIN_RR",             "2.0").strip())
     KEY_LEVEL_LOOKBACK: int   = int(os.getenv("KEY_LEVEL_LOOKBACK",   "20").strip())
     KEY_LEVEL_WING:     int   = int(os.getenv("KEY_LEVEL_WING",       "2").strip())
-    KEY_LEVEL_ATR_MULT: float = float(os.getenv("KEY_LEVEL_ATR_MULT", "1.5").strip())
+    KEY_LEVEL_ATR_MULT: float = float(os.getenv("KEY_LEVEL_ATR_MULT", "2.0").strip())
     REQUIRE_MTF_ALIGN:  bool  = os.getenv("REQUIRE_MTF_ALIGN", "true").strip().lower() == "true"
     MTF_TREND_LOOKBACK: int   = int(os.getenv("MTF_TREND_LOOKBACK",   "6").strip())
     MIN_LISTING_AGE_DAYS: int = int(os.getenv("MIN_LISTING_AGE_DAYS", "14").strip())

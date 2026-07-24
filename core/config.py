@@ -30,16 +30,17 @@ class Config:
     PRICE_CHANGE_MIN:       float = float(os.getenv("PRICE_CHANGE_MIN",     "0.3").strip())
     OB_IMBALANCE_THRESHOLD: float = float(os.getenv("OB_IMBALANCE_THRESHOLD", "0.10").strip())
     MIN_VOL_24H:            float = float(os.getenv("MIN_VOL_24H",          "2000000").strip())
-    SIGNAL_COOLDOWN_MIN:    int   = int(os.getenv("SIGNAL_COOLDOWN_MIN",    "20").strip())
+    SIGNAL_COOLDOWN_MIN:    int   = int(os.getenv("SIGNAL_COOLDOWN_MIN",    "60").strip())
 
     # Gerchik methodology: key levels, MTF, R:R
     MIN_RR:             float = float(os.getenv("MIN_RR",             "2.0").strip())
     KEY_LEVEL_LOOKBACK: int   = int(os.getenv("KEY_LEVEL_LOOKBACK",   "20").strip())
     KEY_LEVEL_WING:     int   = int(os.getenv("KEY_LEVEL_WING",       "2").strip())
-    KEY_LEVEL_ATR_MULT: float = float(os.getenv("KEY_LEVEL_ATR_MULT", "2.0").strip())
+    KEY_LEVEL_ATR_MULT: float = float(os.getenv("KEY_LEVEL_ATR_MULT", "1.2").strip())
     REQUIRE_MTF_ALIGN:  bool  = os.getenv("REQUIRE_MTF_ALIGN", "true").strip().lower() == "true"
     MTF_TREND_LOOKBACK: int   = int(os.getenv("MTF_TREND_LOOKBACK",   "6").strip())
     MIN_LISTING_AGE_DAYS: int = int(os.getenv("MIN_LISTING_AGE_DAYS", "14").strip())
+    MAX_LAST_CANDLE_ATR:  float = float(os.getenv("MAX_LAST_CANDLE_ATR", "2.0").strip())
 
     # Signal history
     MAX_SIGNALS_DB:  int = int(os.getenv("MAX_SIGNALS_DB",  "500").strip())

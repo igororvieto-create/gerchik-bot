@@ -464,6 +464,16 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         atr = _calc_atr(klines[:-1])
         atr_pct = atr / price * 100 if price > 0 else 0.0
 
+        # Анти-спайк: не сигналить сразу после свечи-выброса. Вход после
+        # вертикальной свечи — вход вдогонку: пол-движения к цели уже
+        # сделано и обычно отдаётся назад (форвард-тест: 1W/14L, серия
+        # стопов именно на таких входах, пример — NOM score 91 на пике).
+        if atr > 0 and len(klines) >= 2:
+            last_completed = klines[-2]
+            last_spread = last_completed["high"] - last_completed["low"]
+            if last_spread / atr > cfg.MAX_LAST_CANDLE_ATR:
+                return None
+
         ob_ratio, ob_bias = _ob_imbalance(ob)
 
         # VSA: effort (объём) vs result (спред) на последней завершённой 4h свече

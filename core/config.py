@@ -8,7 +8,6 @@ class Config:
     BYBIT_API_KEY: str = os.getenv("BYBIT_API_KEY", "").strip()
     BYBIT_SECRET:  str = os.getenv("BYBIT_SECRET",  "").strip()
     NTFY_URL:      str = os.getenv("NTFY_URL",      "").strip()
-    NTFY_TOPIC:    str = os.getenv("NTFY_TOPIC",    "bybit-scanner").strip()
 
     # Scanning
     SCAN_INTERVAL_MIN: int   = int(os.getenv("SCAN_INTERVAL_MIN", "4").strip())

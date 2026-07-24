@@ -8,12 +8,15 @@ import aiosqlite
 from core.state import Signal, Position
 
 log = logging.getLogger("db")
-# Use an absolute path anchored to this file so the DB is always found
-# at <project-root>/data/signals.db regardless of the process CWD.
-# The env-var override still works for Railway Volumes or custom mounts.
-_DEFAULT_DB = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "signals.db")
-)
+# Priority: DB_PATH env var > Railway Volume at /data (survives deploys!)
+# > <project-root>/data/signals.db (ephemeral — wiped on every redeploy).
+# Without a Volume the forward-test statistics reset with each git push.
+if os.path.isdir("/data") and os.access("/data", os.W_OK):
+    _DEFAULT_DB = "/data/signals.db"
+else:
+    _DEFAULT_DB = os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "signals.db")
+    )
 DB_PATH = os.getenv("DB_PATH", _DEFAULT_DB)
 
 

@@ -119,7 +119,8 @@ async def _outcome_job():
 
 async def _cleanup_job():
     try:
-        removed = await db.cleanup_old_signals(keep_hours=48)
+        # Не короче 50ч: оценщику нужно 48ч, чтобы досудить pending-сигналы
+        removed = await db.cleanup_old_signals(keep_hours=max(cfg.SIGNAL_TTL_HOURS, 50))
         if removed:
             log.info(f"Cleanup: removed {removed} old signals")
     except Exception as e:

@@ -304,6 +304,14 @@ async def get_status():
     return JSONResponse(info)
 
 
+@router.get("/api/outcomes")
+async def get_outcomes(days: int = 7):
+    """Forward-test breakdown: winrate by score bucket, direction, signal type."""
+    summary = await db.get_outcome_stats(days=days)
+    breakdown = await db.get_outcome_breakdown(days=days)
+    return JSONResponse(_sanitize({"summary": summary, **breakdown}))
+
+
 @router.get("/api/trades")
 async def get_trades(limit: int = 50):
     rows = await db.get_trades(limit=limit)

@@ -226,6 +226,55 @@ async def get_outcome_stats(days: int = 7) -> Dict:
         return stats
 
 
+async def get_outcome_breakdown(days: int = 7) -> Dict:
+    """Winrate sliced by score bucket / direction / signal type + last decided.
+    The go/no-go analysis tool: shows WHERE the strategy wins or loses."""
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    out: Dict = {"by_score": {}, "by_direction": {}, "by_type": {}, "recent": []}
+
+    def _bucket(score: int) -> str:
+        if score >= 60: return "60+"
+        if score >= 45: return "45-59"
+        return "30-44"
+
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT symbol, score, direction, signal_type, outcome, ts
+                   FROM signals WHERE outcome IS NOT NULL AND ts >= ?
+                   ORDER BY ts DESC""",
+                (cutoff,),
+            ) as cur:
+                rows = await cur.fetchall()
+
+        def _acc(d: Dict, key: str, outcome: str) -> None:
+            slot = d.setdefault(key, {"win": 0, "loss": 0, "expired": 0})
+            k = outcome.lower()
+            if k in slot:
+                slot[k] += 1
+
+        for r in rows:
+            _acc(out["by_score"], _bucket(r["score"]), r["outcome"])
+            _acc(out["by_direction"], r["direction"], r["outcome"])
+            _acc(out["by_type"], r["signal_type"], r["outcome"])
+
+        for d in (out["by_score"], out["by_direction"], out["by_type"]):
+            for slot in d.values():
+                decided = slot["win"] + slot["loss"]
+                slot["winrate"] = round(slot["win"] / decided * 100, 1) if decided else None
+
+        out["recent"] = [
+            {"symbol": r["symbol"], "score": r["score"], "dir": r["direction"],
+             "type": r["signal_type"], "outcome": r["outcome"], "ts": r["ts"]}
+            for r in rows[:25]
+        ]
+        return out
+    except Exception as e:
+        log.error(f"get_outcome_breakdown error: {e}")
+        return out
+
+
 async def get_realized_pnl_since(closed_after_iso: str) -> float:
     """Sum of realized PnL for trades closed at/after the given ISO timestamp.
     Used to rebuild the daily circuit-breaker counter after a process restart —

@@ -25,6 +25,12 @@ _SCANNING = False
 # get_instrument_info на каждый скан для одних и тех же пар.
 _LISTING_AGE_CACHE: dict[str, float] = {}  # symbol -> launchTime (ms since epoch)
 
+# Один сетап = один сигнал. Весь анализ (VSA, объём, уровни) считается по
+# ПОСЛЕДНЕЙ ЗАКРЫТОЙ 4h свече и не меняется до 4 часов, а сканы идут каждые
+# 4 минуты — раньше одна и та же свеча порождала до 4 сигналов подряд по всё
+# более высокой цене (вход вдогонку), и каждый шёл в статистику отдельно.
+_SIGNALLED_CANDLE: dict[str, int] = {}  # symbol -> ts последней отсигналенной свечи
+
 
 async def _is_listing_old_enough(client: BybitClient, symbol: str) -> bool:
     """
@@ -108,12 +114,18 @@ def _trend_direction(klines: list, lookback: int = None) -> str:
     return "NEUTRAL"
 
 
-def _find_swing_levels(klines: list, lookback: int = None,
+def _find_swing_levels(klines: list, price: float = 0.0, lookback: int = None,
                         wing: int = None) -> tuple[Optional[float], Optional[float]]:
     """
-    Простой фрактальный поиск ближайших swing low / swing high (support/resistance)
-    за последние `lookback` завершённых свечей. Возвращает (support, resistance) —
-    самый последний найденный пивот в каждую сторону, либо None если не найден.
+    Фрактальный поиск swing low / swing high за последние `lookback` завершённых
+    свечей. Возвращает (support, resistance) — БЛИЖАЙШИЕ к цене уровни с
+    правильной стороны: support НИЖЕ цены, resistance ВЫШЕ цены.
+
+    Раньше брался просто последний по времени пивот в каждую сторону. Из-за
+    этого: (а) валидный сетап у близкой поддержки отбраковывался, если позже
+    нашёлся более глубокий пивот; (б) SL якорился за нерелевантным уровнем и
+    риск раздувался; (в) для LONG resistance часто оказывался НИЖЕ цены, из-за
+    чего гейт MIN_RR в _calc_levels молча отключался ("открытое небо").
     """
     if lookback is None:
         lookback = cfg.KEY_LEVEL_LOOKBACK
@@ -125,15 +137,23 @@ def _find_swing_levels(klines: list, lookback: int = None,
     if n < wing * 2 + 1:
         return None, None
 
-    support = None
-    resistance = None
+    if price <= 0:
+        price = window[-1]["close"]
+
+    supports: list[float] = []
+    resistances: list[float] = []
     for i in range(wing, n - wing):
         seg_high = [window[j]["high"] for j in range(i - wing, i + wing + 1)]
         seg_low  = [window[j]["low"]  for j in range(i - wing, i + wing + 1)]
         if window[i]["high"] == max(seg_high):
-            resistance = window[i]["high"]  # берём последний найденный -> самый свежий пивот
+            resistances.append(window[i]["high"])
         if window[i]["low"] == min(seg_low):
-            support = window[i]["low"]
+            supports.append(window[i]["low"])
+
+    below = [s for s in supports if s < price]
+    above = [r for r in resistances if r > price]
+    support    = max(below) if below else None   # ближайшая поддержка снизу
+    resistance = min(above) if above else None   # ближайшее сопротивление сверху
     return support, resistance
 
 
@@ -464,23 +484,25 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         atr = _calc_atr(klines[:-1])
         atr_pct = atr / price * 100 if price > 0 else 0.0
 
-        # Анти-спайк: не сигналить сразу после свечи-выброса. Вход после
-        # вертикальной свечи — вход вдогонку: пол-движения к цели уже
-        # сделано и обычно отдаётся назад (форвард-тест: 1W/14L, серия
-        # стопов именно на таких входах, пример — NOM score 91 на пике).
-        if atr > 0 and len(klines) >= 2:
-            last_completed = klines[-2]
-            last_spread = last_completed["high"] - last_completed["low"]
-            if last_spread / atr > cfg.MAX_LAST_CANDLE_ATR:
-                return None
-
         ob_ratio, ob_bias = _ob_imbalance(ob)
 
         # VSA: effort (объём) vs result (спред) на последней завершённой 4h свече
         vsa_type, vsa_bias = _vsa_classify(klines, vol_avg, atr)
+        is_vsa_reversal = vsa_type in ("CLIMAX", "ABSORPTION")
 
-        # Ключевые уровни на 4h
-        support, resistance = _find_swing_levels(klines)
+        # Анти-спайк: не входить вдогонку после вертикального движения.
+        # Проверяются ОБЕ свечи — последняя закрытая И текущая формирующаяся
+        # (именно её пропускал прежний гейт: кейс NOM score 91, где сигнал
+        # выдавался на пике ещё не закрытой свечи).
+        # Исключение — VSA-развороты: климакс по определению широкая свеча,
+        # и торгуется он ПРОТИВ неё, а не вдогонку.
+        if atr > 0 and not is_vsa_reversal:
+            for k in klines[-2:]:
+                if (k["high"] - k["low"]) / atr > cfg.MAX_LAST_CANDLE_ATR:
+                    return None
+
+        # Ключевые уровни на 4h — ближайшие к текущей цене с правильных сторон
+        support, resistance = _find_swing_levels(klines, price=price)
         level_dist_atr = None
         if atr > 0:
             dists = []
@@ -500,15 +522,25 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             sig_type, price_chg, ob_bias, funding, vsa_bias=vsa_bias,
         )
 
+        # Рецидивирующий баг №2 (CLAUDE.md): VSA начислял до +20 очков ВСЕГДА,
+        # но на направление влиял только если sig_type начинался с "VSA_".
+        # Сетап мог набрать 70 очков, где +20 кричат SHORT, и войти в LONG.
+        # Снимаем вклад VSA, когда он противоречит выбранному направлению.
+        if vsa_bias != "NEUTRAL" and vsa_bias != direction:
+            score -= 20 if vsa_type == "CLIMAX" else 15
+
         # Confluence cap ПОСЛЕ определения направления, ДО порога MIN_SCORE —
         # противоречащий сигнал не должен проходить фильтр на сырой магнитуде
         score = _apply_confluence_cap(score, confidence)
         if score < cfg.MIN_SCORE:
             return None
 
-        # MTF-фильтр: тренд на 1h не должен противоречить тренду на 4h и направлению сделки.
-        # Это жёсткий отсекающий фильтр (не просто очки в score), как требует методология.
-        if cfg.REQUIRE_MTF_ALIGN:
+        # MTF-фильтр: тренды 1h/4h не должны противоречить направлению сделки.
+        # VSA-развороты (климакс/поглощение) освобождены: они по определению
+        # торгуются ПРОТИВ предшествующего движения, и прежний безусловный
+        # фильтр вырезал их все до единого — оставляя только входы по тренду,
+        # то есть вдогонку (это и давало 1W/14L в форвард-тесте).
+        if cfg.REQUIRE_MTF_ALIGN and not is_vsa_reversal:
             trend_4h = _trend_direction(klines)
             trend_1h = _trend_direction(klines_1h)
             opposite = "DOWN" if direction == "LONG" else "UP"
@@ -543,6 +575,12 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         if levels is None:
             # либо нет валидного риска, либо не набирается MIN_RR до цели
             return None
+
+        # Один сетап — один сигнал: та же закрытая свеча повторно не сигналит
+        candle_ts = int(klines[-2]["ts"])
+        if _SIGNALLED_CANDLE.get(symbol) == candle_ts:
+            return None
+        _SIGNALLED_CANDLE[symbol] = candle_ts
 
         details = (
             f"{sig_type} | {direction} | score={score} | conf={confidence:.2f} | "
@@ -625,6 +663,12 @@ async def scan_all(client: BybitClient) -> List[Signal]:
 
         if errors:
             log.warning(f"scan_all: {errors}/{len(tickers)} symbols failed with exceptions")
+
+        # Кэши растут по мере появления новых пар — держим в границах
+        if len(_SIGNALLED_CANDLE) > 2000:
+            _SIGNALLED_CANDLE.clear()
+        if len(_LISTING_AGE_CACHE) > 2000:
+            _LISTING_AGE_CACHE.clear()
 
         signals.sort(key=lambda s: s.score, reverse=True)
         state.last_scan_at = datetime.utcnow()

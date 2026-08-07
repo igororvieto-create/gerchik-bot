@@ -59,8 +59,14 @@ async def init_db() -> None:
                     "outcome TEXT", "outcome_price REAL", "outcome_at TEXT"]:
             try:
                 await db.execute(f"ALTER TABLE signals ADD COLUMN {col}")
-            except Exception:
-                pass
+            except Exception as e:
+                # "duplicate column name" — норма (колонка уже есть).
+                # Всё остальное (БД заблокирована, диск полон, read-only)
+                # раньше глушилось молча, и весь форвард-тест тихо не работал:
+                # запросы падали на "no such column", а каждый вызывающий
+                # проглатывал ошибку и возвращал пустоту.
+                if "duplicate column" not in str(e).lower():
+                    log.error(f"init_db: не удалось добавить колонку {col} — {e}")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS trades (
@@ -85,6 +91,7 @@ async def init_db() -> None:
         """)
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_outcome ON signals(outcome, ts)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol_ts ON signals(symbol, ts)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
@@ -319,9 +326,15 @@ async def cleanup_old_signals(keep_hours: int = 48) -> int:
             removed = cur.rowcount
             # Row-count cap (MAX_SIGNALS_DB) on top of the time-based retention —
             # a noisy market can write thousands of rows inside 48h
+            # Лимит строк НЕ трогает сигналы, по которым оценщик ещё не вынес
+            # вердикт: раньше при 100 парах лимит 500 выбирался за часы, и
+            # сигналы удалялись прямо посреди 48-часового окна оценки. Стопы
+            # (1R) разрешаются быстрее тейков (2R), поэтому удалялись
+            # преимущественно будущие победы — винрейт систематически занижался.
             cur2 = await db.execute(
-                """DELETE FROM signals WHERE id NOT IN
-                   (SELECT id FROM signals ORDER BY ts DESC LIMIT ?)""",
+                """DELETE FROM signals
+                   WHERE outcome IS NOT NULL
+                     AND id NOT IN (SELECT id FROM signals ORDER BY ts DESC LIMIT ?)""",
                 (max(cfg.MAX_SIGNALS_DB, 1),),
             )
             removed += cur2.rowcount

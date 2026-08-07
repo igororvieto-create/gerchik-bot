@@ -706,7 +706,9 @@ async function refreshStats(){
       const t=new Date(d.last_scan_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
       $('s-lastscan').textContent=t;
       gLastScan=new Date(d.last_scan_at).toLocaleString('ru-RU');
-      $('scan-info').textContent=`Скан #${d.scan_count} · ${t} · найдено: ${d.total_24h??0}`;
+      // не затираем сообщение об ошибке скана из heartbeat/doScan
+      if(!String($('scan-info').textContent).startsWith('⚠'))
+        $('scan-info').textContent=`Скан #${d.scan_count} · ${t} · найдено: ${d.total_24h??0}`;
       $('scan-pulse').className='scan-pulse';
     }
   }catch{}
@@ -729,7 +731,7 @@ async function refreshPositions(){
     $('s-pos').textContent=pos.length;
     const panel=$('pos-panel');
     if(pos.length){
-      panel.style.display='';
+      panel.style.display='block';
       $('pos-list').innerHTML=pos.map(p=>{
         const dir=p.direction==='LONG';
         const pnl=p.unrealised_pnl||0;
@@ -811,23 +813,31 @@ function onToggleAutoTrade(el){
 }
 
 async function saveSettings(){
+  const num=v=>Number.isFinite(v)?v:undefined;   // пустое поле -> не шлём
   const body={
     auto_trade:      $('set-auto-trade').checked,
-    risk_per_trade:  parseFloat($('set-risk').value),
-    leverage:        parseInt($('set-lev').value),
-    max_positions:   parseInt($('set-maxpos').value),
-    min_score:       parseInt($('set-minscore').value),
-    trade_min_score: parseInt($('set-tradescore').value),
+    risk_per_trade:  num(parseFloat($('set-risk').value)),
+    leverage:        num(parseInt($('set-lev').value)),
+    max_positions:   num(parseInt($('set-maxpos').value)),
+    min_score:       num(parseInt($('set-minscore').value)),
+    trade_min_score: num(parseInt($('set-tradescore').value)),
   };
+  Object.keys(body).forEach(k=>body[k]===undefined&&delete body[k]);
+  $('save-msg').style.color='';
   try{
     const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const d=await r.json();
-    if(d.ok){
-      $('save-msg').textContent='✅ Сохранено';
+    const d=await r.json().catch(()=>({}));
+    if(r.ok&&d.ok){
+      // показываем, что РЕАЛЬНО применилось: бэкенд мог отклонить часть полей
+      const n=d.changed?Object.keys(d.changed).length:0;
+      $('save-msg').style.color='var(--green)';
+      $('save-msg').textContent=`✅ Сохранено (${n})`;
       $('s-trade').textContent=body.auto_trade?'🤖 Авто':'👁 Мониторинг';
       setTimeout(()=>{ $('save-msg').textContent=''; closeModal('settings-modal'); },1200);
     } else {
-      $('save-msg').textContent='❌ Ошибка: '+(d.error||'');
+      const det=d.rejected?Object.entries(d.rejected).map(([k,v])=>`${k} — ${v}`).join('; ')
+                          :(d.error||('HTTP '+r.status));
+      $('save-msg').textContent='❌ '+det;
       $('save-msg').style.color='var(--red)';
     }
   }catch(e){
@@ -897,7 +907,13 @@ function connect(){
   ws.onclose=()=>{
     clearTimeout(timer); wsOk=false;
     if(wsR<3){ setStatus('','Реконнект…'); setTimeout(connect,Math.min(1000*2**wsR++,15000)); }
-    else{ setStatus('','HTTP режим'); fallback(); }
+    else{
+      // HTTP-режим как временный фолбэк, но попытки WS продолжаем реже:
+      // раньше после 3 неудач (сон телефона, смена сети) вкладка застревала
+      // в поллинге навсегда — до ручной перезагрузки страницы
+      setStatus('','HTTP режим'); fallback();
+      setTimeout(()=>{ wsR=0; connect(); }, 60000);
+    }
   };
 }
 

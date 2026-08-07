@@ -191,24 +191,30 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         # Qty precision from instrument info
         info = await client.get_instrument_info(sig.symbol)
         lot  = info.get("lotSizeFilter", {})
+        if not lot:
+            # Пустой ответ = сбой API. Подставлять шаг 0.001 наугад опасно:
+            # для символа с реальным шагом 1 это ломает и размер, и риск-гард.
+            log.warning(f"{sig.symbol}: нет данных инструмента (lotSizeFilter пуст) — пропуск входа")
+            state.positions.pop(sig.symbol, None)
+            return False
         qty_step = float(lot.get("qtyStep",      "0.001"))
         min_qty  = float(lot.get("minOrderQty",  "0.001"))
 
         qty = _round_step(position_usdt / sig.entry, qty_step)
         if qty < min_qty:
-            # Bumping to min_qty silently multiplies risk: on a symbol whose
-            # minimum lot is worth several times the intended notional, the
-            # loss at SL would blow through the per-trade risk ceiling.
-            # Only accept the bump when actual risk stays within 1.5x target.
-            bumped_risk = min_qty * sig.entry * sig.sl_pct / 100
-            if bumped_risk > risk_usdt * 1.5:
-                log.info(
-                    f"{sig.symbol}: min lot {min_qty} would risk "
-                    f"{bumped_risk:.2f} USDT vs target {risk_usdt:.2f} — skip"
-                )
-                state.positions.pop(sig.symbol, None)
-                return False
             qty = min_qty
+        # Проверяем ФАКТИЧЕСКИЙ риск после округления, а не только случай
+        # qty < min_qty: _round_step округляет к БЛИЖАЙШЕМУ шагу, поэтому
+        # qty 0.51 при шаге 1 превращалась в 1.0 (риск ×1.96) и проверка
+        # min_qty не срабатывала вовсе — потолок риска обходился молча.
+        actual_risk = qty * sig.entry * sig.sl_pct / 100
+        if actual_risk > risk_usdt * 1.5:
+            log.info(
+                f"{sig.symbol}: лот {qty} (шаг {qty_step}, мин {min_qty}) даёт риск "
+                f"{actual_risk:.2f} USDT вместо целевых {risk_usdt:.2f} — пропуск"
+            )
+            state.positions.pop(sig.symbol, None)
+            return False
 
         if qty * sig.entry < 5.0:
             log.debug(f"{sig.symbol}: notional {qty*sig.entry:.2f} < 5 USDT min")
@@ -289,7 +295,17 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             if exch_sl > 0 and exch_tp > 0:
                 break
 
-        if verified and (exch_sl <= 0 or exch_tp <= 0):
+        if verified and exch_tp <= 0 and exch_sl > 0:
+            # TP не долетел, но SL стоит — позиция ЗАЩИЩЕНА, закрывать её
+            # (платя спред дважды) нельзя. Досылаем тейк отдельным запросом.
+            log.warning(f"{sig.symbol}: TP не прикрепился (SL={exch_sl}) — досылаю takeProfit")
+            try:
+                await client.set_trading_stop(sig.symbol, tp=sig.tp2)
+            except Exception as te:
+                log.warning(f"{sig.symbol}: не удалось дослать TP — {te}")
+
+        if verified and exch_sl <= 0:
+            # Риск несёт только отсутствующий SL — вот тут закрываем.
             log.error(
                 f"{sig.symbol}: order filled but exchange shows "
                 f"SL={exch_sl} TP={exch_tp} — position UNPROTECTED, closing immediately."
@@ -340,13 +356,16 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         )
         return True
 
-    except Exception as e:
-        # Only clear the slot if we haven't registered a live Position yet —
-        # once a real Position is tracked, the order filled and must stay
-        # visible to monitor_positions even if something after it raised.
+    except BaseException as e:
+        # BaseException, не Exception: asyncio.CancelledError (таймаут /api/scan,
+        # рестарт uvicorn) прежде проскакивал мимо очистки, и sentinel-слот
+        # оставался в state.positions НАВСЕГДА — занимал место из MAX_POSITIONS,
+        # блокировал повторный вход по символу и был невидим для монитора.
         if not isinstance(state.positions.get(sig.symbol), Position):
             state.positions.pop(sig.symbol, None)
-        log.error(f"enter_trade {sig.symbol}: {e}")
+        log.error(f"enter_trade {sig.symbol}: {type(e).__name__}: {e}")
+        if isinstance(e, asyncio.CancelledError):
+            raise
         return False
 
 
@@ -385,6 +404,39 @@ async def monitor_positions(client: BybitClient) -> None:
         live_map = {p["symbol"]: p for p in live}
         now_utc = datetime.utcnow()
 
+        # Усыновление осиротевших позиций: state.positions живёт только в
+        # памяти и обнуляется при каждом рестарте, а деплой Railway при
+        # открытых позициях оставлял их без мониторинга — без проверки SL,
+        # без записи закрытия и без учёта в дневном лимите. Хуже: enter_trade
+        # считал символ свободным и мог удвоить позицию в one-way режиме.
+        for sym, lp in live_map.items():
+            if sym in state.positions:
+                continue
+            try:
+                size = abs(float(lp.get("size") or 0))
+                if size <= 0:
+                    continue
+                entry_px = float(lp.get("avgPrice") or 0)
+                adopted = Position(
+                    symbol=sym,
+                    side=lp.get("side", "Buy"),
+                    entry=entry_px,
+                    sl=float(lp.get("stopLoss") or 0),
+                    tp1=0.0,
+                    tp2=float(lp.get("takeProfit") or 0),
+                    tp3=0.0,
+                    qty=size,
+                    score=0,
+                    signal_type="ADOPTED",
+                )
+                state.positions[sym] = adopted
+                log.warning(
+                    f"{sym}: найдена неотслеживаемая позиция на бирже "
+                    f"({adopted.side} {size} @ {entry_px}) — взята под мониторинг"
+                )
+            except Exception as ae:
+                log.error(f"{sym}: не удалось усыновить позицию — {ae}")
+
         for sym in list(state.positions.keys()):
             pos = state.positions.get(sym)
             if pos is None:
@@ -398,7 +450,11 @@ async def monitor_positions(client: BybitClient) -> None:
                     log.debug(f"{sym}: {age_s:.0f}s old, absent from snapshot — grace period")
                     continue
                 # Position closed by exchange (SL or TP hit)
-                exit_price, pnl = await fetch_matching_closed_pnl(client, pos, attempts=2)
+                # attempts=4 с паузой: запись closed-pnl у Bybit регулярно
+                # отстаёт на несколько секунд. Раньше двух быстрых попыток не
+                # хватало, и убыток писался как pnl=0 — дневной лимит его не видел.
+                await asyncio.sleep(1.0)
+                exit_price, pnl = await fetch_matching_closed_pnl(client, pos, attempts=4)
                 await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
                 state.positions.pop(sym, None)
                 log.info(f"{sym}: closed (SL/TP) exit={exit_price:.4f} pnl={pnl:+.2f}")
@@ -409,11 +465,25 @@ async def monitor_positions(client: BybitClient) -> None:
                 lp = live_map[sym]
                 pos.unrealised_pnl = float(lp.get("unrealisedPnl", 0))
 
+                # Сверка размера: вход идёт IOC-ордером, который может залиться
+                # частично, а ветка реконсиляции дубликата (110072) вообще не
+                # видит отчёта о заливе. Закрытие по устаревшему qty биржа
+                # отвергнет — и незащищённая позиция осталась бы висеть.
+                live_size = abs(float(lp.get("size") or 0))
+                if live_size > 0 and abs(live_size - pos.qty) / max(pos.qty, 1e-9) > 0.01:
+                    log.warning(f"{sym}: размер позиции {pos.qty} → {live_size} (сверка с биржей)")
+                    pos.qty = live_size
+
                 # Continuous SL verification — the "monitor re-checks" that
                 # enter_trade's unverified path relies on. A live position
                 # without a stop-loss is the recurring bug #1 made real.
                 exch_sl = float(lp.get("stopLoss") or 0)
-                if exch_sl <= 0:
+                if exch_sl <= 0 and pos.signal_type == "ADOPTED":
+                    # Позиция открыта НЕ ботом (усыновлена с биржи — возможно,
+                    # твоя ручная сделка). Мониторим и учитываем в статистике,
+                    # но НИКОГДА не трогаем: ни довешивание стопа, ни закрытие.
+                    log.warning(f"{sym}: усыновлённая позиция без SL — только наблюдение, не вмешиваюсь")
+                elif exch_sl <= 0:
                     log.error(f"{sym}: live position has NO stop-loss — re-attaching SL/TP")
                     reattached = False
                     try:

@@ -42,7 +42,9 @@ class Config:
     MAX_LAST_CANDLE_ATR:  float = float(os.getenv("MAX_LAST_CANDLE_ATR", "2.0").strip())
 
     # Signal history
-    MAX_SIGNALS_DB:  int = int(os.getenv("MAX_SIGNALS_DB",  "500").strip())
+    # 5000 ≈ 8 суток потока сигналов: лимит не должен обрезать семидневную
+    # выборку винрейта (500 выбирались за ~5 дней и статистика теряла хвост)
+    MAX_SIGNALS_DB:  int = int(os.getenv("MAX_SIGNALS_DB",  "5000").strip())
     SIGNAL_TTL_HOURS: int = int(os.getenv("SIGNAL_TTL_HOURS", "24").strip())
 
     # ── Auto-trading ──────────────────────────────────────────────────────────
@@ -60,4 +62,26 @@ class Config:
     ABORT_ON_LEVERAGE_FAIL: bool  = os.getenv("ABORT_ON_LEVERAGE_FAIL", "true").strip().lower() == "true"
 
 
+def _clamp(value, lo, hi, name: str):
+    """Жёсткое ограничение инвариантов проекта на уровне конфига.
+    Раньше потолки (риск 1-3%, плечо ≤5x) проверялись ТОЛЬКО в /api/settings —
+    опечатка в переменной окружения Railway (RISK_PER_TRADE=10) проходила
+    насквозь до расчёта размера позиции без единой проверки."""
+    if value < lo or value > hi:
+        import logging
+        clamped = max(lo, min(hi, value))
+        logging.getLogger("config").error(
+            f"{name}={value} вне допустимого диапазона [{lo}, {hi}] — принудительно {clamped}"
+        )
+        return clamped
+    return value
+
+
 cfg = Config()
+
+# Инварианты CLAUDE.md — нарушить нельзя ни через env, ни через API
+cfg.RISK_PER_TRADE       = _clamp(cfg.RISK_PER_TRADE,       0.1, 3.0,  "RISK_PER_TRADE")
+cfg.LEVERAGE             = int(_clamp(cfg.LEVERAGE,           1,   5,  "LEVERAGE"))
+cfg.MAX_POSITIONS        = int(_clamp(cfg.MAX_POSITIONS,      1,  20,  "MAX_POSITIONS"))
+cfg.MAX_MARGIN_PCT       = _clamp(cfg.MAX_MARGIN_PCT,       1.0, 50.0, "MAX_MARGIN_PCT")
+cfg.DAILY_LOSS_LIMIT_PCT = _clamp(cfg.DAILY_LOSS_LIMIT_PCT, 1.0, 20.0, "DAILY_LOSS_LIMIT_PCT")

@@ -369,40 +369,48 @@ async def update_settings(request: Request):
     except Exception:
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
 
+    # Валидируем ВСЁ до применения: раньше ошибка на позднем поле
+    # возвращала 400 уже ПОСЛЕ того, как ранние поля были применены —
+    # UI показывал "не сохранено", а риск и авто-торговля уже изменились.
+    spec = {
+        "auto_trade":      (bool,  None,        None),
+        "min_score":       (int,   5,           100),
+        "trade_min_score": (int,   5,           100),
+        "risk_per_trade":  (float, 0.1,         3.0),   # инвариант: риск ≤3%
+        "max_positions":   (int,   1,           20),
+        "leverage":        (int,   1,           5),     # инвариант: плечо ≤5x
+    }
+    field_map = {
+        "auto_trade": "AUTO_TRADE", "min_score": "MIN_SCORE",
+        "trade_min_score": "TRADE_MIN_SCORE", "risk_per_trade": "RISK_PER_TRADE",
+        "max_positions": "MAX_POSITIONS", "leverage": "LEVERAGE",
+    }
+    pending: dict = {}
+    rejected: dict = {}
+    for key, (caster, lo, hi) in spec.items():
+        if key not in body:
+            continue
+        try:
+            v = caster(body[key])
+        except (TypeError, ValueError):
+            rejected[key] = f"недопустимое значение: {body[key]!r}"
+            continue
+        if lo is not None and not (lo <= v <= hi):
+            rejected[key] = f"вне диапазона [{lo}, {hi}]"
+            continue
+        pending[key] = round(v, 2) if caster is float else v
+
+    if rejected:
+        # Ничего не применяем — частичное сохранение хуже отказа
+        return JSONResponse(
+            {"error": "некорректные параметры", "rejected": rejected}, status_code=400
+        )
+
     changes: dict = {}
-    try:
-        if "auto_trade" in body:
-            cfg.AUTO_TRADE = bool(body["auto_trade"])
-            changes["auto_trade"] = cfg.AUTO_TRADE
-        if "min_score" in body:
-            v = int(body["min_score"])
-            if 5 <= v <= 100:
-                cfg.MIN_SCORE = v
-                changes["min_score"] = v
-        if "trade_min_score" in body:
-            v = int(body["trade_min_score"])
-            if 5 <= v <= 100:
-                cfg.TRADE_MIN_SCORE = v
-                changes["trade_min_score"] = v
-        if "risk_per_trade" in body:
-            v = float(body["risk_per_trade"])
-            # Инвариант проекта: риск на сделку 1-3%, потолок жёсткий
-            if 0.1 <= v <= 3.0:
-                cfg.RISK_PER_TRADE = round(v, 2)
-                changes["risk_per_trade"] = cfg.RISK_PER_TRADE
-        if "max_positions" in body:
-            v = int(body["max_positions"])
-            if 1 <= v <= 20:
-                cfg.MAX_POSITIONS = v
-                changes["max_positions"] = v
-        if "leverage" in body:
-            v = int(body["leverage"])
-            # Инвариант проекта: плечо максимум 3-5x — потолок жёсткий
-            if 1 <= v <= 5:
-                cfg.LEVERAGE = v
-                changes["leverage"] = v
-    except (TypeError, ValueError) as exc:
-        return JSONResponse({"error": f"invalid parameter value: {exc}"}, status_code=400)
+    for key, v in pending.items():
+        setattr(cfg, field_map[key], v)
+        changes[key] = v
+
     log.info(f"Settings updated: {changes}")
     return JSONResponse({"ok": True, "changed": changes})
 

@@ -80,10 +80,17 @@ async def lifespan(app: FastAPI):
              f"api_key={'set' if cfg.BYBIT_API_KEY else 'not set'}")
 
     _scheduler = AsyncIOScheduler(timezone="UTC")
-    _scheduler.add_job(_scan_job,    "interval", minutes=cfg.SCAN_INTERVAL_MIN, id="scan",    max_instances=1)
-    _scheduler.add_job(_monitor_job, "interval", seconds=30,                    id="monitor", max_instances=1)
-    _scheduler.add_job(_cleanup_job, "cron",     hour="*/6",                    id="cleanup")
-    _scheduler.add_job(_outcome_job, "interval", minutes=30,                    id="outcomes", max_instances=1)
+    # misfire_grace_time: по умолчанию APScheduler пропускает задачу, если
+    # опоздал больше чем на 1 секунду. Тяжёлый скан блокирует цикл событий, и
+    # тик монитора (проверка наличия SL у живых позиций!) молча терялся.
+    _scheduler.add_job(_scan_job,    "interval", minutes=cfg.SCAN_INTERVAL_MIN, id="scan",
+                       max_instances=1, misfire_grace_time=120)
+    _scheduler.add_job(_monitor_job, "interval", seconds=30,                    id="monitor",
+                       max_instances=1, misfire_grace_time=60)
+    _scheduler.add_job(_cleanup_job, "cron",     hour="*/6",                    id="cleanup",
+                       misfire_grace_time=3600)
+    _scheduler.add_job(_outcome_job, "interval", minutes=30,                    id="outcomes",
+                       max_instances=1, misfire_grace_time=600)
     _scheduler.start()
     log.info(f"Scheduler started — scan every {cfg.SCAN_INTERVAL_MIN} min")
 
@@ -96,7 +103,16 @@ async def lifespan(app: FastAPI):
 
     initial_scan_task.cancel()
     if _scheduler and _scheduler.running:
-        _scheduler.shutdown(wait=False)
+        # wait=True: даём доработать запущенным задачам. Раньше сессия
+        # закрывалась под ногами у enter_trade прямо в момент верификации
+        # SL — позиция оставалась на бирже с неподтверждённым стопом.
+        try:
+            await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(None, _scheduler.shutdown, True),
+                timeout=25,
+            )
+        except Exception as se:
+            log.warning(f"scheduler shutdown: {se}")
     if _client:
         await _client.close()
     log.info("Shutdown complete")
@@ -119,8 +135,10 @@ async def _outcome_job():
 
 async def _cleanup_job():
     try:
-        # Не короче 50ч: оценщику нужно 48ч, чтобы досудить pending-сигналы
-        removed = await db.cleanup_old_signals(keep_hours=max(cfg.SIGNAL_TTL_HOURS, 50))
+        # 8 суток: оценщику нужно 48ч на вердикт, а статистика винрейта
+        # считается за 7 дней — при прежних 50ч решённые сигналы удалялись
+        # раньше, чем попадали в семидневную выборку
+        removed = await db.cleanup_old_signals(keep_hours=max(cfg.SIGNAL_TTL_HOURS, 192))
         if removed:
             log.info(f"Cleanup: removed {removed} old signals")
     except Exception as e:

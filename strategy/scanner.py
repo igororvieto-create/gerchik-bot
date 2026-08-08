@@ -422,12 +422,14 @@ def _calc_levels(price: float, atr: float, direction: str,
     # (нужно wing баров после неё), поэтому без якоря разворотный вход
     # оставался бы вообще без валидной опоры для стопа.
     if sl_anchor is not None and sl_anchor > 0:
-        if direction == "LONG":
-            support = sl_anchor if support is None else max(support, sl_anchor) \
-                if sl_anchor < price else support
-        else:
-            resistance = sl_anchor if resistance is None else min(resistance, sl_anchor) \
-                if sl_anchor > price else resistance
+        # Для разворота якорь ИМЕЕТ ПРИОРИТЕТ, даже если он дальше найденного
+        # пивота: тезис сделки в том, что экстремум сигнальной свечи устоит.
+        # Стоп внутри диапазона этой свечи (за более близким уровнем) выбило
+        # бы обычным шумом задолго до того, как тезис реально сломается.
+        if direction == "LONG" and sl_anchor < price:
+            support = sl_anchor if support is None else min(support, sl_anchor)
+        elif direction == "SHORT" and sl_anchor > price:
+            resistance = sl_anchor if resistance is None else max(resistance, sl_anchor)
 
     if direction == "LONG":
         if support is not None and support < price:

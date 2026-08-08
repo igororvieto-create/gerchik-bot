@@ -139,7 +139,9 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
     if sig.symbol in state.positions:
         log.debug(f"{sig.symbol}: already in position, skip")
         return False
-    if len(state.positions) >= cfg.MAX_POSITIONS:
+    bot_positions = [p for p in state.positions.values()
+                     if p is None or getattr(p, "signal_type", "") != "MANUAL"]
+    if len(bot_positions) >= cfg.MAX_POSITIONS:
         log.info(f"Max positions ({cfg.MAX_POSITIONS}) reached, skip {sig.symbol}")
         return False
 
@@ -148,7 +150,7 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
     # correlated alts is one oversized directional bet wearing three tickets.
     side = "Buy" if sig.direction == "LONG" else "Sell"
     same_dir_count = sum(
-        1 for p in state.positions.values() if p is not None and p.side == side
+        1 for p in bot_positions if p is not None and p.side == side
     )
     if same_dir_count >= cfg.MAX_SAME_DIRECTION:
         log.info(
@@ -299,10 +301,16 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             # TP не долетел, но SL стоит — позиция ЗАЩИЩЕНА, закрывать её
             # (платя спред дважды) нельзя. Досылаем тейк отдельным запросом.
             log.warning(f"{sig.symbol}: TP не прикрепился (SL={exch_sl}) — досылаю takeProfit")
+            tp_ok = False
             try:
-                await client.set_trading_stop(sig.symbol, tp=sig.tp2)
+                tp_ok = await client.set_trading_stop(sig.symbol, tp=sig.tp2)
             except Exception as te:
                 log.warning(f"{sig.symbol}: не удалось дослать TP — {te}")
+            if not tp_ok:
+                # Биржа отклонила — монитор повторит на следующем тике.
+                # Раньше результат игнорировался, и позиция навсегда
+                # оставалась без тейка: доходила до +2R и возвращалась в стоп.
+                log.error(f"{sig.symbol}: TP отклонён биржей — монитор повторит")
 
         if verified and exch_sl <= 0:
             # Риск несёт только отсутствующий SL — вот тут закрываем.
@@ -409,33 +417,51 @@ async def monitor_positions(client: BybitClient) -> None:
         # открытых позициях оставлял их без мониторинга — без проверки SL,
         # без записи закрытия и без учёта в дневном лимите. Хуже: enter_trade
         # считал символ свободным и мог удвоить позицию в one-way режиме.
-        for sym, lp in live_map.items():
-            if sym in state.positions:
-                continue
+        orphans = [sym for sym in live_map if sym not in state.positions]
+        if orphans:
+            # Открытые сделки бота из БД — единственный надёжный признак
+            # "своя позиция" после рестарта (state.positions живёт в памяти)
             try:
-                size = abs(float(lp.get("size") or 0))
-                if size <= 0:
-                    continue
-                entry_px = float(lp.get("avgPrice") or 0)
-                adopted = Position(
-                    symbol=sym,
-                    side=lp.get("side", "Buy"),
-                    entry=entry_px,
-                    sl=float(lp.get("stopLoss") or 0),
-                    tp1=0.0,
-                    tp2=float(lp.get("takeProfit") or 0),
-                    tp3=0.0,
-                    qty=size,
-                    score=0,
-                    signal_type="ADOPTED",
-                )
-                state.positions[sym] = adopted
-                log.warning(
-                    f"{sym}: найдена неотслеживаемая позиция на бирже "
-                    f"({adopted.side} {size} @ {entry_px}) — взята под мониторинг"
-                )
-            except Exception as ae:
-                log.error(f"{sym}: не удалось усыновить позицию — {ae}")
+                bot_trades = {r["symbol"]: r for r in await db.get_open_trades()}
+            except Exception as te:
+                log.error(f"не удалось прочитать открытые сделки: {te}")
+                bot_trades = {}
+            for sym in orphans:
+                lp = live_map[sym]
+                try:
+                    size = abs(float(lp.get("size") or 0))
+                    if size <= 0:
+                        continue
+                    entry_px = float(lp.get("avgPrice") or 0)
+                    row = bot_trades.get(sym)
+                    if row:
+                        # Своя позиция: восстанавливаем цели и order_id из БД,
+                        # дальше она защищается и учитывается как обычная
+                        adopted = Position(
+                            symbol=sym, side=lp.get("side", row["side"]),
+                            entry=entry_px or row["entry"],
+                            sl=float(lp.get("stopLoss") or 0) or (row["sl"] or 0),
+                            tp1=row["tp1"] or 0.0, tp2=row["tp2"] or 0.0, tp3=row["tp3"] or 0.0,
+                            qty=size, score=row["score"] or 0,
+                            signal_type=row["signal_type"] or "RESTORED",
+                            order_id=row["order_id"] or "",
+                        )
+                        log.warning(f"{sym}: позиция бота восстановлена после рестарта "
+                                    f"({adopted.side} {size} @ {entry_px})")
+                    else:
+                        # Ручная сделка пользователя: только наблюдаем.
+                        # MANUAL исключается из слотов и из дневного лимита.
+                        adopted = Position(
+                            symbol=sym, side=lp.get("side", "Buy"), entry=entry_px,
+                            sl=float(lp.get("stopLoss") or 0), tp1=0.0,
+                            tp2=float(lp.get("takeProfit") or 0), tp3=0.0,
+                            qty=size, score=0, signal_type="MANUAL",
+                        )
+                        log.info(f"{sym}: ручная позиция на бирже "
+                                 f"({adopted.side} {size} @ {entry_px}) — только наблюдение")
+                    state.positions[sym] = adopted
+                except Exception as ae:
+                    log.error(f"{sym}: не удалось взять позицию под учёт — {ae}")
 
         for sym in list(state.positions.keys()):
             pos = state.positions.get(sym)
@@ -455,12 +481,21 @@ async def monitor_positions(client: BybitClient) -> None:
                 # хватало, и убыток писался как pnl=0 — дневной лимит его не видел.
                 await asyncio.sleep(1.0)
                 exit_price, pnl = await fetch_matching_closed_pnl(client, pos, attempts=4)
-                await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
-                state.positions.pop(sym, None)
-                log.info(f"{sym}: closed (SL/TP) exit={exit_price:.4f} pnl={pnl:+.2f}")
-
-                # Daily circuit breaker (shared path with manual close)
-                record_realized_close(pnl)
+                if pos.signal_type == "MANUAL":
+                    # Чужая сделка: не пишем в историю бота и не учитываем в
+                    # дневном лимите — иначе прибыль ручного трейда могла бы
+                    # "разморозить" сработавший предохранитель, а убыток —
+                    # остановить автоторговлю без причины.
+                    state.positions.pop(sym, None)
+                    log.info(f"{sym}: ручная позиция закрыта (pnl={pnl:+.2f}) — вне учёта бота")
+                else:
+                    if not pos.order_id:
+                        # Восстановленная позиция могла не иметь строки в trades
+                        await db.save_trade_open(pos)
+                    await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
+                    state.positions.pop(sym, None)
+                    log.info(f"{sym}: closed (SL/TP) exit={exit_price:.4f} pnl={pnl:+.2f}")
+                    record_realized_close(pnl)
             else:
                 lp = live_map[sym]
                 pos.unrealised_pnl = float(lp.get("unrealisedPnl", 0))
@@ -478,11 +513,23 @@ async def monitor_positions(client: BybitClient) -> None:
                 # enter_trade's unverified path relies on. A live position
                 # without a stop-loss is the recurring bug #1 made real.
                 exch_sl = float(lp.get("stopLoss") or 0)
-                if exch_sl <= 0 and pos.signal_type == "ADOPTED":
+                exch_tp = float(lp.get("takeProfit") or 0)
+                # Тейк отсутствует, но стоп есть и позиция наша — досылаем.
+                # Отсутствие TP не опасно (риск закрыт стопом), поэтому это
+                # тихая починка, без аварийного закрытия.
+                if (exch_sl > 0 and exch_tp <= 0 and pos.tp2 > 0
+                        and pos.signal_type != "MANUAL"):
+                    try:
+                        if await client.set_trading_stop(sym, tp=pos.tp2):
+                            log.info(f"{sym}: takeProfit восстановлен на {pos.tp2:.4f}")
+                    except Exception as te:
+                        log.warning(f"{sym}: не удалось восстановить TP — {te}")
+
+                if exch_sl <= 0 and pos.signal_type == "MANUAL":
                     # Позиция открыта НЕ ботом (усыновлена с биржи — возможно,
                     # твоя ручная сделка). Мониторим и учитываем в статистике,
                     # но НИКОГДА не трогаем: ни довешивание стопа, ни закрытие.
-                    log.warning(f"{sym}: усыновлённая позиция без SL — только наблюдение, не вмешиваюсь")
+                    log.warning(f"{sym}: ручная позиция без SL — не вмешиваюсь (открыта не ботом)")
                 elif exch_sl <= 0:
                     log.error(f"{sym}: live position has NO stop-loss — re-attaching SL/TP")
                     reattached = False

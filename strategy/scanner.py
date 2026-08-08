@@ -115,7 +115,7 @@ def _trend_direction(klines: list, lookback: int = None) -> str:
 
 
 def _find_swing_levels(klines: list, price: float = 0.0, lookback: int = None,
-                        wing: int = None) -> tuple[Optional[float], Optional[float]]:
+                        wing: int = None, atr: float = 0.0) -> tuple[Optional[float], Optional[float]]:
     """
     Фрактальный поиск swing low / swing high за последние `lookback` завершённых
     свечей. Возвращает (support, resistance) — БЛИЖАЙШИЕ к цене уровни с
@@ -150,10 +150,30 @@ def _find_swing_levels(klines: list, price: float = 0.0, lookback: int = None,
         if window[i]["low"] == min(seg_low):
             supports.append(window[i]["low"])
 
-    below = [s for s in supports if s < price]
-    above = [r for r in resistances if r > price]
-    support    = max(below) if below else None   # ближайшая поддержка снизу
-    resistance = min(above) if above else None   # ближайшее сопротивление сверху
+    # Отсекаем шумовые пивоты вплотную к цене: внутридневная рябь в 0.3-0.5 ATR
+    # не является ни опорой для стопа, ни целью. Без этого ближайшим
+    # "сопротивлением" оказывался случайный микро-хай в 0.4 ATR, до него
+    # получалось 0.4R, и проверка MIN_RR резала нормальные сетапы (реальное
+    # сопротивление при этом было в 2R выше).
+    noise = atr * cfg.LEVEL_NOISE_ATR if atr > 0 else 0.0
+    below = [s for s in supports if s < price - noise]
+    above = [r for r in resistances if r > price + noise]
+    support    = max(below) if below else None   # ближайшая значимая поддержка
+    resistance = min(above) if above else None   # ближайшее значимое сопротивление
+
+    # Запасной вариант — границы диапазона окна. В безоткатном движении
+    # фрактальных пивотов может не быть вовсе (в строгом падении ни один бар
+    # не является swing high), и разворотный сетап оставался бы без цели.
+    # При этом если цена САМА стоит на границе окна, запасного уровня с этой
+    # стороны нет — и вход "по рынку на хае" по-прежнему отсекается.
+    if support is None:
+        lo = min(k["low"] for k in window)
+        if lo < price - noise:
+            support = lo
+    if resistance is None:
+        hi = max(k["high"] for k in window)
+        if hi > price + noise:
+            resistance = hi
     return support, resistance
 
 
@@ -206,20 +226,27 @@ def _vsa_classify(klines: list, vol_avg: float, atr: float) -> tuple[str, str]:
 
 
 def _classify_type(oi_change: float, vol_ratio: float, funding: float,
-                   price_change: float, vsa_type: str) -> str:
+                   price_change: float, vsa_type: str, vsa_bias: str = "NEUTRAL") -> str:
     """Тип сигнала. Вынесено отдельно, чтобы знать тип ДО применения гейтов:
     освобождение от анти-спайка и MTF должно действовать только когда сделка
     РЕАЛЬНО является VSA-разворотом, а не когда VSA-паттерн просто обнаружен
     на свече (иначе трендовый ACCUMULATION получал исключение и входил
     вдогонку прямо на вертикальной свече)."""
-    if oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change < -0.3:
+    # VSA-разворот идёт ПЕРВЫМ: климакс/поглощение — это точка разворота,
+    # ядро методологии. Раньше OI проверялся раньше, и климакс при ΔOI≥2%
+    # становился ACCUMULATION: вместо +20 очков получал -20 за противоречие
+    # направлению, то есть VSA систематически ШТРАФОВАЛ сигнал.
+    # Требуется НАПРАВЛЕННЫЙ разворот: климакс без выраженного предшествующего
+    # движения двусмыслен, направление у него взялось бы из стакана, а
+    # освобождение от анти-спайка пропустило бы вертикальную свечу в сделку.
+    if vsa_type in ("CLIMAX", "ABSORPTION") and vsa_bias != "NEUTRAL":
+        return "VSA_" + vsa_type
+    elif oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change < -0.3:
         return "DISTRIBUTION"
     elif oi_change >= cfg.OI_CHANGE_THRESHOLD:
         return "ACCUMULATION"
     elif oi_change <= -cfg.OI_CHANGE_THRESHOLD:
         return "SQUEEZE"
-    elif vsa_type in ("CLIMAX", "ABSORPTION"):
-        return "VSA_" + vsa_type
     elif vol_ratio >= cfg.VOL_SPIKE_MULT * 1.5:
         return "VOLUME_SPIKE"
     elif abs(funding) >= cfg.FUNDING_EXTREME:
@@ -235,6 +262,7 @@ def _score_signal(
     price_change: float,
     vsa_type: str = "NEUTRAL",
     level_dist_atr: Optional[float] = None,
+    vsa_bias: str = "NEUTRAL",
 ) -> tuple[int, str]:
     """Score 0-100 и классификация типа сигнала."""
     score = 0
@@ -303,7 +331,7 @@ def _score_signal(
         elif level_dist_atr <= cfg.KEY_LEVEL_ATR_MULT:
             score += 4
 
-    return min(score, 100), _classify_type(oi_change, vol_ratio, funding, price_change, vsa_type)
+    return min(score, 100), _classify_type(oi_change, vol_ratio, funding, price_change, vsa_type, vsa_bias)
 
 
 def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
@@ -315,7 +343,11 @@ def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
     score и direction не должны считаться независимо друг от друга.
     """
     votes: list[str] = []
-    if abs(price_change) > 0.1:
+    is_reversal = sig_type.startswith("VSA_")
+    # Для разворотов голос 24h-цены не учитывается: он всегда против сделки
+    # (в том и смысл разворота), из-за чего confluence-кап резал score до 55
+    # и ни один контртрендовый вход не мог дойти до TRADE_MIN_SCORE.
+    if not is_reversal and abs(price_change) > 0.1:
         votes.append("LONG" if price_change > 0 else "SHORT")
     if ob_bias != "NEUTRAL":
         votes.append("LONG" if ob_bias == "BUY" else "SHORT")
@@ -371,7 +403,8 @@ def _apply_confluence_cap(score: int, confidence: float) -> int:
 
 
 def _calc_levels(price: float, atr: float, direction: str,
-                  support: Optional[float], resistance: Optional[float]) -> Optional[dict]:
+                  support: Optional[float], resistance: Optional[float],
+                  sl_anchor: Optional[float] = None) -> Optional[dict]:
     """
     SL ставится ЗА ключевым уровнем (support для LONG, resistance для SHORT) + буфер 0.25×ATR,
     либо, если уровня нет, на 1.5×ATR как раньше. TP1/TP2/TP3 = 1R/2R/3R от риска.
@@ -383,6 +416,18 @@ def _calc_levels(price: float, atr: float, direction: str,
 
     buffer = atr * 0.25
     min_sl_dist = max(atr * 1.5, price * 0.003)
+
+    # sl_anchor: экстремум сигнальной свечи. Для VSA-разворота стоп ставится
+    # за неё, а не за старый пивот — фрактальный поиск свежую свечу не видит
+    # (нужно wing баров после неё), поэтому без якоря разворотный вход
+    # оставался бы вообще без валидной опоры для стопа.
+    if sl_anchor is not None and sl_anchor > 0:
+        if direction == "LONG":
+            support = sl_anchor if support is None else max(support, sl_anchor) \
+                if sl_anchor < price else support
+        else:
+            resistance = sl_anchor if resistance is None else min(resistance, sl_anchor) \
+                if sl_anchor > price else resistance
 
     if direction == "LONG":
         if support is not None and support < price:
@@ -404,14 +449,21 @@ def _calc_levels(price: float, atr: float, direction: str,
     risk = sl_dist
     if risk <= 0:
         return None
+    # Потолок: стоп шире MAX_SL_ATR × ATR — это уже не сделка, а лотерея.
+    # Размер позиции при таком стопе схлопывается, а шанс задеть его высок.
+    if risk > atr * cfg.MAX_SL_ATR:
+        return None
 
     # Если есть реальный противоположный уровень — проверяем, что до него хватает
     # расстояния на MIN_RR. Если уровня нет ("открытое небо") — доверяем стандартной
     # 1R/2R/3R сетке, т.к. TP3 и так на 3R.
-    if target_level is not None:
-        achievable = abs(target_level - price) / risk
-        if achievable < cfg.MIN_RR:
-            return None  # недостаточно места до цели для честного 3:1 — не торгуем
+    if target_level is None:
+        # Нет противоположного уровня в окне = цена на экстремуме = покупка
+        # хая / продажа лоя. Раньше здесь проверка MIN_RR пропускалась целиком.
+        return None
+    achievable = abs(target_level - price) / risk
+    if achievable < cfg.MIN_RR:
+        return None  # недостаточно места до цели — не торгуем
 
     if direction == "LONG":
         tp1, tp2, tp3 = price + risk * 1.0, price + risk * 2.0, price + risk * 3.0
@@ -422,7 +474,9 @@ def _calc_levels(price: float, atr: float, direction: str,
 
     return {
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
-        "rr": 2.0, "sl_pct": sl_pct,  # trader targets TP2 = 2R — report the actual trade R:R
+        "rr": 2.0,              # сделка целится в TP2 = 2R
+        "headroom": achievable,  # фактический запас до противоположного уровня, в R
+        "sl_pct": sl_pct,
     }
 
 
@@ -507,7 +561,7 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         # Освобождение от анти-спайка/MTF даётся, только если сделка и есть
         # VSA-разворот. Раньше проверялся сам факт VSA-паттерна — и трендовый
         # ACCUMULATION проскакивал гейт на вертикальной свече со score 70.
-        provisional_type = _classify_type(oi_change, vol_ratio, funding, price_chg, vsa_type)
+        provisional_type = _classify_type(oi_change, vol_ratio, funding, price_chg, vsa_type, vsa_bias)
         is_vsa_reversal = provisional_type.startswith("VSA_")
 
         # Анти-спайк: не входить вдогонку после вертикального движения.
@@ -522,7 +576,7 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
                     return None
 
         # Ключевые уровни на 4h — ближайшие к текущей цене с правильных сторон
-        support, resistance = _find_swing_levels(klines, price=price)
+        support, resistance = _find_swing_levels(klines, price=price, atr=atr)
         level_dist_atr = None
         if atr > 0:
             dists = []
@@ -535,7 +589,7 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
 
         score, sig_type = _score_signal(
             oi_change, vol_ratio, funding, ob_ratio, price_chg,
-            vsa_type=vsa_type, level_dist_atr=level_dist_atr,
+            vsa_type=vsa_type, level_dist_atr=level_dist_atr, vsa_bias=vsa_bias,
         )
 
         direction, confidence = _direction(
@@ -580,36 +634,49 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         # неправильной стороны (лонг сразу под свежепробитой поддержкой),
         # при этом _calc_levels молча падал бы на generic 1.5×ATR стоп без
         # реального уровня за спиной.
-        relevant_level = support if direction == "LONG" else resistance
-        if relevant_level is None or atr <= 0:
-            return None
-        if direction == "LONG" and relevant_level >= price:
-            return None
-        if direction == "SHORT" and relevant_level <= price:
-            return None
-        relevant_dist_atr = abs(price - relevant_level) / atr
-        if relevant_dist_atr > cfg.KEY_LEVEL_ATR_MULT:
+        if not is_vsa_reversal:
+            # Для трендовых входов цена обязана стоять У уровня, который станет
+            # опорой стопа. Развороты освобождены: их опора — экстремум самой
+            # сигнальной свечи, и расстояние до неё равно ширине этой свечи
+            # (у настоящего климакса это 2-3 ATR, гейт 1.2 отсекал бы их все).
+            relevant_level = support if direction == "LONG" else resistance
+            if relevant_level is None or atr <= 0:
+                return None
+            if direction == "LONG" and relevant_level >= price:
+                return None
+            if direction == "SHORT" and relevant_level <= price:
+                return None
+            if abs(price - relevant_level) / atr > cfg.KEY_LEVEL_ATR_MULT:
+                return None
+        elif atr <= 0:
             return None
 
-        levels = _calc_levels(price, atr, direction, support, resistance)
+        # Для разворота опора стопа — экстремум сигнальной свечи
+        sl_anchor = None
+        if is_vsa_reversal and len(klines) >= 2:
+            sig_candle = klines[-2]
+            sl_anchor = sig_candle["low"] if direction == "LONG" else sig_candle["high"]
+        levels = _calc_levels(price, atr, direction, support, resistance, sl_anchor=sl_anchor)
         if levels is None:
             # либо нет валидного риска, либо не набирается MIN_RR до цели
             return None
 
-        # Один сетап — один сигнал: та же закрытая свеча повторно не сигналит
+        # Один сетап — один сигнал: та же закрытая свеча повторно не сигналит.
+        # Пометку ставит run_scan_and_broadcast ПОСЛЕ доставки — иначе отмена
+        # скана (таймаут /api/scan, рестарт) "расходовала" свечу впустую и
+        # сетап терялся до следующей 4h-свечи.
         candle_ts = int(klines[-2]["ts"])
         if _SIGNALLED_CANDLE.get(symbol) == candle_ts:
             return None
-        _SIGNALLED_CANDLE[symbol] = candle_ts
 
         details = (
             f"{sig_type} | {direction} | score={score} | conf={confidence:.2f} | "
             f"OI {oi_change:+.1f}% | vol {vol_ratio:.1f}x | "
             f"funding {funding:+.3f}% | OB {ob_bias} | VSA {vsa_type} | "
-            f"ATR {atr_pct:.2f}% | RR {levels['rr']:.1f}"
+            f"ATR {atr_pct:.2f}% | RR {levels['rr']:.1f} | запас {levels['headroom']:.1f}R"
         )
 
-        return Signal(
+        sig = Signal(
             symbol=symbol,
             signal_type=sig_type,
             direction=direction,
@@ -629,6 +696,8 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             rr=levels["rr"],
             sl_pct=levels["sl_pct"],
         )
+        sig._candle_ts = candle_ts   # для дедупа после доставки
+        return sig
     except Exception as e:
         log.warning(f"{symbol}: analysis error — {e}")
         return None
@@ -736,8 +805,11 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> Lis
     for sig in signals:
         last_seen = state.signal_seen.get(sig.symbol)
         if last_seen and (now - last_seen) < cooldown:
-            continue
+            continue  # пометка свечи ещё не поставлена — сигнал не потерян
         state.signal_seen[sig.symbol] = now
+        ct = getattr(sig, "_candle_ts", None)
+        if ct is not None:
+            _SIGNALLED_CANDLE[sig.symbol] = ct
 
         try:
             await db.save_signal(sig)

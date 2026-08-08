@@ -102,15 +102,31 @@ async def lifespan(app: FastAPI):
     yield
 
     initial_scan_task.cancel()
+
+    # Корректное завершение: AsyncIOScheduler.shutdown(wait=True) НЕ ждёт —
+    # его исполнитель отменяет запущенные корутины (в apscheduler так и
+    # написано: "There is no way to honor wait=True"). Поэтому сначала
+    # ставим планировщик на паузу, чтобы новые задачи не стартовали, затем
+    # сами дожидаемся текущих: обрыв сессии посреди верификации SL оставил
+    # бы позицию на бирже с неподтверждённым стопом.
     if _scheduler and _scheduler.running:
-        # wait=True: даём доработать запущенным задачам. Раньше сессия
-        # закрывалась под ногами у enter_trade прямо в момент верификации
-        # SL — позиция оставалась на бирже с неподтверждённым стопом.
         try:
-            await asyncio.wait_for(
-                asyncio.get_running_loop().run_in_executor(None, _scheduler.shutdown, True),
-                timeout=25,
-            )
+            _scheduler.pause()
+        except Exception as pe:
+            log.warning(f"scheduler pause: {pe}")
+
+    import strategy.scanner as _sc
+    import strategy.trader as _tr
+    deadline = 25.0
+    while deadline > 0 and (_sc._SCANNING or _tr._MONITORING):
+        await asyncio.sleep(0.5)
+        deadline -= 0.5
+    if _sc._SCANNING or _tr._MONITORING:
+        log.warning("shutdown: задачи не завершились за 25с — закрываю принудительно")
+
+    if _scheduler and _scheduler.running:
+        try:
+            _scheduler.shutdown(wait=False)
         except Exception as se:
             log.warning(f"scheduler shutdown: {se}")
     if _client:

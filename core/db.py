@@ -285,6 +285,23 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
         return out
 
 
+async def get_open_trades() -> List[Dict]:
+    """Открытые сделки БОТА. Нужны, чтобы после рестарта отличить свою
+    позицию (её надо защищать и учитывать) от ручной сделки пользователя
+    (её трогать нельзя и в дневной лимит она не входит)."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM trades WHERE status='open' ORDER BY opened_at DESC"
+            ) as cur:
+                rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        log.error(f"get_open_trades error: {e}")
+        return []
+
+
 async def get_realized_pnl_since(closed_after_iso: str) -> float:
     """Sum of realized PnL for trades closed at/after the given ISO timestamp.
     Used to rebuild the daily circuit-breaker counter after a process restart —

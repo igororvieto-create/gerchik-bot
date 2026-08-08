@@ -372,8 +372,18 @@ async def update_settings(request: Request):
     # Валидируем ВСЁ до применения: раньше ошибка на позднем поле
     # возвращала 400 уже ПОСЛЕ того, как ранние поля были применены —
     # UI показывал "не сохранено", а риск и авто-торговля уже изменились.
+    def _as_bool(v):
+        # bool("false") is True — строка "false" ВКЛЮЧАЛА реальную торговлю.
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return bool(v)
+        if isinstance(v, str) and v.strip().lower() in ("true", "false", "1", "0", "yes", "no"):
+            return v.strip().lower() in ("true", "1", "yes")
+        raise ValueError(f"ожидается true/false, получено {v!r}")
+
     spec = {
-        "auto_trade":      (bool,  None,        None),
+        "auto_trade":      (_as_bool, None,     None),
         "min_score":       (int,   5,           100),
         "trade_min_score": (int,   5,           100),
         "risk_per_trade":  (float, 0.1,         3.0),   # инвариант: риск ≤3%
@@ -398,7 +408,7 @@ async def update_settings(request: Request):
         if lo is not None and not (lo <= v <= hi):
             rejected[key] = f"вне диапазона [{lo}, {hi}]"
             continue
-        pending[key] = round(v, 2) if caster is float else v
+        pending[key] = round(v, 2) if caster is float else v  # bool/int уходят как есть
 
     if rejected:
         # Ничего не применяем — частичное сохранение хуже отказа

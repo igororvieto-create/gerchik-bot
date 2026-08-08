@@ -32,10 +32,18 @@ class Config:
     SIGNAL_COOLDOWN_MIN:    int   = int(os.getenv("SIGNAL_COOLDOWN_MIN",    "60").strip())
 
     # Gerchik methodology: key levels, MTF, R:R
-    MIN_RR:             float = float(os.getenv("MIN_RR",             "2.0").strip())
+    # 1.5: пол риска (0.75 ATR) + буфер делают связку "цена у уровня" и
+    # "2R до противоположного уровня" почти неразрешимой — нужно 1.5-2.9 ATR
+    # чистого хода до ближайшего пивота, что в окне из 20 свечей редкость.
+    # Сетка TP остаётся 1R/2R/3R, торговая цель по-прежнему TP2 = 2R.
+    MIN_RR:             float = float(os.getenv("MIN_RR",             "1.5").strip())
     KEY_LEVEL_LOOKBACK: int   = int(os.getenv("KEY_LEVEL_LOOKBACK",   "20").strip())
     KEY_LEVEL_WING:     int   = int(os.getenv("KEY_LEVEL_WING",       "2").strip())
     KEY_LEVEL_ATR_MULT: float = float(os.getenv("KEY_LEVEL_ATR_MULT", "1.2").strip())
+    # Пивоты ближе этого расстояния к цене — рыночный шум, а не уровень
+    LEVEL_NOISE_ATR:    float = float(os.getenv("LEVEL_NOISE_ATR",    "0.5").strip())
+    # Потолок ширины стопа в ATR — защита от абсурдно широких стопов
+    MAX_SL_ATR:         float = float(os.getenv("MAX_SL_ATR",         "3.5").strip())
     REQUIRE_MTF_ALIGN:  bool  = os.getenv("REQUIRE_MTF_ALIGN", "true").strip().lower() == "true"
     MTF_TREND_LOOKBACK: int   = int(os.getenv("MTF_TREND_LOOKBACK",   "6").strip())
     MIN_LISTING_AGE_DAYS: int = int(os.getenv("MIN_LISTING_AGE_DAYS", "14").strip())
@@ -53,7 +61,10 @@ class Config:
     MAX_MARGIN_PCT:  float = float(os.getenv("MAX_MARGIN_PCT",  "10.0").strip())
     MAX_POSITIONS:   int   = int(os.getenv("MAX_POSITIONS",     "3").strip())
     LEVERAGE:        int   = int(os.getenv("LEVERAGE",          "5").strip())
-    TRADE_MIN_SCORE: int   = int(os.getenv("TRADE_MIN_SCORE",   "60").strip())
+    # 45, а не 60: шкала score дискретна, и при ΔOI<5% потолок = 59 даже при
+    # идеальных объёме/фандинге/стакане. Порог 60 отбирал ИСКЛЮЧИТЕЛЬНО
+    # импульсные разгоны с ΔOI≥6% — ровно тот вход вдогонку, что дал 1W/14L.
+    TRADE_MIN_SCORE: int   = int(os.getenv("TRADE_MIN_SCORE",   "45").strip())
 
     # Risk guards
     MAX_SAME_DIRECTION:     int   = int(os.getenv("MAX_SAME_DIRECTION",     "2").strip())

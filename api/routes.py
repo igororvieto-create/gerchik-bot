@@ -439,7 +439,13 @@ async def close_position_route(symbol: str):
     try:
         result = await state.client.close_position(symbol, pos.side, pos.qty)
         if result.get("retCode", -1) == 0:
+            is_manual = getattr(pos, "signal_type", "") == "MANUAL"
             state.positions.pop(symbol, None)
+            if is_manual:
+                # Чужая сделка: закрыли по просьбе пользователя, но в историю
+                # бота и в дневной предохранитель она не идёт.
+                log.info(f"Ручная позиция {symbol} закрыта через дашборд — вне учёта бота")
+                return JSONResponse({"ok": True, "symbol": symbol, "manual": True})
             # Fetch the real exit price / PnL (same path as monitor_positions).
             # Retries: Bybit's closed-pnl record can lag several seconds —
             # a single attempt would permanently record pnl=0 and the loss

@@ -300,6 +300,9 @@ class BybitClient:
     async def set_trading_stop(self, symbol: str, sl: float = 0.0, tp: float = 0.0) -> bool:
         """(Re)attach SL/TP to an existing position. retCode 34040 = 'not
         modified' (already set to these values) — счётся успехом."""
+        if sl <= 0 and tp <= 0:
+            log.error(f"{symbol}: set_trading_stop вызван без SL и TP — нечего ставить")
+            return False
         body: Dict = {"category": "linear", "symbol": symbol, "positionIdx": 0}
         if sl > 0:
             body["stopLoss"] = str(round(sl, 8))

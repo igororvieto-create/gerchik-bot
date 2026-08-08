@@ -314,8 +314,14 @@ def _score_signal(
     elif ob_abs >= 0.05:
         score += 2
 
-    # VSA effort/result (0-20 pts) — ядро методологии Герчика
-    if vsa_type == "CLIMAX":
+    # VSA effort/result (0-20 pts) — ядро методологии Герчика.
+    # Очки даются ТОЛЬКО за направленное прочтение: двусмысленный климакс
+    # (bias=NEUTRAL) раньше добавлял +20, но направление не задавал и под
+    # штраф за расхождение не попадал — score рос за счёт фактора, который
+    # направление никак не подтверждает.
+    if vsa_bias == "NEUTRAL":
+        pass
+    elif vsa_type == "CLIMAX":
         score += 20
     elif vsa_type == "ABSORPTION":
         score += 15
@@ -381,11 +387,19 @@ def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
     else:
         primary = "LONG" if price_change > 0 else "SHORT"
 
-    if votes:
-        agree = sum(1 for v in votes if v == primary)
-        confidence = agree / len(votes)
+    # Голос VSA у разворота тавтологически совпадает с primary — он задаёт
+    # направление, а не подтверждает его. Считаем уверенность по НЕЗАВИСИМЫМ
+    # голосам (цена/стакан/фандинг), иначе одинокий vsa_bias давал бы
+    # confidence=1.0 и кап не срабатывал бы вообще.
+    independent = list(votes)
+    if is_reversal and vsa_bias in independent:
+        independent.remove(vsa_bias)
+
+    if independent:
+        agree = sum(1 for v in independent if v == primary)
+        confidence = agree / len(independent)
     else:
-        confidence = 0.4  # нет независимых голосов -> низкая уверенность, не нейтрально
+        confidence = 0.4  # подтверждений нет -> низкая уверенность, не нейтрально
 
     return primary, confidence
 
@@ -652,6 +666,15 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
                 return None
         elif atr <= 0:
             return None
+        else:
+            # Разворот входит ОТ сетапа, а не догоняет его: цена обязана
+            # оставаться рядом с закрытием сигнальной свечи. Иначе сигнал,
+            # отклонённый сразу после закрытия свечи, мог "дозреть" через
+            # пару часов и дать вход в нескольких ATR от точки разворота —
+            # то есть тот же вход вдогонку, только в обратную сторону.
+            drift_atr = abs(price - klines[-2]["close"]) / atr
+            if drift_atr > cfg.REVERSAL_MAX_DRIFT_ATR:
+                return None
 
         # Для разворота опора стопа — экстремум сигнальной свечи
         sl_anchor = None

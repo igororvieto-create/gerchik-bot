@@ -19,6 +19,9 @@ _DAILY_LOCK = asyncio.Lock()
 # wrongly mark the brand-new position as closed.
 _MIN_POSITION_AGE_S = 90
 
+# Счётчик неудачных попыток восстановить TP (символ -> попытки)
+_TP_RETRIES: dict[str, int] = {}
+
 
 def _round_step(value: float, step: float) -> float:
     if step <= 0:
@@ -412,6 +415,14 @@ async def monitor_positions(client: BybitClient) -> None:
         live_map = {p["symbol"]: p for p in live}
         now_utc = datetime.utcnow()
 
+        # Раз в тик подчищаем "зависшие" open-строки: сделка старше суток,
+        # а позиции с таким символом на бирже нет — значит она закрылась,
+        # пока процесс был остановлен.
+        try:
+            await db.close_stale_open_trades(list(live_map.keys()))
+        except Exception as re_:
+            log.warning(f"reconcile stale trades: {re_}")
+
         # Усыновление осиротевших позиций: state.positions живёт только в
         # памяти и обнуляется при каждом рестарте, а деплой Railway при
         # открытых позициях оставлял их без мониторинга — без проверки SL,
@@ -422,7 +433,11 @@ async def monitor_positions(client: BybitClient) -> None:
             # Открытые сделки бота из БД — единственный надёжный признак
             # "своя позиция" после рестарта (state.positions живёт в памяти)
             try:
-                bot_trades = {r["symbol"]: r for r in await db.get_open_trades()}
+                # reversed: get_open_trades отдаёт DESC, а в словаре побеждает
+                # последняя итерация — без reversed выигрывала бы САМАЯ СТАРАЯ
+                # строка (зависшая после краша), и позиция восстанавливалась бы
+                # с чужими целями и order_id.
+                bot_trades = {r["symbol"]: r for r in reversed(await db.get_open_trades())}
             except Exception as te:
                 log.error(f"не удалось прочитать открытые сделки: {te}")
                 bot_trades = {}
@@ -518,11 +533,22 @@ async def monitor_positions(client: BybitClient) -> None:
                 # Отсутствие TP не опасно (риск закрыт стопом), поэтому это
                 # тихая починка, без аварийного закрытия.
                 if (exch_sl > 0 and exch_tp <= 0 and pos.tp2 > 0
-                        and pos.signal_type != "MANUAL"):
+                        and pos.signal_type != "MANUAL"
+                        and _TP_RETRIES.get(sym, 0) < 5):
                     try:
                         if await client.set_trading_stop(sym, tp=pos.tp2):
                             log.info(f"{sym}: takeProfit восстановлен на {pos.tp2:.4f}")
+                            _TP_RETRIES.pop(sym, None)
+                        else:
+                            # Без счётчика биржа отвергала бы запрос на каждом
+                            # тике часами (например, TP по неверной стороне),
+                            # молча съедая лимит запросов.
+                            _TP_RETRIES[sym] = _TP_RETRIES.get(sym, 0) + 1
+                            if _TP_RETRIES[sym] >= 5:
+                                log.error(f"{sym}: TP не принимается биржей (5 попыток) — "
+                                          f"позиция работает без тейка, риск закрыт стопом")
                     except Exception as te:
+                        _TP_RETRIES[sym] = _TP_RETRIES.get(sym, 0) + 1
                         log.warning(f"{sym}: не удалось восстановить TP — {te}")
 
                 if exch_sl <= 0 and pos.signal_type == "MANUAL":
@@ -533,10 +559,16 @@ async def monitor_positions(client: BybitClient) -> None:
                 elif exch_sl <= 0:
                     log.error(f"{sym}: live position has NO stop-loss — re-attaching SL/TP")
                     reattached = False
-                    try:
-                        reattached = await client.set_trading_stop(sym, sl=pos.sl, tp=pos.tp2)
-                    except Exception as se:
-                        log.error(f"{sym}: set_trading_stop raised — {se}")
+                    if pos.sl <= 0:
+                        # Известного стопа нет (позиция восстановлена из строки
+                        # без sl). Отправлять set_trading_stop бессмысленно:
+                        # запрос уйдёт без поля stopLoss и вернёт "успех".
+                        log.critical(f"{sym}: неизвестен уровень стопа — аварийное закрытие")
+                    else:
+                        try:
+                            reattached = await client.set_trading_stop(sym, sl=pos.sl, tp=pos.tp2)
+                        except Exception as se:
+                            log.error(f"{sym}: set_trading_stop raised — {se}")
                     if not reattached:
                         log.critical(f"{sym}: could not re-attach SL — emergency closing")
                         try:

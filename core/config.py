@@ -3,6 +3,40 @@ from dataclasses import dataclass, field
 from typing import List
 
 
+def _env_int(name: str, default: int) -> int:
+    """Разбор env с фолбэком. Раньше int(os.getenv(...)) стоял прямо в
+    дефолте dataclass: заданная, но ПУСТАЯ переменная в Railway роняла
+    импорт core.config, а значит и всё приложение — crash-loop без логов."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(float(raw))
+    except ValueError:
+        import logging
+        logging.getLogger("config").error(f"{name}={raw!r} — не число, беру {default}")
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        import logging
+        logging.getLogger("config").error(f"{name}={raw!r} — не число, беру {default}")
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("true", "1", "yes", "on")
+
+
 @dataclass
 class Config:
     BYBIT_API_KEY: str = os.getenv("BYBIT_API_KEY", "").strip()
@@ -10,10 +44,10 @@ class Config:
     NTFY_URL:      str = os.getenv("NTFY_URL",      "").strip()
 
     # Scanning
-    SCAN_INTERVAL_MIN: int   = int(os.getenv("SCAN_INTERVAL_MIN", "4").strip())
-    SCAN_BATCH_SIZE:   int   = int(os.getenv("SCAN_BATCH_SIZE",   "10").strip())
-    SCAN_BATCH_DELAY:  float = float(os.getenv("SCAN_BATCH_DELAY", "0.5").strip())
-    TOP_N_PAIRS:       int   = int(os.getenv("TOP_N_PAIRS",        "100").strip())
+    SCAN_INTERVAL_MIN: int   = _env_int("SCAN_INTERVAL_MIN", 4)
+    SCAN_BATCH_SIZE:   int   = _env_int("SCAN_BATCH_SIZE", 10)
+    SCAN_BATCH_DELAY:  float = _env_float("SCAN_BATCH_DELAY", 0.5)
+    TOP_N_PAIRS:       int   = _env_int("TOP_N_PAIRS", 100)
 
     BLACKLIST: List[str] = field(
         default_factory=lambda: [
@@ -22,55 +56,57 @@ class Config:
     )
 
     # Signal thresholds
-    MIN_SCORE:              int   = int(os.getenv("MIN_SCORE",              "30").strip())
-    OI_CHANGE_THRESHOLD:    float = float(os.getenv("OI_CHANGE_THRESHOLD",  "2.0").strip())
-    VOL_SPIKE_MULT:         float = float(os.getenv("VOL_SPIKE_MULT",       "1.5").strip())
-    FUNDING_EXTREME:        float = float(os.getenv("FUNDING_EXTREME",      "0.03").strip())
-    PRICE_CHANGE_MIN:       float = float(os.getenv("PRICE_CHANGE_MIN",     "0.3").strip())
-    OB_IMBALANCE_THRESHOLD: float = float(os.getenv("OB_IMBALANCE_THRESHOLD", "0.10").strip())
-    MIN_VOL_24H:            float = float(os.getenv("MIN_VOL_24H",          "2000000").strip())
-    SIGNAL_COOLDOWN_MIN:    int   = int(os.getenv("SIGNAL_COOLDOWN_MIN",    "60").strip())
+    MIN_SCORE:              int   = _env_int("MIN_SCORE", 30)
+    OI_CHANGE_THRESHOLD:    float = _env_float("OI_CHANGE_THRESHOLD", 2.0)
+    VOL_SPIKE_MULT:         float = _env_float("VOL_SPIKE_MULT", 1.5)
+    FUNDING_EXTREME:        float = _env_float("FUNDING_EXTREME", 0.03)
+    PRICE_CHANGE_MIN:       float = _env_float("PRICE_CHANGE_MIN", 0.3)
+    OB_IMBALANCE_THRESHOLD: float = _env_float("OB_IMBALANCE_THRESHOLD", 0.10)
+    MIN_VOL_24H:            float = _env_float("MIN_VOL_24H", 2000000)
+    SIGNAL_COOLDOWN_MIN:    int   = _env_int("SIGNAL_COOLDOWN_MIN", 60)
 
     # Gerchik methodology: key levels, MTF, R:R
     # 1.5: пол риска (0.75 ATR) + буфер делают связку "цена у уровня" и
     # "2R до противоположного уровня" почти неразрешимой — нужно 1.5-2.9 ATR
     # чистого хода до ближайшего пивота, что в окне из 20 свечей редкость.
     # Сетка TP остаётся 1R/2R/3R, торговая цель по-прежнему TP2 = 2R.
-    MIN_RR:             float = float(os.getenv("MIN_RR",             "1.5").strip())
-    KEY_LEVEL_LOOKBACK: int   = int(os.getenv("KEY_LEVEL_LOOKBACK",   "20").strip())
-    KEY_LEVEL_WING:     int   = int(os.getenv("KEY_LEVEL_WING",       "2").strip())
-    KEY_LEVEL_ATR_MULT: float = float(os.getenv("KEY_LEVEL_ATR_MULT", "1.2").strip())
+    MIN_RR:             float = _env_float("MIN_RR", 1.5)
+    KEY_LEVEL_LOOKBACK: int   = _env_int("KEY_LEVEL_LOOKBACK", 20)
+    KEY_LEVEL_WING:     int   = _env_int("KEY_LEVEL_WING", 2)
+    KEY_LEVEL_ATR_MULT: float = _env_float("KEY_LEVEL_ATR_MULT", 1.2)
     # Пивоты ближе этого расстояния к цене — рыночный шум, а не уровень
-    LEVEL_NOISE_ATR:    float = float(os.getenv("LEVEL_NOISE_ATR",    "0.5").strip())
+    LEVEL_NOISE_ATR:    float = _env_float("LEVEL_NOISE_ATR", 0.5)
     # Потолок ширины стопа в ATR — защита от абсурдно широких стопов
-    MAX_SL_ATR:         float = float(os.getenv("MAX_SL_ATR",         "3.5").strip())
-    REQUIRE_MTF_ALIGN:  bool  = os.getenv("REQUIRE_MTF_ALIGN", "true").strip().lower() == "true"
-    MTF_TREND_LOOKBACK: int   = int(os.getenv("MTF_TREND_LOOKBACK",   "6").strip())
-    MIN_LISTING_AGE_DAYS: int = int(os.getenv("MIN_LISTING_AGE_DAYS", "14").strip())
-    MAX_LAST_CANDLE_ATR:  float = float(os.getenv("MAX_LAST_CANDLE_ATR", "2.0").strip())
+    MAX_SL_ATR:         float = _env_float("MAX_SL_ATR", 3.5)
+    # Разворот должен входить рядом с сетапом, а не через несколько ATR
+    REVERSAL_MAX_DRIFT_ATR: float = _env_float("REVERSAL_MAX_DRIFT_ATR", 1.0)
+    REQUIRE_MTF_ALIGN:  bool  = _env_bool("REQUIRE_MTF_ALIGN", True)
+    MTF_TREND_LOOKBACK: int   = _env_int("MTF_TREND_LOOKBACK", 6)
+    MIN_LISTING_AGE_DAYS: int = _env_int("MIN_LISTING_AGE_DAYS", 14)
+    MAX_LAST_CANDLE_ATR:  float = _env_float("MAX_LAST_CANDLE_ATR", 2.0)
 
     # Signal history
     # 5000 ≈ 8 суток потока сигналов: лимит не должен обрезать семидневную
     # выборку винрейта (500 выбирались за ~5 дней и статистика теряла хвост)
-    MAX_SIGNALS_DB:  int = int(os.getenv("MAX_SIGNALS_DB",  "5000").strip())
-    SIGNAL_TTL_HOURS: int = int(os.getenv("SIGNAL_TTL_HOURS", "24").strip())
+    MAX_SIGNALS_DB:  int = _env_int("MAX_SIGNALS_DB", 5000)
+    SIGNAL_TTL_HOURS: int = _env_int("SIGNAL_TTL_HOURS", 24)
 
     # ── Auto-trading ──────────────────────────────────────────────────────────
-    AUTO_TRADE:      bool  = os.getenv("AUTO_TRADE", "false").strip().lower() == "true"
-    RISK_PER_TRADE:  float = float(os.getenv("RISK_PER_TRADE",  "1.0").strip())
-    MAX_MARGIN_PCT:  float = float(os.getenv("MAX_MARGIN_PCT",  "10.0").strip())
-    MAX_POSITIONS:   int   = int(os.getenv("MAX_POSITIONS",     "3").strip())
-    LEVERAGE:        int   = int(os.getenv("LEVERAGE",          "5").strip())
+    AUTO_TRADE:      bool  = _env_bool("AUTO_TRADE", False)
+    RISK_PER_TRADE:  float = _env_float("RISK_PER_TRADE", 1.0)
+    MAX_MARGIN_PCT:  float = _env_float("MAX_MARGIN_PCT", 10.0)
+    MAX_POSITIONS:   int   = _env_int("MAX_POSITIONS", 3)
+    LEVERAGE:        int   = _env_int("LEVERAGE", 5)
     # 45, а не 60: шкала score дискретна, и при ΔOI<5% потолок = 59 даже при
     # идеальных объёме/фандинге/стакане. Порог 60 отбирал ИСКЛЮЧИТЕЛЬНО
     # импульсные разгоны с ΔOI≥6% — ровно тот вход вдогонку, что дал 1W/14L.
-    TRADE_MIN_SCORE: int   = int(os.getenv("TRADE_MIN_SCORE",   "45").strip())
+    TRADE_MIN_SCORE: int   = _env_int("TRADE_MIN_SCORE", 45)
 
     # Risk guards
-    MAX_SAME_DIRECTION:     int   = int(os.getenv("MAX_SAME_DIRECTION",     "2").strip())
+    MAX_SAME_DIRECTION:     int   = _env_int("MAX_SAME_DIRECTION", 2)
     # 6% допускает 2 стопа при риске 3% или 6 стопов при риске 1%
-    DAILY_LOSS_LIMIT_PCT:   float = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "6.0").strip())
-    ABORT_ON_LEVERAGE_FAIL: bool  = os.getenv("ABORT_ON_LEVERAGE_FAIL", "true").strip().lower() == "true"
+    DAILY_LOSS_LIMIT_PCT:   float = _env_float("DAILY_LOSS_LIMIT_PCT", 6.0)
+    ABORT_ON_LEVERAGE_FAIL: bool  = _env_bool("ABORT_ON_LEVERAGE_FAIL", True)
 
 
 def _clamp(value, lo, hi, name: str):

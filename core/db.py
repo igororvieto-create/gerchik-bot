@@ -94,6 +94,10 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_outcome ON signals(outcome, ts)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol_ts ON signals(symbol, ts)")
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_order "
+            "ON trades(order_id) WHERE order_id IS NOT NULL AND order_id != ''"
+        )
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status, opened_at)")
         await db.commit()
@@ -300,6 +304,32 @@ async def get_open_trades() -> List[Dict]:
     except Exception as e:
         log.error(f"get_open_trades error: {e}")
         return []
+
+
+async def close_stale_open_trades(live_symbols: List[str], older_than_hours: int = 24) -> int:
+    """Закрывает "зависшие" open-строки: сделка старше суток, а позиции с таким
+    символом на бирже нет. Без этого строка оставалась open навсегда и при
+    усыновлении заставляла бота считать ЧУЖУЮ позицию своей."""
+    cutoff = (datetime.utcnow() - timedelta(hours=older_than_hours)).isoformat()
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            if live_symbols:
+                ph = ",".join("?" * len(live_symbols))
+                sql = (f"UPDATE trades SET status='stale', closed_at=? "
+                       f"WHERE status='open' AND opened_at < ? AND symbol NOT IN ({ph})")
+                params = [datetime.utcnow().isoformat(), cutoff, *live_symbols]
+            else:
+                sql = ("UPDATE trades SET status='stale', closed_at=? "
+                       "WHERE status='open' AND opened_at < ?")
+                params = [datetime.utcnow().isoformat(), cutoff]
+            cur = await db.execute(sql, params)
+            await db.commit()
+            if cur.rowcount:
+                log.warning(f"reconcile: {cur.rowcount} зависших open-сделок помечены stale")
+            return cur.rowcount
+    except Exception as e:
+        log.error(f"close_stale_open_trades error: {e}")
+        return 0
 
 
 async def get_realized_pnl_since(closed_after_iso: str) -> float:

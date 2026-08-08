@@ -183,16 +183,48 @@ def _vsa_classify(klines: list, vol_avg: float, atr: float) -> tuple[str, str]:
         return "ABSORPTION", bias
 
     if vol_ratio_local >= 2.5 and spread_atr >= 1.5:
-        if close_pos >= 0.6:
-            return "CLIMAX", "SHORT"   # климакс на хаях после роста -> вероятен разворот вниз
-        if close_pos <= 0.4:
-            return "CLIMAX", "LONG"    # климакс на лоях после падения -> вероятен разворот вверх
+        # Климакс ГАСИТ предшествующее движение — направление задаёт контекст,
+        # а не положение закрытия. Раньше учитывался только close_pos, и свеча,
+        # взлетевшая вверх и закрывшаяся у своего лоу (классический отбой
+        # сверху, медвежий), классифицировалась как "CLIMAX LONG".
+        prior = completed[-6:-1] if len(completed) >= 6 else completed[:-1]
+        if len(prior) >= 2 and prior[0]["close"] > 0:
+            drift = (prior[-1]["close"] - prior[0]["close"]) / prior[0]["close"]
+        else:
+            drift = 0.0
+        if drift > 0.01:
+            return "CLIMAX", "SHORT"   # истощение роста -> разворот вниз
+        if drift < -0.01:
+            return "CLIMAX", "LONG"    # истощение падения -> разворот вверх
+        # Без выраженного предшествующего движения климакс двусмыслен
         return "CLIMAX", "NEUTRAL"
 
     if vol_ratio_local <= 0.6 and spread_atr <= 0.5:
         return "NO_DEMAND_SUPPLY", "NEUTRAL"
 
     return "NEUTRAL", "NEUTRAL"
+
+
+def _classify_type(oi_change: float, vol_ratio: float, funding: float,
+                   price_change: float, vsa_type: str) -> str:
+    """Тип сигнала. Вынесено отдельно, чтобы знать тип ДО применения гейтов:
+    освобождение от анти-спайка и MTF должно действовать только когда сделка
+    РЕАЛЬНО является VSA-разворотом, а не когда VSA-паттерн просто обнаружен
+    на свече (иначе трендовый ACCUMULATION получал исключение и входил
+    вдогонку прямо на вертикальной свече)."""
+    if oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change < -0.3:
+        return "DISTRIBUTION"
+    elif oi_change >= cfg.OI_CHANGE_THRESHOLD:
+        return "ACCUMULATION"
+    elif oi_change <= -cfg.OI_CHANGE_THRESHOLD:
+        return "SQUEEZE"
+    elif vsa_type in ("CLIMAX", "ABSORPTION"):
+        return "VSA_" + vsa_type
+    elif vol_ratio >= cfg.VOL_SPIKE_MULT * 1.5:
+        return "VOLUME_SPIKE"
+    elif abs(funding) >= cfg.FUNDING_EXTREME:
+        return "FUNDING_EXTREME"
+    return "MOMENTUM"
 
 
 def _score_signal(
@@ -271,23 +303,7 @@ def _score_signal(
         elif level_dist_atr <= cfg.KEY_LEVEL_ATR_MULT:
             score += 4
 
-    # Классификация типа сигнала (как раньше, по OI/price)
-    if oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change < -0.3:
-        sig_type = "DISTRIBUTION"
-    elif oi_change >= cfg.OI_CHANGE_THRESHOLD:
-        sig_type = "ACCUMULATION"
-    elif oi_change <= -cfg.OI_CHANGE_THRESHOLD:
-        sig_type = "SQUEEZE"
-    elif vsa_type in ("CLIMAX", "ABSORPTION"):
-        sig_type = "VSA_" + vsa_type
-    elif vol_ratio >= cfg.VOL_SPIKE_MULT * 1.5:
-        sig_type = "VOLUME_SPIKE"
-    elif fund_abs >= cfg.FUNDING_EXTREME:
-        sig_type = "FUNDING_EXTREME"
-    else:
-        sig_type = "MOMENTUM"
-
-    return min(score, 100), sig_type
+    return min(score, 100), _classify_type(oi_change, vol_ratio, funding, price_change, vsa_type)
 
 
 def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
@@ -488,7 +504,11 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
 
         # VSA: effort (объём) vs result (спред) на последней завершённой 4h свече
         vsa_type, vsa_bias = _vsa_classify(klines, vol_avg, atr)
-        is_vsa_reversal = vsa_type in ("CLIMAX", "ABSORPTION")
+        # Освобождение от анти-спайка/MTF даётся, только если сделка и есть
+        # VSA-разворот. Раньше проверялся сам факт VSA-паттерна — и трендовый
+        # ACCUMULATION проскакивал гейт на вертикальной свече со score 70.
+        provisional_type = _classify_type(oi_change, vol_ratio, funding, price_chg, vsa_type)
+        is_vsa_reversal = provisional_type.startswith("VSA_")
 
         # Анти-спайк: не входить вдогонку после вертикального движения.
         # Проверяются ОБЕ свечи — последняя закрытая И текущая формирующаяся

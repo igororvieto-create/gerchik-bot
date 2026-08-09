@@ -166,6 +166,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .pos-sym{font-size:15px;font-weight:700;font-family:monospace}
 .pos-meta{font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:1px}
 .pos-pnl{font-size:16px;font-weight:700;margin-left:auto}
+.manual-tag{display:block;font-size:10px;color:var(--muted);margin-top:4px}
 .pos-close-btn{
   background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:var(--red);
   border-radius:7px;padding:5px 12px;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;
@@ -480,7 +481,7 @@ input[type=range]::-moz-range-thumb{
           </div>
           <div class="srow-ctrl">
             <div class="range-wrap">
-              <input type="range" id="set-minscore" min="5" max="80" step="1" oninput="$('rv-ms').textContent=this.value">
+              <input type="range" id="set-minscore" min="5" max="100" step="1" oninput="$('rv-ms').textContent=this.value">
               <span class="range-val" id="rv-ms">25</span>
             </div>
           </div>
@@ -492,7 +493,7 @@ input[type=range]::-moz-range-thumb{
           </div>
           <div class="srow-ctrl">
             <div class="range-wrap">
-              <input type="range" id="set-tradescore" min="20" max="100" step="1" oninput="$('rv-ts').textContent=this.value">
+              <input type="range" id="set-tradescore" min="5" max="100" step="1" oninput="$('rv-ts').textContent=this.value">
               <span class="range-val" id="rv-ts">60</span>
             </div>
           </div>
@@ -748,6 +749,7 @@ async function refreshPositions(){
           </div>
           <span class="pos-pnl ${pnlColor}">${pnl>=0?'+':''}${pnl.toFixed(2)} USDT</span>
           <button class="pos-close-btn" id="cbtn-${sym}" data-sym="${sym}" onclick="closePos(this.dataset.sym)">❌ Закрыть</button>
+          ${p.signal_type==='MANUAL'?'<span class="manual-tag">👤 твоя сделка · вне учёта бота</span>':''}
         </div>`;
       }).join('');
     } else panel.style.display='none';
@@ -870,6 +872,27 @@ async function doScan(){
   }
 }
 
+/* ── Токен доступа ── */
+// Открой дашборд один раз как ...app/?token=ТВОЙ_ТОКЕН — он сохранится.
+(function(){
+  const u = new URL(location.href);
+  const t = u.searchParams.get('token');
+  if(t){ try{ localStorage.setItem('dash_token', t); }catch{}
+         u.searchParams.delete('token'); history.replaceState(null,'',u); }
+})();
+function authHeaders(){
+  let t=''; try{ t=localStorage.getItem('dash_token')||''; }catch{}
+  return t ? {'X-Dashboard-Token': t} : {};
+}
+const _origFetch = window.fetch;
+window.fetch = function(url, opts){
+  opts = opts || {};
+  if(typeof url==='string' && url.startsWith('/api/')){
+    opts.headers = Object.assign({}, opts.headers||{}, authHeaders());
+  }
+  return _origFetch(url, opts);
+};
+
 /* ── WebSocket ── */
 function connect(){
   const proto=location.protocol==='https:'?'wss':'ws';
@@ -940,7 +963,7 @@ async function pollOnce(){
     if(wsOk) return;  // WS реконнектнулся, пока fetch'и были в полёте
     const rows=sgr.signals||[];
     if(rows.length) loadHistory(rows);
-    setStatus('ok','HTTP режим');
+    if(!String($('scan-info').textContent).startsWith('⚠')) setStatus('ok','HTTP режим');
     await refreshBalance(); await refreshPositions();
   }catch{ setStatus('','Ошибка'); }
 }

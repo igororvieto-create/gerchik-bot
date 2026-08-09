@@ -1,5 +1,6 @@
 import json
 import logging
+from typing import Optional
 import math
 import os
 import time
@@ -20,6 +21,26 @@ class JSONResponse(_BaseJSONResponse):
     'application/json' (no charset for non-text/* types), and some mobile
     HTTP stacks then decode Cyrillic UTF-8 bodies as Latin-1 → mojibake."""
     media_type = "application/json; charset=utf-8"
+
+
+def _require_token(request: Request) -> Optional[JSONResponse]:
+    """Защита изменяющих/чувствительных эндпоинтов.
+
+    Railway-домен публичный: без токена любой, кто знает адрес (или
+    предзагрузчик браузера, превью-бот мессенджера), мог менять настройки,
+    закрывать позиции и читать баланс. Токен задаётся переменной
+    DASHBOARD_TOKEN; если она не задана — работаем как раньше, но пишем
+    предупреждение, чтобы это не осталось незамеченным.
+    """
+    token = os.getenv("DASHBOARD_TOKEN", "").strip()
+    if not token:
+        return None
+    got = (request.headers.get("X-Dashboard-Token")
+           or request.query_params.get("token") or "")
+    if got != token:
+        log.warning(f"Отклонён запрос без валидного токена: {request.url.path}")
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return None
 
 
 def _sanitize(obj):
@@ -114,7 +135,9 @@ async def get_balance():
 
 
 @router.get("/api/debug")
-async def debug():
+async def debug(request: Request):
+    if (deny := _require_token(request)) is not None:
+        return deny
     from core.config import cfg
     info = {
         "auto_trade":    cfg.AUTO_TRADE,
@@ -159,8 +182,10 @@ async def debug():
 
 
 @router.get("/api/scan")
-async def trigger_scan():
-    """Manually trigger a scan: saves signals to DB, pushes via WS, returns top results."""
+async def trigger_scan(request: Request):
+    """Ручной скан: сохраняет сигналы, шлёт по WS, НЕ открывает сделки."""
+    if (deny := _require_token(request)) is not None:
+        return deny
     from core.config import cfg
     if state.client is None:
         return JSONResponse({"error": "client not initialized"}, status_code=503)
@@ -168,7 +193,8 @@ async def trigger_scan():
     import asyncio
     try:
         signals = await asyncio.wait_for(
-            run_scan_and_broadcast(state.client, cfg.NTFY_URL), timeout=120
+            run_scan_and_broadcast(state.client, cfg.NTFY_URL, allow_trading=False),
+            timeout=120,
         )
         return JSONResponse(_sanitize({
             "signals_found": len(signals),
@@ -315,7 +341,11 @@ async def get_outcomes(days: int = 7):
 @router.get("/api/trades")
 async def get_trades(limit: int = 50):
     rows = await db.get_trades(limit=limit)
-    return JSONResponse({"trades": rows, "count": len(rows)})
+    for r in rows:
+        for f in ("opened_at", "closed_at"):
+            if r.get(f) and not str(r[f]).endswith("Z"):
+                r[f] = r[f] + "Z"
+    return JSONResponse(_sanitize({"trades": rows, "count": len(rows)}))
 
 
 @router.get("/api/signals")
@@ -363,6 +393,8 @@ async def get_settings():
 
 @router.post("/api/settings")
 async def update_settings(request: Request):
+    if (deny := _require_token(request)) is not None:
+        return deny
     from core.config import cfg
     try:
         body = await request.json()
@@ -410,6 +442,14 @@ async def update_settings(request: Request):
             continue
         pending[key] = round(v, 2) if caster is float else v  # bool/int уходят как есть
 
+    # Связь из docs/REVIEW.md: порог показа выше торгового делает торговый
+    # порог фиктивным — сигналы отсеиваются раньше, чем дойдут до входа.
+    _new_min = pending.get("min_score", cfg.MIN_SCORE)
+    _new_trade = pending.get("trade_min_score", cfg.TRADE_MIN_SCORE)
+    if _new_min > _new_trade:
+        rejected["min_score"] = (f"порог показа {_new_min} выше торгового "
+                                 f"{_new_trade} — торговый стал бы фиктивным")
+
     if rejected:
         # Ничего не применяем — частичное сохранение хуже отказа
         return JSONResponse(
@@ -426,7 +466,9 @@ async def update_settings(request: Request):
 
 
 @router.post("/api/close/{symbol}")
-async def close_position_route(symbol: str):
+async def close_position_route(symbol: str, request: Request):
+    if (deny := _require_token(request)) is not None:
+        return deny
     if state.client is None:
         return JSONResponse({"error": "client not initialized"}, status_code=503)
     from core.state import Position
@@ -471,6 +513,9 @@ async def websocket_endpoint(ws: WebSocket):
     log.info(f"WS connected (total: {len(state.ws_clients)})")
     try:
         rows = await db.get_recent_signals(hours=6, limit=50)
+        for _r in rows:  # без 'Z' браузер трактует время как локальное
+            if _r.get("ts") and not str(_r["ts"]).endswith("Z"):
+                _r["ts"] = _r["ts"] + "Z"
         # _sanitize converts NaN/Inf → None so json.dumps never produces invalid JSON
         await ws.send_text(json.dumps(_sanitize({"type": "history", "data": rows})))
         while True:

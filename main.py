@@ -118,10 +118,13 @@ async def lifespan(app: FastAPI):
     import strategy.scanner as _sc
     import strategy.trader as _tr
     deadline = 25.0
-    while deadline > 0 and (_sc._SCANNING or _tr._MONITORING):
+    # _ENTERING обязателен: enter_trade выполняется ПОСЛЕ того, как scan_all
+    # отпустил _SCANNING, поэтому раньше цикл завершался на первой итерации,
+    # и сессия закрывалась прямо между place_order и установкой стопа.
+    while deadline > 0 and (_sc._SCANNING or _tr._MONITORING or _tr._ENTERING > 0):
         await asyncio.sleep(0.5)
         deadline -= 0.5
-    if _sc._SCANNING or _tr._MONITORING:
+    if _sc._SCANNING or _tr._MONITORING or _tr._ENTERING > 0:
         log.warning("shutdown: задачи не завершились за 25с — закрываю принудительно")
 
     if _scheduler and _scheduler.running:

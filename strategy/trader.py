@@ -11,6 +11,7 @@ from exchange.bybit import BybitClient
 log = logging.getLogger("trader")
 
 _MONITORING = False
+_ENTERING = 0   # счётчик выполняющихся enter_trade — shutdown их ждёт
 _DAILY_LOCK = asyncio.Lock()
 
 # Skip exchange-side "position disappeared" detection for positions younger
@@ -165,6 +166,8 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
     # Reserve slot immediately to prevent concurrent duplicate entries
     state.positions[sig.symbol] = None  # sentinel; replaced with real Position or removed
 
+    global _ENTERING
+    _ENTERING += 1
     try:
         balance = await client.get_balance()
         if balance < 10:
@@ -399,6 +402,8 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         if isinstance(e, asyncio.CancelledError):
             raise
         return False
+    finally:
+        _ENTERING -= 1
 
 
 async def monitor_positions(client: BybitClient) -> None:
@@ -424,9 +429,10 @@ async def monitor_positions(client: BybitClient) -> None:
             state.balance = bal
             _reevaluate_halt()
 
-        if not state.positions:
-            return
-
+        # НЕТ раннего выхода по пустому state.positions: именно в этом
+        # состоянии (после каждого рестарта) и нужна сверка с биржей —
+        # иначе блок усыновления сирот ниже недостижим, и позиция бота
+        # остаётся без проверки стопа, без записи закрытия и вне лимита.
         live = await client.get_positions()
         if live is None:
             # API failure — do NOT wipe positions; wait for next cycle
@@ -436,13 +442,7 @@ async def monitor_positions(client: BybitClient) -> None:
         live_map = {p["symbol"]: p for p in live}
         now_utc = datetime.utcnow()
 
-        # Раз в тик подчищаем "зависшие" open-строки: сделка старше суток,
-        # а позиции с таким символом на бирже нет — значит она закрылась,
-        # пока процесс был остановлен.
-        try:
-            await db.close_stale_open_trades(list(live_map.keys()))
-        except Exception as re_:
-            log.warning(f"reconcile stale trades: {re_}")
+
 
         # Усыновление осиротевших позиций: state.positions живёт только в
         # памяти и обнуляется при каждом рестарте, а деплой Railway при
@@ -611,6 +611,14 @@ async def monitor_positions(client: BybitClient) -> None:
                                 )
                         except Exception as ce:
                             log.critical(f"{sym}: emergency close failed — {ce} — will retry next tick")
+
+        # Реконсиляция "зависших" open-строк — ПОСЛЕ обработки закрытий:
+        # если сделать раньше, строка помечается stale, и последующий
+        # save_trade_close (WHERE status='open') не находит её, теряя PnL.
+        try:
+            await db.close_stale_open_trades(list(live_map.keys()))
+        except Exception as re_:
+            log.warning(f"reconcile stale trades: {re_}")
 
     except Exception as e:
         log.error(f"monitor_positions error: {e}")

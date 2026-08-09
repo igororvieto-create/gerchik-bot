@@ -94,10 +94,25 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_outcome ON signals(outcome, ts)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol_ts ON signals(symbol, ts)")
-        await db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_order "
-            "ON trades(order_id) WHERE order_id IS NOT NULL AND order_id != ''"
-        )
+        # Уникальный индекс может упасть на СУЩЕСТВУЮЩЕЙ базе, где дубли
+        # уже накопились (он появился позже самой таблицы). Раньше это
+        # роняло весь init_db: остальные индексы не создавались, commit не
+        # вызывался. Сначала убираем дубли, затем создаём — и в любом
+        # случае не даём упасть остальным DDL.
+        try:
+            await db.execute(
+                "DELETE FROM trades WHERE id NOT IN ("
+                "  SELECT MIN(id) FROM trades"
+                "  WHERE order_id IS NOT NULL AND order_id != ''"
+                "  GROUP BY order_id"
+                ") AND order_id IS NOT NULL AND order_id != ''"
+            )
+            await db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_order "
+                "ON trades(order_id) WHERE order_id IS NOT NULL AND order_id != ''"
+            )
+        except Exception as e:
+            log.error(f"init_db: не удалось создать idx_trades_order — {e}")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status, opened_at)")
         await db.commit()
@@ -390,13 +405,25 @@ async def cleanup_old_signals(keep_hours: int = 48) -> int:
             # сигналы удалялись прямо посреди 48-часового окна оценки. Стопы
             # (1R) разрешаются быстрее тейков (2R), поэтому удалялись
             # преимущественно будущие победы — винрейт систематически занижался.
+            # Окно лимита считается ТОЛЬКО по решённым строкам. Раньше в
+            # него входили и нерешённые (outcome IS NULL): они вытесняли
+            # решённые, и первый же cleanup стирал всю статистику винрейта,
+            # по которой принимается решение о запуске на реальные деньги.
             cur2 = await db.execute(
                 """DELETE FROM signals
                    WHERE outcome IS NOT NULL
-                     AND id NOT IN (SELECT id FROM signals ORDER BY ts DESC LIMIT ?)""",
+                     AND id NOT IN (SELECT id FROM signals
+                                    WHERE outcome IS NOT NULL
+                                    ORDER BY ts DESC LIMIT ?)""",
                 (max(cfg.MAX_SIGNALS_DB, 1),),
             )
             removed += cur2.rowcount
+            # Нерешённые старше окна оценки уже никогда не будут досуждены
+            cur3 = await db.execute(
+                "DELETE FROM signals WHERE outcome IS NULL AND ts < ?",
+                ((datetime.utcnow() - timedelta(hours=72)).isoformat(),),
+            )
+            removed += cur3.rowcount
             # Also purge closed trades older than 90 days
             old_trades = (datetime.utcnow() - timedelta(days=90)).isoformat()
             await db.execute(

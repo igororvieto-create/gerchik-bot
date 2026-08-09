@@ -132,3 +132,18 @@ cfg.LEVERAGE             = int(_clamp(cfg.LEVERAGE,           1,   5,  "LEVERAGE
 cfg.MAX_POSITIONS        = int(_clamp(cfg.MAX_POSITIONS,      1,  20,  "MAX_POSITIONS"))
 cfg.MAX_MARGIN_PCT       = _clamp(cfg.MAX_MARGIN_PCT,       1.0, 50.0, "MAX_MARGIN_PCT")
 cfg.DAILY_LOSS_LIMIT_PCT = _clamp(cfg.DAILY_LOSS_LIMIT_PCT, 1.0, 20.0, "DAILY_LOSS_LIMIT_PCT")
+
+# Связь из docs/REVIEW.md §2: полный набор позиций не должен пробивать
+# дневной лимит. Поштучные клампы это не ловили: MAX_POSITIONS=10 при риске
+# 1% даёт 10% одновременного риска при лимите 6% — предохранитель сработал
+# бы уже после того, как убыток его превысил.
+_worst = cfg.RISK_PER_TRADE * cfg.MAX_POSITIONS
+if _worst > cfg.DAILY_LOSS_LIMIT_PCT:
+    import logging as _lg
+    _new_max = max(1, int(cfg.DAILY_LOSS_LIMIT_PCT // cfg.RISK_PER_TRADE))
+    _lg.getLogger("config").error(
+        f"RISK_PER_TRADE({cfg.RISK_PER_TRADE}%) × MAX_POSITIONS({cfg.MAX_POSITIONS}) "
+        f"= {_worst}% превышает DAILY_LOSS_LIMIT_PCT({cfg.DAILY_LOSS_LIMIT_PCT}%) — "
+        f"MAX_POSITIONS снижен до {_new_max}"
+    )
+    cfg.MAX_POSITIONS = _new_max

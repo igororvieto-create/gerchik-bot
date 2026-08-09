@@ -812,7 +812,8 @@ async def scan_all(client: BybitClient) -> List[Signal]:
         _SCANNING = False
 
 
-async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> List[Signal]:
+async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "",
+                                 allow_trading: bool = True) -> List[Signal]:
     """Called by APScheduler: scan, save to DB, broadcast via WS, push via ntfy."""
     if client.api_key and client.secret:
         try:
@@ -841,7 +842,10 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "") -> Lis
         except Exception as dbe:
             log.error(f"run_scan_and_broadcast: db.save_signal({sig.symbol}) failed — {dbe}")
 
-        await enter_trade(client, sig)
+        # allow_trading=False для ручного скана из дашборда: GET-запрос
+        # не должен открывать позиции на реальные деньги.
+        if allow_trading:
+            await enter_trade(client, sig)
 
         try:
             msg = json.dumps({"type": "signal", "data": sig.to_dict()})

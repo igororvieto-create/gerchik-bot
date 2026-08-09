@@ -43,7 +43,7 @@ async def evaluate_signal_outcomes(client: BybitClient) -> None:
         return
     _EVALUATING = True
     try:
-        pending = await db.get_pending_signals(max_age_hours=_MAX_AGE_HOURS + 2)
+        pending = await db.get_pending_signals(max_age_hours=_MAX_AGE_HOURS * 3)
         if not pending:
             return
         now = datetime.now(timezone.utc)
@@ -62,6 +62,12 @@ async def evaluate_signal_outcomes(client: BybitClient) -> None:
                 sig_ms = sig_ts.timestamp() * 1000
                 relevant = [k for k in klines if k["ts"] >= sig_ms]
                 if not relevant:
+                    # Данных нет (пауза торгов, делистинг, сбой API). Если
+                    # сигнал уже перезрел — закрываем как EXPIRED, иначе он
+                    # навсегда остаётся OPEN и портит знаменатель винрейта.
+                    if age_h >= _MAX_AGE_HOURS:
+                        await db.set_signal_outcome(row["id"], "EXPIRED", 0.0)
+                        decided += 1
                     continue
 
                 verdict = _judge(row["direction"], row["sl"], row["tp2"], relevant)

@@ -325,16 +325,22 @@ def _score_signal(
         score += 20
     elif vsa_type == "ABSORPTION":
         score += 15
-    elif vsa_type == "NO_DEMAND_SUPPLY":
-        score += 5  # само по себе слабый сигнал, но полезно как контекст
+    # NO_DEMAND_SUPPLY очков не даёт: _vsa_classify всегда возвращает для
+    # него bias=NEUTRAL, направление он не подтверждает (см. правило "фактор
+    # без направления не даёт очков" в docs/REVIEW.md).
 
     # Близость к ключевому уровню (0-10 pts) — чем ближе, тем выше
+    # Тиры начинаются ВЫШЕ фильтра шума (LEVEL_NOISE_ATR): уровни ближе
+    # него отбрасываются в _find_swing_levels, поэтому прежние пороги
+    # 0.25/0.5 были математически недостижимы, и компонент давал только
+    # 4 очка или 0 — флагманский сетап методологии не дотягивал до порога.
     if level_dist_atr is not None:
-        if level_dist_atr <= 0.25:
+        near = cfg.LEVEL_NOISE_ATR
+        if level_dist_atr <= near * 1.4:      # ~0.7 ATR — вплотную к уровню
             score += 10
-        elif level_dist_atr <= 0.5:
+        elif level_dist_atr <= near * 2.0:    # ~1.0 ATR
             score += 7
-        elif level_dist_atr <= cfg.KEY_LEVEL_ATR_MULT:
+        elif level_dist_atr <= cfg.KEY_LEVEL_ATR_MULT * 2.5:
             score += 4
 
     return min(score, 100), _classify_type(oi_change, vol_ratio, funding, price_change, vsa_type, vsa_bias)
@@ -363,6 +369,7 @@ def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
     if vsa_bias != "NEUTRAL":
         votes.append(vsa_bias)
 
+    derived_from_votes = False
     if sig_type.startswith("VSA_") and vsa_bias != "NEUTRAL":
         primary = vsa_bias
     elif sig_type == "ACCUMULATION":
@@ -372,6 +379,7 @@ def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
     elif sig_type == "SQUEEZE":
         # Резкое падение OI само по себе направления не задаёт — решает
         # большинство голосов, при ничьей падаем на движение цены.
+        derived_from_votes = True
         long_votes  = votes.count("LONG")
         short_votes = votes.count("SHORT")
         if long_votes > short_votes:
@@ -383,8 +391,10 @@ def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
     elif sig_type == "FUNDING_EXTREME":
         primary = "SHORT" if funding > 0 else "LONG"
     elif ob_bias != "NEUTRAL":
+        derived_from_votes = True
         primary = "LONG" if ob_bias == "BUY" else "SHORT"
     else:
+        derived_from_votes = True
         primary = "LONG" if price_change > 0 else "SHORT"
 
     # Голос VSA у разворота тавтологически совпадает с primary — он задаёт
@@ -394,6 +404,15 @@ def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
     independent = list(votes)
     if is_reversal and vsa_bias in independent:
         independent.remove(vsa_bias)
+    elif derived_from_votes and independent:
+        # primary выведен ИЗ голосов (SQUEEZE, фолбэки по стакану/цене) —
+        # тот голос, что задал направление, не может его же подтверждать.
+        # Без этого одинокое 24h-движение давало confidence=1.0, и вход
+        # вдогонку проходил без капа, тогда как разворот резался до 55.
+        try:
+            independent.remove(primary)
+        except ValueError:
+            pass
 
     if independent:
         agree = sum(1 for v in independent if v == primary)
@@ -593,15 +612,10 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
 
         # Ключевые уровни на 4h — ближайшие к текущей цене с правильных сторон
         support, resistance = _find_swing_levels(klines, price=price, atr=atr)
+        # Дистанция до уровня считается ПОСЛЕ определения направления —
+        # см. ниже. Раньше брался min по обеим сторонам, и лонг получал
+        # очки за близость к СОПРОТИВЛЕНИЮ, то есть за довод против сделки.
         level_dist_atr = None
-        if atr > 0:
-            dists = []
-            if support is not None:
-                dists.append(abs(price - support) / atr)
-            if resistance is not None:
-                dists.append(abs(price - resistance) / atr)
-            if dists:
-                level_dist_atr = min(dists)
 
         score, sig_type = _score_signal(
             oi_change, vol_ratio, funding, ob_ratio, price_chg,
@@ -612,12 +626,28 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             sig_type, price_chg, ob_bias, funding, vsa_bias=vsa_bias,
         )
 
+        # Теперь известно направление — считаем дистанцию до уровня,
+        # который реально работает опорой стопа для ЭТОЙ сделки.
+        if atr > 0:
+            anchor_lvl = support if direction == "LONG" else resistance
+            if is_vsa_reversal and len(klines) >= 2:
+                ext = klines[-2]["low"] if direction == "LONG" else klines[-2]["high"]
+                if (direction == "LONG" and ext < price) or (direction == "SHORT" and ext > price):
+                    anchor_lvl = ext
+            if anchor_lvl is not None:
+                lvl_dist = abs(price - anchor_lvl) / atr
+                score, _ = _score_signal(
+                    oi_change, vol_ratio, funding, ob_ratio, price_chg,
+                    vsa_type=vsa_type, level_dist_atr=lvl_dist, vsa_bias=vsa_bias,
+                )
+
         # Рецидивирующий баг №2 (CLAUDE.md): VSA начислял до +20 очков ВСЕГДА,
         # но на направление влиял только если sig_type начинался с "VSA_".
         # Сетап мог набрать 70 очков, где +20 кричат SHORT, и войти в LONG.
         # Снимаем вклад VSA, когда он противоречит выбранному направлению.
         if vsa_bias != "NEUTRAL" and vsa_bias != direction:
-            score -= 20 if vsa_type == "CLIMAX" else 15
+            # Снимаем ровно тот вклад, который был начислен выше
+            score -= 20 if vsa_type == "CLIMAX" else (15 if vsa_type == "ABSORPTION" else 0)
 
         # Confluence cap ПОСЛЕ определения направления, ДО порога MIN_SCORE —
         # противоречащий сигнал не должен проходить фильтр на сырой магнитуде
@@ -672,8 +702,17 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             # отклонённый сразу после закрытия свечи, мог "дозреть" через
             # пару часов и дать вход в нескольких ATR от точки разворота —
             # то есть тот же вход вдогонку, только в обратную сторону.
-            drift_atr = abs(price - klines[-2]["close"]) / atr
+            sig_c = klines[-2]
+            drift_atr = abs(price - sig_c["close"]) / atr
             if drift_atr > cfg.REVERSAL_MAX_DRIFT_ATR:
+                return None
+            # Модуль сноса не отличал «цена пошла в сторону сделки» от
+            # «сетап уже сломан». Если цена ушла ЗА экстремум сигнальной
+            # свечи — тезис («экстремум устоит») недействителен, а якорь
+            # стопа при этом молча отбрасывался в _calc_levels.
+            if direction == "LONG" and price <= sig_c["low"]:
+                return None
+            if direction == "SHORT" and price >= sig_c["high"]:
                 return None
 
         # Для разворота опора стопа — экстремум сигнальной свечи

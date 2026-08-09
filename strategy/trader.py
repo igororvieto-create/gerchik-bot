@@ -213,10 +213,16 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         # qty 0.51 при шаге 1 превращалась в 1.0 (риск ×1.96) и проверка
         # min_qty не срабатывала вовсе — потолок риска обходился молча.
         actual_risk = qty * sig.entry * sig.sl_pct / 100
-        if actual_risk > risk_usdt * 1.5:
+        # Два потолка: относительный (допуск на округление лота) и АБСОЛЮТНЫЙ
+        # (инвариант проекта — не более 3% баланса). Раньше был только первый,
+        # и при RISK_PER_TRADE=3% округление вверх давало 4% фактического
+        # риска, проходя проверку 1.5× — инвариант пробивался молча.
+        hard_cap = balance * 3.0 / 100
+        if actual_risk > min(risk_usdt * 1.5, hard_cap):
             log.info(
                 f"{sig.symbol}: лот {qty} (шаг {qty_step}, мин {min_qty}) даёт риск "
-                f"{actual_risk:.2f} USDT вместо целевых {risk_usdt:.2f} — пропуск"
+                f"{actual_risk:.2f} USDT ({actual_risk/balance*100:.2f}% баланса) "
+                f"вместо целевых {risk_usdt:.2f} — пропуск"
             )
             state.positions.pop(sig.symbol, None)
             return False
@@ -271,6 +277,13 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         # on the exchange from this point, and losing track of it (on any
         # later exception) is worse than any bookkeeping failure.
         state.positions[sig.symbol] = pos
+        # Запись в trades СРАЗУ, до верификации SL: усыновление после
+        # рестарта опознаёт свою позицию только по этой строке. Без неё
+        # позиция бота получала ярлык MANUAL и навсегда лишалась защиты.
+        try:
+            await db.save_trade_open(pos)
+        except Exception as dbe:
+            log.error(f"{sig.symbol}: save_trade_open failed — {dbe}")
 
         # IMPORTANT — recurring historical bug: SL/TP have previously been
         # placed as chart markers only, without actually reaching the
@@ -324,8 +337,25 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             close_ok = False
             try:
                 close_res = await client.close_position(sig.symbol, side, qty)
-                close_ok = close_res.get("retCode", -1) == 0
-                if not close_ok:
+                if close_res.get("retCode", -1) == 0:
+                    # retCode=0 = ордер ПРИНЯТ, а не исполнен. IOC в неликвиде
+                    # заливается частично: остаток остался бы на бирже без
+                    # стопа и вне учёта. Сверяем реальный размер.
+                    await asyncio.sleep(1.0)
+                    live2 = await client.get_positions()
+                    if live2 is not None:
+                        lp2 = next((p for p in live2 if p.get("symbol") == sig.symbol), None)
+                        remaining = abs(float(lp2.get("size") or 0)) if lp2 else 0.0
+                        close_ok = remaining <= 0
+                        if not close_ok:
+                            log.critical(
+                                f"{sig.symbol}: закрыто частично, остаток {remaining} "
+                                f"— позиция остаётся под наблюдением"
+                            )
+                            pos.qty = remaining
+                    else:
+                        log.warning(f"{sig.symbol}: не удалось сверить остаток после закрытия")
+                else:
                     log.critical(
                         f"{sig.symbol}: emergency close REJECTED — "
                         f"{close_res.get('retMsg', 'no response')}"
@@ -349,15 +379,6 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             log.error(
                 f"{sig.symbol}: could not verify SL/TP attachment (API failures "
                 f"or propagation lag) — keeping position tracked, monitor re-checks SL"
-            )
-
-        try:
-            await db.save_trade_open(pos)
-        except Exception as dbe:
-            log.error(
-                f"{sig.symbol}: db.save_trade_open failed — position IS live on "
-                f"exchange and IS tracked in memory, but won't appear in trade "
-                f"history until this is investigated — {dbe}"
             )
 
         log.info(
@@ -502,6 +523,7 @@ async def monitor_positions(client: BybitClient) -> None:
                     # "разморозить" сработавший предохранитель, а убыток —
                     # остановить автоторговлю без причины.
                     state.positions.pop(sym, None)
+                    _TP_RETRIES.pop(sym, None)
                     log.info(f"{sym}: ручная позиция закрыта (pnl={pnl:+.2f}) — вне учёта бота")
                 else:
                     if not pos.order_id:
@@ -509,6 +531,7 @@ async def monitor_positions(client: BybitClient) -> None:
                         await db.save_trade_open(pos)
                     await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
                     state.positions.pop(sym, None)
+                    _TP_RETRIES.pop(sym, None)
                     log.info(f"{sym}: closed (SL/TP) exit={exit_price:.4f} pnl={pnl:+.2f}")
                     record_realized_close(pnl)
             else:
@@ -579,6 +602,7 @@ async def monitor_positions(client: BybitClient) -> None:
                                 await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
                                 record_realized_close(pnl)
                                 state.positions.pop(sym, None)
+                                _TP_RETRIES.pop(sym, None)
                                 log.info(f"{sym}: emergency-closed (no SL) pnl={pnl:+.2f}")
                             else:
                                 log.critical(

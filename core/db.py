@@ -127,6 +127,18 @@ async def save_signal(sig: Signal) -> None:
 async def save_trade_open(pos: Position) -> None:
     try:
         async with aiosqlite.connect(DB_PATH) as db:
+            # Частичный уникальный индекс покрывает только непустой order_id.
+            # Для позиций без него (реконсиляция дубликата 110072,
+            # восстановленные) проверяем вручную, иначе повторный вызов
+            # плодит строку, и "лишняя" open-строка потом заставляет бота
+            # считать чужую позицию своей.
+            if not pos.order_id:
+                async with db.execute(
+                    "SELECT 1 FROM trades WHERE symbol=? AND status='open' LIMIT 1",
+                    (pos.symbol,),
+                ) as cur:
+                    if await cur.fetchone():
+                        return
             await db.execute(
                 """INSERT OR IGNORE INTO trades
                    (symbol, side, entry, sl, tp1, tp2, tp3, qty,

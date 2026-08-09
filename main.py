@@ -163,6 +163,14 @@ async def _cleanup_job():
 
 async def _delayed_initial_scan():
     await asyncio.sleep(3)
+    # Сначала СИНХРОНИЗАЦИЯ с биржей, потом скан. Иначе первый скан идёт
+    # раньше первого тика монитора (+30с), state.positions пуст, и лимиты
+    # MAX_POSITIONS / MAX_SAME_DIRECTION считаются от нуля — бот открывает
+    # позиции поверх уже существующих после рестарта.
+    try:
+        await monitor_positions(_client)
+    except Exception as e:
+        log.error(f"Стартовая сверка позиций не удалась: {e}")
     try:
         await _scan_job()
     except Exception as e:

@@ -1,20 +1,32 @@
+import logging
+import math
 import os
 from dataclasses import dataclass, field
 from typing import List
+
+_log = logging.getLogger("config")
+
+_TRUE  = ("true", "1", "yes", "on", "y")
+_FALSE = ("false", "0", "no", "off", "n")
 
 
 def _env_int(name: str, default: int) -> int:
     """Разбор env с фолбэком. Раньше int(os.getenv(...)) стоял прямо в
     дефолте dataclass: заданная, но ПУСТАЯ переменная в Railway роняла
-    импорт core.config, а значит и всё приложение — crash-loop без логов."""
+    импорт core.config, а значит и всё приложение — crash-loop без логов.
+
+    OverflowError ловится наравне с ValueError: 'inf' проходит float(), но
+    int(inf) бросает — и это снова был бы crash-loop без внятного лога."""
     raw = (os.getenv(name) or "").strip()
     if not raw:
         return default
     try:
-        return int(float(raw))
-    except ValueError:
-        import logging
-        logging.getLogger("config").error(f"{name}={raw!r} — не число, беру {default}")
+        val = float(raw)
+        if not math.isfinite(val):
+            raise ValueError("не конечное число")
+        return int(val)
+    except (ValueError, OverflowError):
+        _log.error(f"{name}={raw!r} — не целое число, беру {default}")
         return default
 
 
@@ -23,18 +35,32 @@ def _env_float(name: str, default: float) -> float:
     if not raw:
         return default
     try:
-        return float(raw)
+        val = float(raw)
     except ValueError:
-        import logging
-        logging.getLogger("config").error(f"{name}={raw!r} — не число, беру {default}")
+        _log.error(f"{name}={raw!r} — не число, беру {default}")
         return default
+    if not math.isfinite(val):
+        # nan проскакивал мимо _clamp: любое сравнение с nan ложно, поэтому
+        # и потолок риска, и связь RISK×MAX_POSITIONS молча пропускали его,
+        # а размер позиции дальше считался как nan на КАЖДОМ входе.
+        _log.error(f"{name}={raw!r} — не конечное число, беру {default}")
+        return default
+    return val
 
 
 def _env_bool(name: str, default: bool) -> bool:
+    """Нераспознанное значение раньше превращалось в False, а не в дефолт:
+    ABORT_ON_LEVERAGE_FAIL=enabled бесшумно разрешал вход при неудачной
+    установке плеча, хотя сайзинг считался под известное плечо."""
     raw = (os.getenv(name) or "").strip().lower()
     if not raw:
         return default
-    return raw in ("true", "1", "yes", "on")
+    if raw in _TRUE:
+        return True
+    if raw in _FALSE:
+        return False
+    _log.error(f"{name}={raw!r} — не булево значение, беру {default}")
+    return default
 
 
 @dataclass
@@ -71,6 +97,13 @@ class Config:
     # чистого хода до ближайшего пивота, что в окне из 20 свечей редкость.
     # Сетка TP остаётся 1R/2R/3R, торговая цель по-прежнему TP2 = 2R.
     MIN_RR:             float = _env_float("MIN_RR", 1.5)
+    # Порог ПОКАЗА (MIN_RR) и порог ТОРГОВЛИ — разные вещи. Торговая цель одна:
+    # TP2 = 2R. При запасе до встречного уровня 1.5-2.0R цель стоит ЗА уровнем,
+    # от которого сделка и рассчитывает оттолкнуться: тезис отрабатывает на
+    # 1.7R, WIN засчитывается только на 2R, а отбой от уровня даёт LOSS или
+    # EXPIRED. Такая сделка не может выиграть по построению, поэтому торгуем
+    # только при запасе >= 2R, а сигналы 1.5-2.0R остаются информационными.
+    MIN_TRADE_HEADROOM_R: float = _env_float("MIN_TRADE_HEADROOM_R", 2.0)
     KEY_LEVEL_LOOKBACK: int   = _env_int("KEY_LEVEL_LOOKBACK", 20)
     KEY_LEVEL_WING:     int   = _env_int("KEY_LEVEL_WING", 2)
     KEY_LEVEL_ATR_MULT: float = _env_float("KEY_LEVEL_ATR_MULT", 1.2)
@@ -115,9 +148,8 @@ def _clamp(value, lo, hi, name: str):
     опечатка в переменной окружения Railway (RISK_PER_TRADE=10) проходила
     насквозь до расчёта размера позиции без единой проверки."""
     if value < lo or value > hi:
-        import logging
         clamped = max(lo, min(hi, value))
-        logging.getLogger("config").error(
+        _log.error(
             f"{name}={value} вне допустимого диапазона [{lo}, {hi}] — принудительно {clamped}"
         )
         return clamped
@@ -132,6 +164,15 @@ cfg.LEVERAGE             = int(_clamp(cfg.LEVERAGE,           1,   5,  "LEVERAGE
 cfg.MAX_POSITIONS        = int(_clamp(cfg.MAX_POSITIONS,      1,  20,  "MAX_POSITIONS"))
 cfg.MAX_MARGIN_PCT       = _clamp(cfg.MAX_MARGIN_PCT,       1.0, 50.0, "MAX_MARGIN_PCT")
 cfg.DAILY_LOSS_LIMIT_PCT = _clamp(cfg.DAILY_LOSS_LIMIT_PCT, 1.0, 20.0, "DAILY_LOSS_LIMIT_PCT")
+
+# Параметры нагрузки на API. SCAN_INTERVAL_MIN=0 (например, из "0.5", которое
+# _env_int усекает до нуля) APScheduler молча превращает в интервал 1 СЕКУНДА,
+# а это TOP_N_PAIRS×4 ≈ 400 запросов к Bybit в секунду — гарантированный бан.
+cfg.SCAN_INTERVAL_MIN   = int(_clamp(cfg.SCAN_INTERVAL_MIN,   1,    60, "SCAN_INTERVAL_MIN"))
+cfg.TOP_N_PAIRS         = int(_clamp(cfg.TOP_N_PAIRS,         5,   500, "TOP_N_PAIRS"))
+cfg.SCAN_BATCH_SIZE     = int(_clamp(cfg.SCAN_BATCH_SIZE,     1,    50, "SCAN_BATCH_SIZE"))
+cfg.SCAN_BATCH_DELAY    = _clamp(cfg.SCAN_BATCH_DELAY,      0.0,  10.0, "SCAN_BATCH_DELAY")
+cfg.SIGNAL_COOLDOWN_MIN = int(_clamp(cfg.SIGNAL_COOLDOWN_MIN, 0,  1440, "SIGNAL_COOLDOWN_MIN"))
 
 # Связь из docs/REVIEW.md §2: полный набор позиций не должен пробивать
 # дневной лимит. Поштучные клампы это не ловили: MAX_POSITIONS=10 при риске

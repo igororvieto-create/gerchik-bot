@@ -17,6 +17,11 @@ else:
     _DEFAULT_DB = os.path.normpath(
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "signals.db")
     )
+    # Громко: без тома вся история сделок и форвард-теста исчезает при каждом
+    # деплое, а get_open_trades() после рестарта не находит своих позиций —
+    # живые позиции бота получают ярлык MANUAL и лишаются защиты стопа.
+    log.error("Railway Volume (/data) НЕ подключён — база эфемерная, "
+              "история и открытые сделки не переживут деплой")
 DB_PATH = os.getenv("DB_PATH", _DEFAULT_DB)
 
 
@@ -92,20 +97,32 @@ async def init_db() -> None:
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_outcome ON signals(outcome, ts)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol_ts ON signals(symbol, ts)")
+        # Индексов по signals(symbol) больше нет: ни один запрос не фильтрует
+        # и не сортирует по symbol (кулдаун живёт в памяти, в state.signal_seen),
+        # а два лишних индекса обновлялись на КАЖДОЙ вставке сигнала.
+        await db.execute("DROP INDEX IF EXISTS idx_signals_symbol")
+        await db.execute("DROP INDEX IF EXISTS idx_signals_symbol_ts")
         # Уникальный индекс может упасть на СУЩЕСТВУЮЩЕЙ базе, где дубли
         # уже накопились (он появился позже самой таблицы). Раньше это
         # роняло весь init_db: остальные индексы не создавались, commit не
         # вызывался. Сначала убираем дубли, затем создаём — и в любом
         # случае не даём упасть остальным DDL.
         try:
+            # Оставляем не MIN(id), а ТЕРМИНАЛЬНУЮ строку: у дубля по одному
+            # order_id одна строка обычно 'open' (запись при входе), вторая
+            # 'closed' с реализованным PnL. MIN(id) сохранял первую и удалял
+            # вторую — убыток исчезал из дневного предохранителя, а вечная
+            # open-строка заставляла бота считать чужую позицию своей.
             await db.execute(
-                "DELETE FROM trades WHERE id NOT IN ("
-                "  SELECT MIN(id) FROM trades"
-                "  WHERE order_id IS NOT NULL AND order_id != ''"
-                "  GROUP BY order_id"
-                ") AND order_id IS NOT NULL AND order_id != ''"
+                "DELETE FROM trades WHERE order_id IS NOT NULL AND order_id != '' "
+                "AND id NOT IN ("
+                "  SELECT (SELECT u.id FROM trades u WHERE u.order_id = t.order_id"
+                "          ORDER BY (u.status='closed') DESC, (u.pnl IS NOT NULL) DESC,"
+                "                   u.id ASC LIMIT 1)"
+                "  FROM trades t"
+                "  WHERE t.order_id IS NOT NULL AND t.order_id != ''"
+                "  GROUP BY t.order_id"
+                ")"
             )
             await db.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_order "
@@ -319,18 +336,19 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
 async def get_open_trades() -> List[Dict]:
     """Открытые сделки БОТА. Нужны, чтобы после рестарта отличить свою
     позицию (её надо защищать и учитывать) от ручной сделки пользователя
-    (её трогать нельзя и в дневной лимит она не входит)."""
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT * FROM trades WHERE status='open' ORDER BY opened_at DESC"
-            ) as cur:
-                rows = await cur.fetchall()
-        return [dict(r) for r in rows]
-    except Exception as e:
-        log.error(f"get_open_trades error: {e}")
-        return []
+    (её трогать нельзя и в дневной лимит она не входит).
+
+    БРОСАЕТ при ошибке БД и НЕ возвращает []. Пустой список означает «своих
+    сделок нет», и вызывающий помечал бы все живые позиции как MANUAL: без
+    стопа, вне слотов и мимо дневного лимита. Отличить «БД недоступна» от
+    «сделок нет» обязан вызывающий, а не эта функция."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM trades WHERE status='open' ORDER BY opened_at DESC"
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
 
 
 async def close_stale_open_trades(live_symbols: List[str], older_than_hours: int = 24) -> int:
@@ -362,19 +380,20 @@ async def close_stale_open_trades(live_symbols: List[str], older_than_hours: int
 async def get_realized_pnl_since(closed_after_iso: str) -> float:
     """Sum of realized PnL for trades closed at/after the given ISO timestamp.
     Used to rebuild the daily circuit-breaker counter after a process restart —
-    in-memory-only accounting would reset the halt on every deploy/crash."""
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute(
-                "SELECT COALESCE(SUM(pnl), 0) FROM trades "
-                "WHERE status='closed' AND closed_at >= ?",
-                (closed_after_iso,),
-            ) as cur:
-                row = await cur.fetchone()
-        return float(row[0] or 0.0)
-    except Exception as e:
-        log.error(f"get_realized_pnl_since error: {e}")
-        return 0.0
+    in-memory-only accounting would reset the halt on every deploy/crash.
+
+    БРОСАЕТ при ошибке БД. Возврат 0.0 означал «сегодня потерь нет»: при
+    заблокированной базе (WAL + параллельная чистка) предохранитель тихо
+    обнулялся, дата дня штамповалась, и бот торговал остаток суток с
+    потерянным счётчиком убытка."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COALESCE(SUM(pnl), 0) FROM trades "
+            "WHERE status='closed' AND closed_at >= ?",
+            (closed_after_iso,),
+        ) as cur:
+            row = await cur.fetchone()
+    return float(row[0] or 0.0)
 
 
 async def get_trades(limit: int = 50) -> List[Dict]:

@@ -99,46 +99,62 @@ class BybitClient:
             "Content-Type":       "application/json",
         }
 
-    async def _raw_get(self, url: str, headers: Dict) -> Tuple[int, str]:
-        """GET with automatic proxy fallback."""
+    async def _raw_request(self, method: str, url: str, headers: Dict,
+                           data: Optional[str] = None) -> Tuple[int, str]:
+        """HTTP-запрос с перебором прокси.
+
+        Failover раньше срабатывал ТОЛЬКО на исключении транспорта. Ответ
+        с HTTP 403 (гео-блок Bybit на IP прокси) считался успехом: тело —
+        не-JSON, `_get` возвращал {}, `get_positions()` → None, монитор
+        выходил со «skipping close check» каждые 30 секунд, а рабочее
+        прямое соединение в списке так и не пробовалось.
+
+        Прикладные ошибки Bybit приходят с HTTP 200 и полем retCode,
+        поэтому 4xx/5xx — почти всегда инфраструктура между нами и биржей.
+        """
         session = await self._get_session()
         tried: List[Optional[str]] = []
+        last: Optional[Tuple[int, str]] = None
         while True:
             proxy = self._proxy
             if proxy in tried:
-                break
+                # Круг замкнулся: список прокси исчерпан. Возвращаем последний
+                # реальный ответ, если он был, иначе — честная ошибка (раньше
+                # здесь был `break`, функция отдавала None, и вызывающий падал
+                # на распаковке кортежа с бессмысленным TypeError в логе).
+                if last is not None:
+                    return last
+                raise RuntimeError(f"{method} {url}: все прокси исчерпаны")
             tried.append(proxy)
             try:
-                kw: Dict = {"headers": headers, "timeout": aiohttp.ClientTimeout(total=10, connect=3)}
+                kw: Dict = {"headers": headers,
+                            "timeout": aiohttp.ClientTimeout(total=10, connect=3)}
+                if data is not None:
+                    kw["data"] = data
                 if proxy:
                     kw["proxy"] = proxy
-                async with session.get(url, **kw) as r:
-                    return r.status, await r.text()
-            except Exception as e:
+                async with session.request(method, url, **kw) as r:
+                    body = await r.text()
+                    if r.status >= 400:
+                        last = (r.status, body)
+                        log.warning(
+                            f"{method} {url.split('?')[0]} HTTP {r.status} через "
+                            f"{'direct' if proxy is None else proxy}"
+                        )
+                        if self._advance_proxy():
+                            continue
+                        return last
+                    return r.status, body
+            except Exception:
                 if proxy is not None and self._advance_proxy():
                     continue
                 raise
 
+    async def _raw_get(self, url: str, headers: Dict) -> Tuple[int, str]:
+        return await self._raw_request("GET", url, headers)
+
     async def _raw_post(self, url: str, headers: Dict, data: str) -> Tuple[int, str]:
-        """POST with automatic proxy fallback."""
-        session = await self._get_session()
-        tried: List[Optional[str]] = []
-        while True:
-            proxy = self._proxy
-            if proxy in tried:
-                break
-            tried.append(proxy)
-            try:
-                kw: Dict = {"headers": headers, "data": data,
-                            "timeout": aiohttp.ClientTimeout(total=10, connect=3)}
-                if proxy:
-                    kw["proxy"] = proxy
-                async with session.post(url, **kw) as r:
-                    return r.status, await r.text()
-            except Exception as e:
-                if proxy is not None and self._advance_proxy():
-                    continue
-                raise
+        return await self._raw_request("POST", url, headers, data)
 
     async def _get(self, path: str, params: Dict = None, auth: bool = False) -> Dict:
         params = params or {}
@@ -361,6 +377,22 @@ class BybitClient:
             if not cursor:
                 break
         return [p for p in positions if float(p.get("size", 0)) > 0]
+
+    async def get_position(self, symbol: str) -> Optional[Dict]:
+        """Живая позиция по символу.
+
+        None  — API недоступен, состояние НЕизвестно (трогать позицию нельзя);
+        {}    — API ответил, позиции нет (size == 0);
+        dict  — позиция есть.
+
+        Отдельный метод, потому что связка get_positions()+next(...) нужна в
+        четырёх местах, и в каждом важно не спутать «нет позиции» с «не смог
+        проверить»: первое разрешает закрыть учёт, второе — запрещает.
+        """
+        live = await self.get_positions()
+        if live is None:
+            return None
+        return next((p for p in live if p.get("symbol") == symbol), {})
 
     async def close_position(self, symbol: str, side: str, qty: float) -> Dict:
         close_side = "Sell" if side == "Buy" else "Buy"

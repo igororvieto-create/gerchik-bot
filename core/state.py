@@ -22,6 +22,9 @@ class Signal:
     tp2:         float    = 0.0
     tp3:         float    = 0.0
     rr:          float    = 0.0
+    # Запас до встречного уровня в R. Читается трейдером: сделка, чей TP2=2R
+    # лежит за уровнем-целью, структурно не может выиграть.
+    headroom:    float    = 0.0
     sl_pct:      float    = 0.0
     ts:          datetime = field(default_factory=datetime.utcnow)
 
@@ -44,6 +47,7 @@ class Signal:
             "tp2":         self.tp2,
             "tp3":         self.tp3,
             "rr":          round(self.rr, 2),
+            "headroom":    round(self.headroom, 2),
             "sl_pct":      round(self.sl_pct, 2),
             "ts":          self.ts.isoformat() + "Z",
         }
@@ -92,6 +96,13 @@ class AppState:
         self.scan_count: int = 0
         self.total_signals: int = 0
         self.positions: Dict[str, Position] = {}
+        # symbol → (side, started_at) для входов В ПОЛЁТЕ. Слот в positions
+        # резервируется значением None, которое стороны не несёт, поэтому
+        # MAX_SAME_DIRECTION не видел параллельные входы и пропускал третий
+        # однонаправленный вход при лимите 2. Отметка времени нужна монитору:
+        # sentinel, переживший свой enter_trade (потерян ответ биржи), обязан
+        # быть разрешён, иначе он навсегда занимает слот из MAX_POSITIONS.
+        self.pending_entries: Dict[str, tuple] = {}
         self.balance: float = 0.0
         self.client: Any = None  # set by main.py after BybitClient init
         self.last_balance_error: str = ""

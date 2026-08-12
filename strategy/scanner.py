@@ -241,10 +241,18 @@ def _classify_type(oi_change: float, vol_ratio: float, funding: float,
     # освобождение от анти-спайка пропустило бы вертикальную свечу в сделку.
     if vsa_type in ("CLIMAX", "ABSORPTION") and vsa_bias != "NEUTRAL":
         return "VSA_" + vsa_type
-    elif oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change < -0.3:
+    # Пороги симметричны: раньше DISTRIBUTION требовал price_change < -0.3,
+    # а ACCUMULATION ловил ВСЁ остальное, включая полосу [-0.3, 0]. Рост OI
+    # при движении цены −0.2% читался как накопление и форсировал LONG, тогда
+    # как зеркальный вход +0.2% давал тот же LONG — несимметричность.
+    elif oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change <= -cfg.PRICE_CHANGE_MIN:
         return "DISTRIBUTION"
-    elif oi_change >= cfg.OI_CHANGE_THRESHOLD:
+    elif oi_change >= cfg.OI_CHANGE_THRESHOLD and price_change >= cfg.PRICE_CHANGE_MIN:
         return "ACCUMULATION"
+    # Мёртвая зона |price_change| < PRICE_CHANGE_MIN проваливается дальше:
+    # рост OI без движения цены направления не задаёт, и навешивать на него
+    # ярлык ACCUMULATION (=безусловный LONG) было нечестно. Ниже направление
+    # выведется из голосов, а confidence честно это учтёт.
     elif oi_change <= -cfg.OI_CHANGE_THRESHOLD:
         return "SQUEEZE"
     elif vol_ratio >= cfg.VOL_SPIKE_MULT * 1.5:
@@ -263,8 +271,13 @@ def _score_signal(
     vsa_type: str = "NEUTRAL",
     level_dist_atr: Optional[float] = None,
     vsa_bias: str = "NEUTRAL",
+    direction: Optional[str] = None,
 ) -> tuple[int, str]:
-    """Score 0-100 и классификация типа сигнала."""
+    """Score 0-100 и классификация типа сигнала.
+
+    direction=None означает «направление ещё не известно» — тогда очки за
+    стакан и фандинг начисляются по модулю (режим совместимости для быстрых
+    прикидок). Боевой путь в _analyze_symbol ВСЕГДА передаёт направление."""
     score = 0
 
     # OI change component (0-30 pts) — немного урезано, освободили место под VSA/уровни
@@ -292,27 +305,35 @@ def _score_signal(
     elif vol_ratio >= 1.3:
         score += 2
 
-    # Funding extremity (0-10 pts)
-    fund_abs = abs(funding)
-    if fund_abs >= 0.1:
-        score += 10
-    elif fund_abs >= 0.05:
-        score += 7
-    elif fund_abs >= 0.03:
-        score += 4
-    elif fund_abs >= 0.01:
-        score += 2
+    # Funding extremity (0-10 pts) — ТОЛЬКО если фандинг подтверждает сделку.
+    # Раньше очки шли по abs(): фандинг, кричащий против направления, добавлял
+    # те же +10, и именно они переводили сигнал через TRADE_MIN_SCORE
+    # (рецидивирующий баг №2 — фактор обязан подтверждать направление).
+    # Нижний тир начинается с FUNDING_EXTREME: 0.01% — это НЕЙТРАЛЬНАЯ ставка
+    # Bybit, очки за неё получал практически каждый перп.
+    fund_side = "LONG" if funding < 0 else "SHORT"   # контрарно: платящая сторона проигрывает
+    if direction is None or direction == fund_side:
+        fund_abs = abs(funding)
+        if fund_abs >= 0.1:
+            score += 10
+        elif fund_abs >= 0.05:
+            score += 7
+        elif fund_abs >= cfg.FUNDING_EXTREME:
+            score += 4
 
-    # Orderbook imbalance (0-10 pts)
-    ob_abs = abs(ob_ratio)
-    if ob_abs >= 0.30:
-        score += 10
-    elif ob_abs >= 0.20:
-        score += 7
-    elif ob_abs >= 0.10:
-        score += 4
-    elif ob_abs >= 0.05:
-        score += 2
+    # Orderbook imbalance (0-10 pts) — та же логика: стакан, перекошенный
+    # ПРОТИВ сделки, очков не даёт.
+    ob_side = "LONG" if ob_ratio > 0 else "SHORT"
+    if direction is None or direction == ob_side:
+        ob_abs = abs(ob_ratio)
+        if ob_abs >= 0.30:
+            score += 10
+        elif ob_abs >= 0.20:
+            score += 7
+        elif ob_abs >= 0.10:
+            score += 4
+        elif ob_abs >= 0.05:
+            score += 2
 
     # VSA effort/result (0-20 pts) — ядро методологии Герчика.
     # Очки даются ТОЛЬКО за направленное прочтение: двусмысленный климакс
@@ -363,8 +384,13 @@ def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
         votes.append("LONG" if price_change > 0 else "SHORT")
     if ob_bias != "NEUTRAL":
         votes.append("LONG" if ob_bias == "BUY" else "SHORT")
-    # Отрицательный фандинг: шорты платят лонгам -> давление вверх (контрарно)
-    if abs(funding) >= 0.01:
+    # Отрицательный фандинг: шорты платят лонгам -> давление вверх (контрарно).
+    # Порог — FUNDING_EXTREME, а НЕ 0.01: базовая ставка Bybit равна ровно
+    # 0.01%, то есть прежний порог стоял на нейтральном значении и выдавал
+    # голос почти по каждому символу. Поскольку фандинг чаще положителен, это
+    # был постоянный голос SHORT — им и задавалось направление 2/3 сделок
+    # (наблюдалось 24 шорта на 13 лонгов за сутки).
+    if abs(funding) >= cfg.FUNDING_EXTREME:
         votes.append("LONG" if funding < 0 else "SHORT")
     if vsa_bias != "NEUTRAL":
         votes.append(vsa_bias)
@@ -535,7 +561,11 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         if vol_24h < cfg.MIN_VOL_24H:
             return None
 
-        if abs(price_chg) < cfg.PRICE_CHANGE_MIN and abs(funding) < 0.01:
+        # Порог фандинга — FUNDING_EXTREME, а не 0.01: нейтральная ставка Bybit
+        # равна ровно 0.01%, поэтому правая половина условия почти всегда была
+        # ложной, и префильтр мёртвых тикеров не отсеивал ничего — на каждый
+        # такой символ тратилось 4 запроса к API каждый скан.
+        if abs(price_chg) < cfg.PRICE_CHANGE_MIN and abs(funding) < cfg.FUNDING_EXTREME:
             return None
 
         # Инвариант: не торговать новостные/листинговые спайки. Проверяем
@@ -612,34 +642,38 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
 
         # Ключевые уровни на 4h — ближайшие к текущей цене с правильных сторон
         support, resistance = _find_swing_levels(klines, price=price, atr=atr)
-        # Дистанция до уровня считается ПОСЛЕ определения направления —
-        # см. ниже. Раньше брался min по обеим сторонам, и лонг получал
-        # очки за близость к СОПРОТИВЛЕНИЮ, то есть за довод против сделки.
-        level_dist_atr = None
 
-        score, sig_type = _score_signal(
-            oi_change, vol_ratio, funding, ob_ratio, price_chg,
-            vsa_type=vsa_type, level_dist_atr=level_dist_atr, vsa_bias=vsa_bias,
-        )
-
+        # Тип сигнала уже посчитан выше (provisional_type) — _score_signal
+        # вернул бы ровно его же на тех же входах. Направление определяем от
+        # него, и только ПОТОМ считаем score один раз: очки за стакан, фандинг
+        # и уровень зависят от направления, поэтому раньше их было не посчитать.
+        sig_type = provisional_type
         direction, confidence = _direction(
             sig_type, price_chg, ob_bias, funding, vsa_bias=vsa_bias,
         )
 
-        # Теперь известно направление — считаем дистанцию до уровня,
-        # который реально работает опорой стопа для ЭТОЙ сделки.
+        # Дистанция до уровня, который реально станет опорой стопа для ЭТОЙ
+        # сделки. Якорь обязан совпадать с тем, что возьмёт _calc_levels:
+        # там для разворота берётся min(support, экстремум свечи) — если
+        # считать очки только по экстремуму, сетап получал +10 «вплотную к
+        # уровню», имея реальный стоп в 3+ ATR.
+        level_dist_atr = None
         if atr > 0:
             anchor_lvl = support if direction == "LONG" else resistance
             if is_vsa_reversal and len(klines) >= 2:
                 ext = klines[-2]["low"] if direction == "LONG" else klines[-2]["high"]
-                if (direction == "LONG" and ext < price) or (direction == "SHORT" and ext > price):
-                    anchor_lvl = ext
+                if direction == "LONG" and ext < price:
+                    anchor_lvl = ext if support is None else min(support, ext)
+                elif direction == "SHORT" and ext > price:
+                    anchor_lvl = ext if resistance is None else max(resistance, ext)
             if anchor_lvl is not None:
-                lvl_dist = abs(price - anchor_lvl) / atr
-                score, _ = _score_signal(
-                    oi_change, vol_ratio, funding, ob_ratio, price_chg,
-                    vsa_type=vsa_type, level_dist_atr=lvl_dist, vsa_bias=vsa_bias,
-                )
+                level_dist_atr = abs(price - anchor_lvl) / atr
+
+        score, _ = _score_signal(
+            oi_change, vol_ratio, funding, ob_ratio, price_chg,
+            vsa_type=vsa_type, level_dist_atr=level_dist_atr, vsa_bias=vsa_bias,
+            direction=direction,
+        )
 
         # Рецидивирующий баг №2 (CLAUDE.md): VSA начислял до +20 очков ВСЕГДА,
         # но на направление влиял только если sig_type начинался с "VSA_".
@@ -758,6 +792,7 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             tp2=levels["tp2"],
             tp3=levels["tp3"],
             rr=levels["rr"],
+            headroom=levels["headroom"],
             sl_pct=levels["sl_pct"],
         )
         sig._candle_ts = candle_ts   # для дедупа после доставки

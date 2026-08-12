@@ -22,6 +22,56 @@ _MIN_POSITION_AGE_S = 90
 
 # Счётчик неудачных попыток восстановить TP (символ -> попытки)
 _TP_RETRIES: dict[str, int] = {}
+# То же для SL. Без него ветка эскалации была недостижима: set_trading_stop
+# возвращал True по retCode, монитор считал стоп восстановленным и каждые
+# 30 секунд «чинил» его заново, а позиция жила без защиты (рецидив бага №1).
+_SL_RETRIES: dict[str, int] = {}
+_MAX_SL_RETRIES = 3
+
+
+def _forget_symbol(symbol: str) -> None:
+    """Единая точка снятия символа с учёта — счётчики попыток обязаны
+    умирать вместе с позицией, иначе следующая сделка по тому же символу
+    стартует с уже исчерпанным лимитом восстановления SL/TP."""
+    state.positions.pop(symbol, None)
+    state.pending_entries.pop(symbol, None)
+    _TP_RETRIES.pop(symbol, None)
+    _SL_RETRIES.pop(symbol, None)
+
+
+async def close_and_verify(client: BybitClient, symbol: str, side: str,
+                           qty: float) -> tuple[bool, float]:
+    """Закрыть позицию и ПОДТВЕРДИТЬ результат чтением живой позиции.
+
+    retCode==0 у /v5/order/create означает «ордер принят», а не «позиция
+    закрыта»: IOC reduceOnly в неликвиде заливается частично. Раньше учёт
+    закрывался по retCode, остаток оставался на бирже без стопа, на
+    следующем тике усыновлялся как MANUAL — и уже никогда не защищался,
+    не занимал слот и не попадал в дневной предохранитель.
+
+    Возвращает (closed, remaining):
+      (True,  0.0)  — на бирже реально ноль;
+      (False, >0)   — залилось частично, остаток столько;
+      (False, -1.0) — проверить не удалось, состояние неизвестно.
+    """
+    try:
+        res = await client.close_position(symbol, side, qty)
+    except Exception as e:
+        log.critical(f"{symbol}: запрос на закрытие не прошёл — {e}")
+        return False, -1.0
+    if res.get("retCode", -1) != 0:
+        log.critical(f"{symbol}: закрытие отклонено — {res.get('retMsg', 'нет ответа')}")
+        return False, -1.0
+    await asyncio.sleep(1.0)  # бирже нужно время на исполнение IOC
+    lp = await client.get_position(symbol)
+    if lp is None:
+        log.warning(f"{symbol}: не удалось сверить остаток после закрытия")
+        return False, -1.0
+    remaining = abs(float(lp.get("size") or 0))
+    if remaining > 0:
+        log.critical(f"{symbol}: закрыто ЧАСТИЧНО, остаток {remaining} — остаётся под наблюдением")
+        return False, remaining
+    return True, 0.0
 
 
 def _round_step(value: float, step: float) -> float:
@@ -65,7 +115,16 @@ async def _ensure_daily_state() -> None:
     async with _DAILY_LOCK:
         if state.daily_pnl_date == today:
             return
-        pnl = await db.get_realized_pnl_since(f"{today}T00:00:00")
+        try:
+            pnl = await db.get_realized_pnl_since(f"{today}T00:00:00")
+        except Exception as e:
+            # Дату НЕ штампуем: иначе счётчик остался бы нулевым до конца
+            # суток и бот торговал бы с потерянным убытком. Пока прочитать
+            # не удалось — торговля стоит; следующий тик повторит.
+            state.trading_halted = True
+            log.error(f"не удалось восстановить дневной PnL ({e}) — "
+                      f"торговля приостановлена до успешного чтения")
+            return
         state.daily_realized_pnl = pnl
         state.trading_halted = False
         state.daily_pnl_date = today
@@ -134,6 +193,16 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         return False
     if sig.sl_pct <= 0 or sig.entry <= 0 or sig.sl <= 0:
         return False
+    # Запас до встречного уровня меньше 2R означает, что торговая цель TP2=2R
+    # стоит ЗА уровнем, от которого сделка рассчитывает оттолкнуться: тезис
+    # отрабатывает, а WIN не засчитывается. Показывать такой сигнал можно
+    # (MIN_RR=1.5), торговать — нет.
+    if 0 < sig.headroom < cfg.MIN_TRADE_HEADROOM_R:
+        log.info(
+            f"{sig.symbol}: запас до цели {sig.headroom:.2f}R < "
+            f"{cfg.MIN_TRADE_HEADROOM_R}R — TP2 за уровнем, сигнал не торгуется"
+        )
+        return False
 
     await _ensure_daily_state()
     if state.trading_halted:
@@ -153,8 +222,15 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
     # direction. Three uncorrelated setups is diversification; three LONGs in
     # correlated alts is one oversized directional bet wearing three tickets.
     side = "Buy" if sig.direction == "LONG" else "Sell"
+    # Входы В ПОЛЁТЕ тоже считаются: sentinel None стороны не несёт, поэтому
+    # два параллельных enter_trade видели same_dir_count=0 и вместе пробивали
+    # кап. MAX_POSITIONS от этого защищён (sentinel попадает в bot_positions),
+    # а направленческий кап — не был.
     same_dir_count = sum(
         1 for p in bot_positions if p is not None and p.side == side
+    ) + sum(
+        1 for s_sym, (s_side, _) in state.pending_entries.items()
+        if s_side == side and s_sym != sig.symbol
     )
     if same_dir_count >= cfg.MAX_SAME_DIRECTION:
         log.info(
@@ -163,8 +239,14 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         )
         return False
 
-    # Reserve slot immediately to prevent concurrent duplicate entries
+    # Reserve slot immediately to prevent concurrent duplicate entries.
+    # Обе записи ставятся без await между ними — иначе резервирование
+    # перестаёт быть атомарным относительно параллельного входа.
     state.positions[sig.symbol] = None  # sentinel; replaced with real Position or removed
+    # utcnow() (наивный), а не now(timezone.utc): монитор сравнивает эту
+    # отметку с now_utc = datetime.utcnow() и с Position.ts — смешение
+    # aware/naive уронило бы вычитание TypeError'ом прямо в цикле монитора.
+    state.pending_entries[sig.symbol] = (side, datetime.utcnow())
 
     global _ENTERING
     _ENTERING += 1
@@ -172,7 +254,7 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         balance = await client.get_balance()
         if balance < 10:
             log.warning(f"Insufficient balance: {balance:.2f} USDT")
-            state.positions.pop(sig.symbol, None)
+            _forget_symbol(sig.symbol)
             return False
 
         state.balance = balance
@@ -181,7 +263,7 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         # restore runs with balance=0 and cannot evaluate the limit itself
         if _reevaluate_halt():
             log.warning(f"{sig.symbol}: daily loss limit (post-balance check) — skip")
-            state.positions.pop(sig.symbol, None)
+            _forget_symbol(sig.symbol)
             return False
 
         # Position size: risk RISK_PER_TRADE% of balance
@@ -203,7 +285,7 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             # Пустой ответ = сбой API. Подставлять шаг 0.001 наугад опасно:
             # для символа с реальным шагом 1 это ломает и размер, и риск-гард.
             log.warning(f"{sig.symbol}: нет данных инструмента (lotSizeFilter пуст) — пропуск входа")
-            state.positions.pop(sig.symbol, None)
+            _forget_symbol(sig.symbol)
             return False
         qty_step = float(lot.get("qtyStep",      "0.001"))
         min_qty  = float(lot.get("minOrderQty",  "0.001"))
@@ -227,12 +309,12 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
                 f"{actual_risk:.2f} USDT ({actual_risk/balance*100:.2f}% баланса) "
                 f"вместо целевых {risk_usdt:.2f} — пропуск"
             )
-            state.positions.pop(sig.symbol, None)
+            _forget_symbol(sig.symbol)
             return False
 
         if qty * sig.entry < 5.0:
             log.debug(f"{sig.symbol}: notional {qty*sig.entry:.2f} < 5 USDT min")
-            state.positions.pop(sig.symbol, None)
+            _forget_symbol(sig.symbol)
             return False
 
         ok = await client.set_leverage(sig.symbol, cfg.LEVERAGE)
@@ -242,7 +324,7 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             # liquidation distance. Abort by default (ABORT_ON_LEVERAGE_FAIL).
             log.error(f"{sig.symbol}: set_leverage({cfg.LEVERAGE}) failed")
             if cfg.ABORT_ON_LEVERAGE_FAIL:
-                state.positions.pop(sig.symbol, None)
+                _forget_symbol(sig.symbol)
                 return False
             log.warning(f"{sig.symbol}: continuing despite leverage-set failure (ABORT_ON_LEVERAGE_FAIL=False)")
 
@@ -263,9 +345,30 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
                     f"{sig.symbol}: duplicate orderLinkId — first attempt filled, "
                     f"reconciling as success"
                 )
+            elif not result:
+                # Пустой ответ = все три попытки _post умерли на транспорте.
+                # Это НЕ «ордер отклонён»: первая попытка могла быть принята
+                # биржей, а ответ потерян. Освобождать слот вслепую нельзя —
+                # живая позиция осталась бы без строки в trades и на следующем
+                # тике была бы усыновлена как MANUAL: без стопа, вне слотов и
+                # мимо дневного лимита. Спрашиваем биржу, что там на самом деле.
+                log.error(f"{sig.symbol}: ответ на ордер потерян — сверяю с биржей")
+                lp = await client.get_position(sig.symbol)
+                if lp is None:
+                    log.critical(
+                        f"{sig.symbol}: биржа недоступна — состояние ордера НЕИЗВЕСТНО. "
+                        f"Слот остаётся занят, монитор разберётся на следующем тике"
+                    )
+                    return False  # sentinel НЕ снимаем: усыновление опознает позицию
+                if not lp:
+                    log.warning(f"{sig.symbol}: позиции нет — ордер действительно не прошёл")
+                    _forget_symbol(sig.symbol)
+                    return False
+                log.warning(f"{sig.symbol}: позиция ЖИВА (size={lp.get('size')}) — оформляю как свою")
+                qty = abs(float(lp.get("size") or qty))
             else:
                 log.error(f"{sig.symbol}: order failed — {ret_msg}")
-                state.positions.pop(sig.symbol, None)
+                _forget_symbol(sig.symbol)
                 return False
 
         order_id = result.get("result", {}).get("orderId", "")
@@ -302,19 +405,57 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         #    re-attaches or closes if it's really missing.
         exch_sl = exch_tp = 0.0
         verified = False
+        live_pos = None
         for attempt in range(3):
             await asyncio.sleep(0.5 if attempt == 0 else 1.5)
-            live = await client.get_positions()
-            if live is None:
-                continue  # API failure — retry
-            live_pos = next((p for p in live if p.get("symbol") == sig.symbol), None)
-            if live_pos is None:
-                continue  # propagation lag — retry
+            live_pos = await client.get_position(sig.symbol)
+            if not live_pos:
+                continue  # None = сбой API, {} = ещё не появилась — обе ждут ретрая
             exch_sl = float(live_pos.get("stopLoss") or 0)
             exch_tp = float(live_pos.get("takeProfit") or 0)
             verified = True
             if exch_sl > 0 and exch_tp > 0:
                 break
+
+        if verified and live_pos:
+            # Инвариант «риск ≤3% баланса» проверялся по sig.entry, а вход идёт
+            # ПО РЫНКУ: при проскальзывании реальное расстояние до стопа больше
+            # расчётного, и потолок пробивался незамеченным (риск 3% + 0.8%
+            # проскальзывания = 4.6% баланса). Считаем по фактической цене.
+            fill_px  = float(live_pos.get("avgPrice") or 0)
+            fill_qty = abs(float(live_pos.get("size") or 0))
+            if fill_px > 0 and fill_qty > 0 and sig.sl > 0:
+                real_risk = fill_qty * abs(fill_px - sig.sl)
+                if real_risk > balance * 3.0 / 100:
+                    allowed_qty = _round_step(
+                        (balance * 3.0 / 100) / abs(fill_px - sig.sl), qty_step)
+                    excess = _round_step(fill_qty - allowed_qty, qty_step)
+                    log.error(
+                        f"{sig.symbol}: проскальзывание подняло риск до "
+                        f"{real_risk/balance*100:.2f}% (вход {fill_px} вместо {sig.entry}) — "
+                        f"сокращаю позицию на {excess}"
+                    )
+                    if excess >= min_qty:
+                        try:
+                            red = await client.close_position(sig.symbol, side, excess)
+                            if red.get("retCode", -1) == 0:
+                                await asyncio.sleep(1.0)
+                                after = await client.get_position(sig.symbol)
+                                if after:
+                                    qty = abs(float(after.get("size") or qty))
+                                    pos.qty = qty
+                                    log.warning(f"{sig.symbol}: размер сокращён до {qty}")
+                            else:
+                                log.critical(
+                                    f"{sig.symbol}: сокращение отклонено — {red.get('retMsg')}"
+                                )
+                        except Exception as rde:
+                            log.critical(f"{sig.symbol}: сокращение не прошло — {rde}")
+                    else:
+                        log.critical(
+                            f"{sig.symbol}: превышение меньше минимального лота — "
+                            f"позиция несёт {real_risk/balance*100:.2f}% риска"
+                        )
 
         if verified and exch_tp <= 0 and exch_sl > 0:
             # TP не долетел, но SL стоит — позиция ЗАЩИЩЕНА, закрывать её
@@ -337,40 +478,15 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
                 f"{sig.symbol}: order filled but exchange shows "
                 f"SL={exch_sl} TP={exch_tp} — position UNPROTECTED, closing immediately."
             )
-            close_ok = False
-            try:
-                close_res = await client.close_position(sig.symbol, side, qty)
-                if close_res.get("retCode", -1) == 0:
-                    # retCode=0 = ордер ПРИНЯТ, а не исполнен. IOC в неликвиде
-                    # заливается частично: остаток остался бы на бирже без
-                    # стопа и вне учёта. Сверяем реальный размер.
-                    await asyncio.sleep(1.0)
-                    live2 = await client.get_positions()
-                    if live2 is not None:
-                        lp2 = next((p for p in live2 if p.get("symbol") == sig.symbol), None)
-                        remaining = abs(float(lp2.get("size") or 0)) if lp2 else 0.0
-                        close_ok = remaining <= 0
-                        if not close_ok:
-                            log.critical(
-                                f"{sig.symbol}: закрыто частично, остаток {remaining} "
-                                f"— позиция остаётся под наблюдением"
-                            )
-                            pos.qty = remaining
-                    else:
-                        log.warning(f"{sig.symbol}: не удалось сверить остаток после закрытия")
-                else:
-                    log.critical(
-                        f"{sig.symbol}: emergency close REJECTED — "
-                        f"{close_res.get('retMsg', 'no response')}"
-                    )
-            except Exception as ce:
-                log.critical(f"{sig.symbol}: emergency close FAILED — {ce}")
+            close_ok, remaining = await close_and_verify(client, sig.symbol, side, qty)
+            if remaining > 0:
+                pos.qty = remaining
             if close_ok:
                 # The aborted entry still paid fees/slippage — record the
                 # round trip so history and the daily breaker see the loss
                 await asyncio.sleep(1.0)
                 await _record_round_trip(client, pos)
-                state.positions.pop(sig.symbol, None)
+                _forget_symbol(sig.symbol)
                 return False
             # Close failed: position is live and unprotected — KEEP it tracked;
             # monitor_positions will re-attach SL or close it on its next tick.
@@ -397,7 +513,7 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         # оставался в state.positions НАВСЕГДА — занимал место из MAX_POSITIONS,
         # блокировал повторный вход по символу и был невидим для монитора.
         if not isinstance(state.positions.get(sig.symbol), Position):
-            state.positions.pop(sig.symbol, None)
+            _forget_symbol(sig.symbol)
         log.error(f"enter_trade {sig.symbol}: {type(e).__name__}: {e}")
         if isinstance(e, asyncio.CancelledError):
             raise
@@ -460,7 +576,14 @@ async def monitor_positions(client: BybitClient) -> None:
                 # с чужими целями и order_id.
                 bot_trades = {r["symbol"]: r for r in reversed(await db.get_open_trades())}
             except Exception as te:
-                log.error(f"не удалось прочитать открытые сделки: {te}")
+                # НЕ продолжаем с пустым словарём: «БД недоступна» выглядело бы
+                # как «своих сделок нет», и КАЖДАЯ позиция бота получила бы
+                # ярлык MANUAL — то есть навсегда лишилась бы досылки стопа,
+                # перестала занимать слот и выпала из дневного лимита.
+                # Пропускаем усыновление целиком, повторим на следующем тике.
+                log.error(f"не удалось прочитать открытые сделки ({te}) — "
+                          f"усыновление отложено, чтобы не пометить свои позиции как MANUAL")
+                orphans = []
                 bot_trades = {}
             for sym in orphans:
                 lp = live_map[sym]
@@ -502,7 +625,38 @@ async def monitor_positions(client: BybitClient) -> None:
         for sym in list(state.positions.keys()):
             pos = state.positions.get(sym)
             if pos is None:
-                continue  # sentinel slot from enter_trade in progress
+                # Sentinel заброни­рованного входа. В норме живёт секунды, но
+                # enter_trade оставляет его намеренно, когда ответ биржи на
+                # ордер потерян И сверка тоже не прошла: снять слот вслепую
+                # значило бы бросить возможную живую позицию без стопа.
+                # Здесь этот слот разрешается — иначе он вечно занимает место
+                # из MAX_POSITIONS и блокирует повторный вход по символу.
+                started = state.pending_entries.get(sym, (None, None))[1]
+                if started is None or (now_utc - started).total_seconds() < _MIN_POSITION_AGE_S:
+                    continue  # вход ещё может быть в полёте
+                lp = live_map.get(sym)
+                if lp is None:
+                    log.warning(f"{sym}: зависшая бронь входа, позиции на бирже нет — слот освобождён")
+                    _forget_symbol(sym)
+                    continue
+                # Позиция всё-таки открылась. Берём под учёт: следующие ветки
+                # этого же цикла проверят стоп и при необходимости починят его.
+                try:
+                    entry_px = float(lp.get("avgPrice") or lp.get("entryPrice") or 0)
+                    pos = Position(
+                        symbol=sym, side=lp.get("side", "Buy"), entry=entry_px,
+                        sl=float(lp.get("stopLoss") or 0), tp1=0.0,
+                        tp2=float(lp.get("takeProfit") or 0), tp3=0.0,
+                        qty=abs(float(lp.get("size") or 0)), score=0,
+                        signal_type="RECOVERED",
+                    )
+                    state.positions[sym] = pos
+                    state.pending_entries.pop(sym, None)
+                    await db.save_trade_open(pos)
+                    log.warning(f"{sym}: позиция найдена на бирже после потери ответа — взята под учёт")
+                except Exception as re_:
+                    log.error(f"{sym}: не удалось оформить восстановленную позицию — {re_}")
+                    continue
             if sym not in live_map:
                 # Grace period: a position opened while THIS get_positions
                 # request was in flight is missing from the (stale) snapshot —
@@ -580,37 +734,71 @@ async def monitor_positions(client: BybitClient) -> None:
                     # но НИКОГДА не трогаем: ни довешивание стопа, ни закрытие.
                     log.warning(f"{sym}: ручная позиция без SL — не вмешиваюсь (открыта не ботом)")
                 elif exch_sl <= 0:
-                    log.error(f"{sym}: live position has NO stop-loss — re-attaching SL/TP")
+                    log.error(f"{sym}: live position has NO stop-loss — re-attaching SL")
                     reattached = False
                     if pos.sl <= 0:
                         # Известного стопа нет (позиция восстановлена из строки
                         # без sl). Отправлять set_trading_stop бессмысленно:
                         # запрос уйдёт без поля stopLoss и вернёт "успех".
                         log.critical(f"{sym}: неизвестен уровень стопа — аварийное закрытие")
+                        _SL_RETRIES[sym] = _MAX_SL_RETRIES
                     else:
                         try:
-                            reattached = await client.set_trading_stop(sym, sl=pos.sl, tp=pos.tp2)
+                            # ТОЛЬКО стоп, без tp2. Bybit валидирует запрос
+                            # целиком: невалидный takeProfit (цена уже прошла
+                            # его после рестарта) отклонял ВЕСЬ запрос, и
+                            # здоровая прибыльная позиция шла в аварийное
+                            # закрытие. TP чинит отдельный блок выше.
+                            ok = await client.set_trading_stop(sym, sl=pos.sl)
+                            if ok:
+                                # retCode==0 НЕ доказывает, что стоп на бирже
+                                # (рецидивирующий баг №1): при tpslMode=Partial
+                                # запрос уровня позиции принимается, а поле
+                                # stopLoss остаётся пустым. Подтверждаем чтением.
+                                await asyncio.sleep(0.5)
+                                chk = await client.get_position(sym)
+                                if chk is None:
+                                    # Состояние неизвестно — не эскалируем,
+                                    # повторим на следующем тике.
+                                    log.warning(f"{sym}: не удалось подтвердить SL — повтор на следующем тике")
+                                    continue
+                                if not chk:
+                                    continue  # позиции уже нет — закрытие поймает следующий тик
+                                reattached = float(chk.get("stopLoss") or 0) > 0
+                                if not reattached:
+                                    log.error(f"{sym}: биржа приняла set_trading_stop, но stopLoss пуст")
                         except Exception as se:
                             log.error(f"{sym}: set_trading_stop raised — {se}")
-                    if not reattached:
+                    if reattached:
+                        log.info(f"{sym}: SL восстановлен на {pos.sl:.6f} (подтверждён биржей)")
+                        _SL_RETRIES.pop(sym, None)
+                    else:
+                        _SL_RETRIES[sym] = _SL_RETRIES.get(sym, 0) + 1
+                        if _SL_RETRIES[sym] < _MAX_SL_RETRIES:
+                            log.error(
+                                f"{sym}: стоп не подтверждён "
+                                f"({_SL_RETRIES[sym]}/{_MAX_SL_RETRIES}) — повтор на следующем тике"
+                            )
+                            continue
                         log.critical(f"{sym}: could not re-attach SL — emergency closing")
-                        try:
-                            res = await client.close_position(sym, pos.side, pos.qty)
-                            if res.get("retCode", -1) == 0:
-                                exit_price, pnl = await fetch_matching_closed_pnl(
-                                    client, pos, attempts=2)
-                                await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
-                                record_realized_close(pnl)
-                                state.positions.pop(sym, None)
-                                _TP_RETRIES.pop(sym, None)
-                                log.info(f"{sym}: emergency-closed (no SL) pnl={pnl:+.2f}")
-                            else:
-                                log.critical(
-                                    f"{sym}: emergency close rejected — "
-                                    f"{res.get('retMsg')} — will retry next tick"
-                                )
-                        except Exception as ce:
-                            log.critical(f"{sym}: emergency close failed — {ce} — will retry next tick")
+                        closed, remaining = await close_and_verify(
+                            client, sym, pos.side, pos.qty)
+                        if closed:
+                            exit_price, pnl = await fetch_matching_closed_pnl(
+                                client, pos, attempts=2)
+                            await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
+                            record_realized_close(pnl)
+                            _forget_symbol(sym)
+                            log.info(f"{sym}: emergency-closed (no SL) pnl={pnl:+.2f}")
+                        else:
+                            # Учёт НЕ закрываем: позиция (или её остаток) жива
+                            # на бирже. Закрыв строку в trades, мы бы на
+                            # следующем тике усыновили остаток как MANUAL и
+                            # больше никогда его не защитили.
+                            if remaining > 0:
+                                pos.qty = remaining
+                                _SL_RETRIES[sym] = 0  # остаток — новая цель, даём полный круг попыток
+                            log.critical(f"{sym}: аварийное закрытие не завершено — повтор на следующем тике")
 
         # Реконсиляция "зависших" open-строк — ПОСЛЕ обработки закрытий:
         # если сделать раньше, строка помечается stale, и последующий

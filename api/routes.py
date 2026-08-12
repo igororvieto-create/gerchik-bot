@@ -1,3 +1,4 @@
+import hmac
 import json
 import logging
 from typing import Optional
@@ -14,6 +15,8 @@ from core import db
 
 log = logging.getLogger("api")
 router = APIRouter()
+
+_no_token_warned_at: float = 0.0
 
 
 class JSONResponse(_BaseJSONResponse):
@@ -34,10 +37,23 @@ def _require_token(request: Request) -> Optional[JSONResponse]:
     """
     token = os.getenv("DASHBOARD_TOKEN", "").strip()
     if not token:
+        # Раньше здесь стоял молчаливый return: докстринг обещал
+        # предупреждение, а в логах не было ни строки, и оператор считал
+        # защиту включённой. Пишем — с троттлингом, чтобы не залить лог.
+        global _no_token_warned_at
+        now = time.time()
+        if now - _no_token_warned_at > 3600:
+            _no_token_warned_at = now
+            log.error(
+                "DASHBOARD_TOKEN не задан — мутирующие эндпоинты открыты всем, "
+                "кто знает адрес. Задай переменную в Railway."
+            )
         return None
     got = (request.headers.get("X-Dashboard-Token")
            or request.query_params.get("token") or "")
-    if got != token:
+    # compare_digest, а не ==: обычное сравнение строк выходит на первом
+    # различающемся байте и по времени ответа выдаёт префикс токена.
+    if not hmac.compare_digest(got, token):
         log.warning(f"Отклонён запрос без валидного токена: {request.url.path}")
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return None
@@ -109,7 +125,11 @@ async def get_positions():
 
 
 @router.get("/api/balance")
-async def get_balance():
+async def get_balance(request: Request):
+    # Баланс — ровно то чувствительное чтение, ради которого вводился токен
+    # (см. докстринг _require_token); незащищённым он остался по недосмотру.
+    if (deny := _require_token(request)) is not None:
+        return deny
     bal = round(state.balance, 2)
     result: dict = {"balance": bal, "currency": "USDT"}
     now = time.time()
@@ -208,7 +228,7 @@ async def trigger_scan(request: Request):
 
 
 @router.get("/api/diagnostic")
-async def diagnostic():
+async def diagnostic(request: Request):
     """Deep pipeline test: fetches tickers + runs full analysis on top symbol.
 
     ФИКС: раньше get_tickers() был внутри общего try/except, и на его сбое
@@ -218,10 +238,23 @@ async def diagnostic():
     никогда не срабатывала. Теперь get_tickers() обёрнут отдельно.
     """
     import asyncio
+    # Пять REST-запросов к Bybit на вызов, один из них аутентифицированный:
+    # без токена цикл таких запросов выжигает rate-limit ключа, и плановый
+    # скан начинает падать. Плюс ответ содержит balance_usdt.
+    if (deny := _require_token(request)) is not None:
+        return deny
     if state.client is None:
         return JSONResponse({"error": "client not initialized"}, status_code=503)
 
     result: dict = {}
+    # Реальная проба БД: фронтенд рисовал «DB ✅ OK» безусловно, и при
+    # read-only томе (или кончившемся месте) диагностика бодро рапортовала
+    # исправность, пока ни один сигнал не сохранялся.
+    try:
+        await db.get_recent_signals(hours=1, limit=1)
+        result["db"] = "ok"
+    except Exception as dbe:
+        result["db"] = str(dbe)
     try:
         # Step 1: tickers — отдельный try/except, чтобы гарантированно
         # заполнить tickers_error при сбое (его ждёт фронтенд)
@@ -299,8 +332,10 @@ async def diagnostic():
 
 
 @router.get("/api/status")
-async def get_status():
+async def get_status(request: Request):
     """Quick bot status: DB health, Bybit reachability, scan state."""
+    if (deny := _require_token(request)) is not None:
+        return deny
     from core.config import cfg
     info: dict = {
         "db":             "ok",
@@ -313,6 +348,12 @@ async def get_status():
         "positions":      len(state.positions),
         "ws_clients":     len(state.ws_clients),
         "balance":        round(state.balance, 2),
+        # Дневной предохранитель был невидим снаружи: бот стоял, а дашборд
+        # показывал «🤖 Авто», и пользователь считал его вооружённым.
+        "trading_halted":     state.trading_halted,
+        "daily_realized_pnl": round(state.daily_realized_pnl, 2),
+        "daily_loss_limit_pct": cfg.DAILY_LOSS_LIMIT_PCT,
+        "scan_error":     state.last_scan_error or None,
         "bybit_error":    None,
     }
     if state.client:
@@ -373,6 +414,13 @@ async def get_stats():
         "outcomes_7d":  outcomes,
         "scan_count":   state.scan_count,
         "last_scan_at": state.last_scan_at.isoformat() + "Z" if state.last_scan_at else None,
+        # Сканер намеренно двигает счётчик и время даже при провале, поэтому
+        # без этого поля HTTP-фолбэк рисовал растущий «Скан #43» и зелёный
+        # пульс, пока каждый скан падал с ошибкой Bybit.
+        "scan_error":   state.last_scan_error or None,
+        # Предохранитель виден и в фолбэке, иначе остановленный бот выглядит
+        # работающим ровно в том режиме, где WS недоступен.
+        "trading_halted": state.trading_halted,
     }
 
 
@@ -450,6 +498,21 @@ async def update_settings(request: Request):
         rejected["min_score"] = (f"порог показа {_new_min} выше торгового "
                                  f"{_new_trade} — торговый стал бы фиктивным")
 
+    # Связь из docs/REVIEW.md §2: полный набор позиций не должен пробивать
+    # дневной лимит. Поштучная валидация её не ловила — risk_per_trade=3.0 и
+    # max_positions=20 оба лежат в своих диапазонах и давали 60% одновременного
+    # риска при лимите 6%. Предохранитель считает только РЕАЛИЗОВАННЫЙ убыток,
+    # поэтому все позиции успевали открыться до первого стопа.
+    _new_risk = pending.get("risk_per_trade", cfg.RISK_PER_TRADE)
+    _new_pos  = pending.get("max_positions", cfg.MAX_POSITIONS)
+    _worst = _new_risk * _new_pos
+    if _worst > cfg.DAILY_LOSS_LIMIT_PCT:
+        rejected["max_positions"] = (
+            f"риск {_new_risk}% × {_new_pos} позиций = {_worst:.1f}% "
+            f"одновременного риска при дневном лимите {cfg.DAILY_LOSS_LIMIT_PCT}% — "
+            f"максимум {max(1, int(cfg.DAILY_LOSS_LIMIT_PCT // _new_risk))} позиций"
+        )
+
     if rejected:
         # Ничего не применяем — частичное сохранение хуже отказа
         return JSONResponse(
@@ -472,35 +535,52 @@ async def close_position_route(symbol: str, request: Request):
     if state.client is None:
         return JSONResponse({"error": "client not initialized"}, status_code=503)
     from core.state import Position
-    from strategy.trader import fetch_matching_closed_pnl, record_realized_close
+    from strategy.trader import (fetch_matching_closed_pnl, record_realized_close,
+                                 close_and_verify)
     import asyncio as _asyncio
     pos = state.positions.get(symbol)
     if not isinstance(pos, Position):
         # None means either absent or enter_trade sentinel (entry still in-flight)
         return JSONResponse({"error": f"no open position for {symbol}"}, status_code=404)
     try:
-        result = await state.client.close_position(symbol, pos.side, pos.qty)
-        if result.get("retCode", -1) == 0:
-            is_manual = getattr(pos, "signal_type", "") == "MANUAL"
-            state.positions.pop(symbol, None)
-            if is_manual:
-                # Чужая сделка: закрыли по просьбе пользователя, но в историю
-                # бота и в дневной предохранитель она не идёт.
-                log.info(f"Ручная позиция {symbol} закрыта через дашборд — вне учёта бота")
-                return JSONResponse({"ok": True, "symbol": symbol, "manual": True})
-            # Fetch the real exit price / PnL (same path as monitor_positions).
-            # Retries: Bybit's closed-pnl record can lag several seconds —
-            # a single attempt would permanently record pnl=0 and the loss
-            # would bypass the daily circuit breaker
-            await _asyncio.sleep(1.0)
-            exit_price, pnl = await fetch_matching_closed_pnl(
-                state.client, pos, attempts=4, delay=1.5)
-            await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
-            record_realized_close(pnl)
-            log.info(f"Position {symbol} closed via dashboard exit={exit_price:.4f} pnl={pnl:+.2f}")
-            return JSONResponse({"ok": True, "symbol": symbol,
-                                 "exit_price": exit_price, "pnl": pnl})
-        return JSONResponse({"error": result.get("retMsg", "unknown error")}, status_code=400)
+        # close_and_verify, а не голый close_position: retCode==0 означает
+        # «ордер принят», а не «позиция закрыта». IOC reduceOnly в неликвиде
+        # заливается частично, и прежний код снимал позицию с учёта, оставляя
+        # остаток на бирже — он тут же усыновлялся как MANUAL и уже никогда
+        # не защищался стопом и не занимал слот.
+        closed, remaining = await close_and_verify(
+            state.client, symbol, pos.side, pos.qty)
+        if not closed:
+            if remaining > 0:
+                pos.qty = remaining  # остаётся под наблюдением монитора
+                return JSONResponse(
+                    {"error": f"закрыто частично, остаток {remaining} — "
+                              f"позиция под наблюдением, повторите"},
+                    status_code=409,
+                )
+            return JSONResponse(
+                {"error": "закрытие не подтверждено биржей — позиция под наблюдением"},
+                status_code=502,
+            )
+        is_manual = getattr(pos, "signal_type", "") == "MANUAL"
+        state.positions.pop(symbol, None)
+        if is_manual:
+            # Чужая сделка: закрыли по просьбе пользователя, но в историю
+            # бота и в дневной предохранитель она не идёт.
+            log.info(f"Ручная позиция {symbol} закрыта через дашборд — вне учёта бота")
+            return JSONResponse({"ok": True, "symbol": symbol, "manual": True})
+        # Fetch the real exit price / PnL (same path as monitor_positions).
+        # Retries: Bybit's closed-pnl record can lag several seconds —
+        # a single attempt would permanently record pnl=0 and the loss
+        # would bypass the daily circuit breaker
+        await _asyncio.sleep(1.0)
+        exit_price, pnl = await fetch_matching_closed_pnl(
+            state.client, pos, attempts=4, delay=1.5)
+        await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
+        record_realized_close(pnl)
+        log.info(f"Position {symbol} closed via dashboard exit={exit_price:.4f} pnl={pnl:+.2f}")
+        return JSONResponse({"ok": True, "symbol": symbol,
+                             "exit_price": exit_price, "pnl": pnl})
     except Exception as e:
         log.error(f"close_position {symbol}: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)

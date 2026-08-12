@@ -101,8 +101,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    initial_scan_task.cancel()
-
     # Корректное завершение: AsyncIOScheduler.shutdown(wait=True) НЕ ждёт —
     # его исполнитель отменяет запущенные корутины (в apscheduler так и
     # написано: "There is no way to honor wait=True"). Поэтому сначала
@@ -126,6 +124,14 @@ async def lifespan(app: FastAPI):
         deadline -= 0.5
     if _sc._SCANNING or _tr._MONITORING or _tr._ENTERING > 0:
         log.warning("shutdown: задачи не завершились за 25с — закрываю принудительно")
+
+    # Отмена стартового скана — ПОСЛЕ ожидания, а не до него. Планировщику
+    # хватает pause(), но эта задача ему не подчиняется, и cancel() до цикла
+    # ожидания активно убивал единственный незащищённый путь: CancelledError
+    # прилетал в enter_trade между принятым ордером и подтверждением стопа,
+    # оставляя позицию на бирже голой. Цикл выше уже дождался _ENTERING==0,
+    # так что здесь отменять безопасно.
+    initial_scan_task.cancel()
 
     if _scheduler and _scheduler.running:
         try:

@@ -2,8 +2,15 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
+<!-- без maximum-scale: цены SL/TP набраны шрифтом 10-11px, и запрет зума
+     не давал их разглядеть на телефоне -->
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
 <meta name="theme-color" content="#f0b90b"/>
+<!-- Манифест сервер отдавал, но страница его не подключала: «Добавить на
+     главный экран» давало обычную закладку без standalone-режима.
+     Service worker намеренно НЕ регистрируется: при частых деплоях он
+     подсовывал бы закешированный старый интерфейс. -->
+<link rel="manifest" href="/manifest.json"/>
 <title>Gerchik Bot · OI Scanner</title>
 <style>
 :root{
@@ -294,6 +301,15 @@ input[type=range]::-moz-range-thumb{
   .levels{grid-template-columns:repeat(2,1fr)}
   .metrics{grid-template-columns:repeat(2,1fr)}
   input[type=range]{width:90px}
+  /* Топбар: 8 элементов с white-space:nowrap не помещались в 360-390px,
+     а body{overflow-x:hidden} обрезал правый край без прокрутки — кнопки
+     «⚙️» и «🔍 Скан» становились недоступны, то есть с телефона нельзя
+     было ни открыть настройки, ни запустить скан. Итальянский автоперевод
+     («Connessione…», «Scansione») добавлял ещё ~40px. */
+  .topbar{padding:0 10px;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .status-txt{display:none}
+  .brand span{display:none}
+  .tb-btn{padding:6px 10px}
 }
 </style>
 </head>
@@ -334,8 +350,8 @@ input[type=range]::-moz-range-thumb{
     <div class="stat-value" id="s-pos">0</div>
     <div class="stat-sub" id="s-trade">—</div>
   </div>
-  <div class="stat-card">
-    <div class="stat-label">Винрейт 7д</div>
+  <div class="stat-card" style="cursor:pointer" onclick="openOutcomes()" title="Разбивка по score">
+    <div class="stat-label">Винрейт 7д ▸</div>
     <div class="stat-value v-accent" id="s-wr">—</div>
     <div class="stat-sub" id="s-wr-sub">форвард-тест сигналов</div>
   </div>
@@ -399,6 +415,20 @@ input[type=range]::-moz-range-thumb{
       <button class="modal-close" onclick="closeModal('diag-modal')">✕</button>
     </div>
     <div id="diag-body" style="font-size:12px;color:var(--muted)">Нажмите ▶ Тест…</div>
+  </div>
+</div>
+
+
+<!-- Outcomes modal: разбивка форвард-теста. /api/outcomes считался на бэкенде
+     («the go/no-go analysis tool» в core/db.py), но фронтенд его не запрашивал
+     ни разу — решать, включать ли реальные деньги, было не по чему. -->
+<div class="modal" id="outcomes-modal">
+  <div class="diag-box" style="max-width:600px">
+    <div class="diag-hdr">
+      <h2>📊 Винрейт по срезам (7д)</h2>
+      <button class="modal-close" onclick="closeModal('outcomes-modal')">✕</button>
+    </div>
+    <div id="outcomes-body" style="font-size:12px"></div>
   </div>
 </div>
 
@@ -708,9 +738,17 @@ async function refreshStats(){
       $('s-lastscan').textContent=t;
       gLastScan=new Date(d.last_scan_at).toLocaleString('ru-RU');
       // не затираем сообщение об ошибке скана из heartbeat/doScan
-      if(!String($('scan-info').textContent).startsWith('⚠'))
+      if(d.scan_error)
+        $('scan-info').textContent=`⚠ Скан #${d.scan_count} · ${t} · ошибка: ${d.scan_error}`;
+      else if(!String($('scan-info').textContent).startsWith('⚠'))
         $('scan-info').textContent=`Скан #${d.scan_count} · ${t} · найдено: ${d.total_24h??0}`;
       $('scan-pulse').className='scan-pulse';
+    }
+    // Дневной предохранитель: бот остановлен, а карточка показывала «🤖 Авто»,
+    // и пользователь считал его вооружённым, пока сигналы шли мимо.
+    if(d.trading_halted){
+      $('s-trade').textContent='⛔ Стоп-день';
+      showAlert('⛔ Дневной лимит убытка достигнут — новые сделки не открываются до 00:00 UTC');
     }
   }catch{}
 }
@@ -718,6 +756,10 @@ async function refreshBalance(){
   try{
     const d=await fetch('/api/balance').then(r=>r.json());
     $('s-bal').textContent=d.balance>0?d.balance.toFixed(2):'—';
+    // Бэкенд специально формирует причину нулевого баланса (IP-whitelist,
+    // нет прав у ключа, пустой счёт), а фронт её выбрасывал — карточка
+    // вечно показывала «—» без единой подсказки.
+    if(d.error||d.warn) showAlert('⚠ Баланс: '+(d.error||d.warn));
   }catch{}
 }
 
@@ -791,10 +833,35 @@ async function refreshTradeMode(){
   }catch{}
 }
 
+/* Единая точка показа баннера: он уже поднимался вручную в диагностике,
+   а предупреждения о балансе и стоп-дне показывать было нечем. */
+function showAlert(msg){
+  const b=$('alert');
+  if(!b) return;
+  b.textContent=msg;
+  b.classList.add('show');
+}
+function clearAlert(){
+  const b=$('alert');
+  if(b) b.classList.remove('show');
+}
+
 /* ── Settings ── */
+// Снимок загруженных настроек. Без него сбой загрузки был опасен: catch{}
+// глотал ошибку, модалка открывалась с ДЕФОЛТАМИ БРАУЗЕРА (ползунок без
+// value встаёт на середину диапазона, чекбокс — снят), и «Сохранить»
+// отправляло их на бэкенд как осознанный выбор. Итог: риск 1.0→1.6,
+// плечо 5→3 и, главное, AUTO_TRADE true→false — бот разоружён молча.
+let settingsSnapshot=null;
+
 async function openSettings(){
+  settingsSnapshot=null;
+  const btn=document.querySelector('.btn-save');
   try{
-    const d=await fetch('/api/settings').then(r=>r.json());
+    const r=await fetch('/api/settings');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    settingsSnapshot=d;
     $('set-auto-trade').checked=!!d.auto_trade;
 
     const risk=$('set-risk'); risk.value=d.risk_per_trade??1; $('rv-risk').textContent=parseFloat(risk.value).toFixed(1)+'%';
@@ -803,9 +870,18 @@ async function openSettings(){
     // до 5 скрывал бы, что бот всё ещё торгует с прежним плечом >5
     $('rv-lev').textContent=(d.leverage??5)+'×'+((d.leverage??5)>5?' ⚠':'');
     $('set-maxpos').value=d.max_positions??3;
-    const ms=$('set-minscore'); ms.value=d.min_score??25; $('rv-ms').textContent=ms.value;
-    const ts=$('set-tradescore'); ts.value=d.trade_min_score??60; $('rv-ts').textContent=ts.value;
-  }catch{}
+    // фолбэки совпадают с дефолтами core/config.py (MIN_SCORE=30,
+    // TRADE_MIN_SCORE=45) — раньше стояли 25/60 и расходились с бэкендом
+    const ms=$('set-minscore'); ms.value=d.min_score??30; $('rv-ms').textContent=ms.value;
+    const ts=$('set-tradescore'); ts.value=d.trade_min_score??45; $('rv-ts').textContent=ts.value;
+  }catch(e){
+    $('save-msg').style.color='var(--red)';
+    $('save-msg').textContent='❌ Не удалось загрузить настройки ('+e.message+') — сохранение отключено';
+    if(btn) btn.disabled=true;
+    $('settings-modal').classList.add('open');
+    return;
+  }
+  if(btn) btn.disabled=false;
   $('save-msg').textContent='';
   $('settings-modal').classList.add('open');
 }
@@ -815,6 +891,13 @@ function onToggleAutoTrade(el){
 }
 
 async function saveSettings(){
+  // Вторая линия защиты: без успешно загруженного снимка сохранять нечего —
+  // мы не знаем, что стоит на бэкенде, и отправили бы дефолты браузера.
+  if(!settingsSnapshot){
+    $('save-msg').style.color='var(--red)';
+    $('save-msg').textContent='❌ Настройки не были загружены — сохранение отменено';
+    return;
+  }
   const num=v=>Number.isFinite(v)?v:undefined;   // пустое поле -> не шлём
   const body={
     auto_trade:      $('set-auto-trade').checked,
@@ -954,10 +1037,21 @@ async function pollOnce(){
       $('s-short').textContent=sr.by_direction?.SHORT??0;
       $('s-scans').textContent=sr.scan_count??0;
       gScanCount=sr.scan_count??0;
+      // refreshTradeMode() звалась ТОЛЬКО из ws.onopen: при заблокированном
+      // WebSocket (корпоративный/мобильный прокси) подпись «Позиции» весь
+      // сеанс оставалась «—», и было не видно, вооружён бот или нет.
+      if(sr.trading_halted) $('s-trade').textContent='⛔ Стоп-день';
+      else refreshTradeMode();
       if(sr.last_scan_at){
         const t=new Date(sr.last_scan_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
         $('s-lastscan').textContent=t; gLastScan=new Date(sr.last_scan_at).toLocaleString('ru-RU');
-        $('scan-info').textContent=`Скан #${sr.scan_count} · ${t}`;
+        // Сканер двигает счётчик и время ДАЖЕ при провале, поэтому без
+        // scan_error фолбэк рисовал растущий «Скан #43» и зелёный пульс,
+        // пока каждый скан падал. Плюс охрана ⚠, как в refreshStats.
+        if(sr.scan_error)
+          $('scan-info').textContent=`⚠ Скан #${sr.scan_count} · ${t} · ошибка: ${sr.scan_error}`;
+        else if(!String($('scan-info').textContent).startsWith('⚠'))
+          $('scan-info').textContent=`Скан #${sr.scan_count} · ${t}`;
       }
     }
     if(wsOk) return;  // WS реконнектнулся, пока fetch'и были в полёте
@@ -982,7 +1076,11 @@ async function runDiag(){
     const d=await fetch('/api/diagnostic').then(r=>r.json());
     const row=(k,v,cls)=>`<div class="drow"><span class="dk">${esc(k)}</span><span class="dv ${cls||''}">${esc(String(v??'—'))}</span></div>`;
     let html='';
-    html+=row('DB','✅ OK','dok');
+    // Раньше здесь стояло безусловное «✅ OK»: при read-only томе или
+    // кончившемся месте все запросы к БД падали, сигналы не сохранялись,
+    // а диагностика бодро рапортовала, что с базой всё в порядке.
+    if(d.db) html+=row('DB', d.db==='ok'?'✅ OK':'❌ '+d.db, d.db==='ok'?'dok':'derr');
+    else html+=row('DB','— не проверялась','dwarn');
     if(d.tickers_error) html+=row('API Bybit','❌ '+d.tickers_error,'derr')+row('Решение','Добавьте BYBIT_PROXY в Railway Variables','dwarn');
     else html+=row('API Bybit',d.tickers_total>0?`✅ ${d.tickers_total} тикеров`:'⚠ 0 тикеров',d.tickers_total>0?'dok':'dwarn');
     if(d.balance_warn) html+=row('Баланс','⚠ '+d.balance_warn,'dwarn');
@@ -1000,6 +1098,45 @@ async function runDiag(){
       banner.classList.add('show');
     } else banner.classList.remove('show');
   }catch(e){ $('diag-body').innerHTML=`<div class="drow"><span class="dv derr">Ошибка: ${esc(String(e))}</span></div>`; }
+}
+
+
+/* ── Outcomes (разбивка форвард-теста) ── */
+async function openOutcomes(){
+  $('outcomes-modal').classList.add('open');
+  $('outcomes-body').innerHTML='<div style="color:var(--muted);padding:12px">⏳ Загрузка…</div>';
+  try{
+    const d=await fetch('/api/outcomes?days=7').then(r=>r.json());
+    const sec=(title,obj,hint)=>{
+      const keys=Object.keys(obj||{});
+      if(!keys.length) return '';
+      let h=`<div style="margin:10px 0 4px;font-weight:700;color:var(--accent)">${esc(title)}</div>`;
+      if(hint) h+=`<div style="color:var(--muted);font-size:11px;margin-bottom:4px">${esc(hint)}</div>`;
+      keys.sort();
+      for(const k of keys){
+        const v=obj[k], dec=v.win+v.loss;
+        // Безубыток при TP2=2R и SL=1R — 33.3%: ниже него стратегия теряет
+        const col=v.winrate==null?'var(--muted)':(v.winrate>=33.3?'var(--green)':'var(--red)');
+        h+=`<div class="drow"><span class="dk">${esc(k)}</span>`
+          +`<span class="dv" style="color:${col}">`
+          +`${v.winrate==null?'—':v.winrate+'%'} <span style="color:var(--muted)">`
+          +`(${v.win}W/${v.loss}L${v.expired?'/'+v.expired+'E':''}${dec<10?', мало данных':''})</span></span></div>`;
+      }
+      return h;
+    };
+    const sm=d.summary||{};
+    let html=`<div class="drow"><span class="dk">Всего</span><span class="dv">`
+      +`${sm.win??0}W · ${sm.loss??0}L · ${sm.expired??0}E · ${sm.open??0} ждут</span></div>`;
+    html+=sec('По score', d.by_score, 'Торгуются только сигналы от TRADE_MIN_SCORE — смотри строку 45-59 и 60+');
+    html+=sec('По направлению', d.by_direction);
+    html+=sec('По типу сигнала', d.by_type);
+    html+=`<div style="margin-top:12px;color:var(--muted);font-size:11px;line-height:1.5">`
+      +`Зелёный — выше точки безубытка (33.3% при цели TP2=2R и стопе 1R).`
+      +` Красный — на дистанции такой срез теряет деньги.</div>`;
+    $('outcomes-body').innerHTML=html;
+  }catch(e){
+    $('outcomes-body').innerHTML=`<div class="drow"><span class="dv derr">Ошибка: ${esc(String(e))}</span></div>`;
+  }
 }
 
 /* ── History ── */

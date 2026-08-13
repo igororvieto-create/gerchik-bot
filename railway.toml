@@ -7,8 +7,16 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+# startCommand НЕТ намеренно — команду задаёт CMD в Dockerfile.
+# Прежний startCommand содержал $PORT. При сборке через nixpacks он шёл
+# через оболочку и переменная раскрывалась, а при dockerfile-сборке Railway
+# запускает его как команду контейнера: $PORT остаётся литеральной строкой,
+# uvicorn падает на разборе аргумента, контейнер умирает — и деплой
+# проходит, а healthcheck валится. Ровно эта картина и наблюдалась.
+# CMD в Dockerfile написан в форме sh -c и имеет фолбэк ${PORT:-8000}.
 healthcheckPath = "/health"
-healthcheckTimeout = 60
+# 60 с мало: старт включает init_db на сетевом томе и, если задан
+# WEBSHARE_API_TOKEN, запрос за списком прокси с таймаутом до 10 с.
+healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10

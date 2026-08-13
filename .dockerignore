@@ -1,0 +1,12 @@
+# Чтобы в образ не уезжало лишнее (и не ломало кеш слоёв на каждом коммите)
+.git
+__pycache__
+*.py[cod]
+data/
+*.db
+*.log
+.env
+docs/
+mypy.ini
+pytest.ini
+requirements-dev.txt

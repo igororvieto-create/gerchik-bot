@@ -1,5 +1,10 @@
 [build]
-builder = "nixpacks"
+# dockerfile, а не nixpacks: nixpacks.toml переопределял только [start], а
+# фазы setup/install отдавались автодетекту с незакреплённым набором
+# nix-пакетов. Две сборки подряд упали за ~5 секунд на создании образа —
+# то есть до pip install, ровно на этом незакреплённом шаге.
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"

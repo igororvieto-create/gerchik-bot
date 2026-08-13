@@ -367,6 +367,19 @@ def _score_signal(
     return min(score, 100), _classify_type(oi_change, vol_ratio, funding, price_change, vsa_type, vsa_bias)
 
 
+def _tie_break(price_change: float) -> str:
+    """Направление по движению цены — или NEUTRAL, если движения нет.
+
+    Симметрично относительно нуля: прежнее `LONG if pc > 0 else SHORT`
+    отдавало SHORT и при pc == 0, то есть направление задавала не рыночная
+    информация, а форма записи условия."""
+    if price_change > 0:
+        return "LONG"
+    if price_change < 0:
+        return "SHORT"
+    return "NEUTRAL"
+
+
 def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
                vsa_bias: str = "NEUTRAL") -> tuple[str, float]:
     """
@@ -399,8 +412,14 @@ def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
     if sig_type.startswith("VSA_") and vsa_bias != "NEUTRAL":
         primary = vsa_bias
     elif sig_type == "ACCUMULATION":
+        # Классификация теперь требует price_change >= PRICE_CHANGE_MIN (0.3),
+        # а голос цены срабатывает уже при 0.1 — значит голос ГАРАНТИРОВАННО
+        # совпадает с primary и подтверждать его не может. Раньше симметрии не
+        # было и ACCUMULATION случался при pc ∈ [-0.3, 0.1] без такого голоса.
+        derived_from_votes = True
         primary = "LONG"
     elif sig_type == "DISTRIBUTION":
+        derived_from_votes = True
         primary = "SHORT"
     elif sig_type == "SQUEEZE":
         # Резкое падение OI само по себе направления не задаёт — решает
@@ -413,15 +432,27 @@ def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
         elif short_votes > long_votes:
             primary = "SHORT"
         else:
-            primary = "LONG" if price_change > 0 else "SHORT"
+            # Ничья голосов. Тай-брейк по цене работает, только пока цена
+            # реально куда-то идёт: при price_change == 0 выражение
+            # "LONG if >0 else SHORT" всегда давало SHORT, и бесцельный
+            # squeeze систематически становился шортом (до score 53,
+            # то есть выше торгового порога) — ровно тот же дефект, что и
+            # константный голос фандинга. Нет информации — нет направления.
+            primary = _tie_break(price_change)
     elif sig_type == "FUNDING_EXTREME":
+        # Тип присваивается при |funding| >= FUNDING_EXTREME — ровно при том
+        # же пороге, при котором фандинг подаёт голос. Голос тавтологичен.
+        # Без этого флага фандинг в мёртвой зоне цены делал всё сразу: выбирал
+        # направление, давал решающие +10 очков и сам себя подтверждал,
+        # поднимая confidence с 0.0 до 0.5 — рецидив бага №2.
+        derived_from_votes = True
         primary = "SHORT" if funding > 0 else "LONG"
     elif ob_bias != "NEUTRAL":
         derived_from_votes = True
         primary = "LONG" if ob_bias == "BUY" else "SHORT"
     else:
         derived_from_votes = True
-        primary = "LONG" if price_change > 0 else "SHORT"
+        primary = _tie_break(price_change)
 
     # Голос VSA у разворота тавтологически совпадает с primary — он задаёт
     # направление, а не подтверждает его. Считаем уверенность по НЕЗАВИСИМЫМ
@@ -651,6 +682,12 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         direction, confidence = _direction(
             sig_type, price_chg, ob_bias, funding, vsa_bias=vsa_bias,
         )
+        if direction == "NEUTRAL":
+            # Направления нет вовсе (ничья голосов при неподвижной цене).
+            # Явный отказ обязателен: ниже по коду direction сравнивается
+            # только с "LONG", и NEUTRAL молча трактовался бы как SHORT —
+            # то есть сетап без направления стал бы шортом.
+            return None
 
         # Дистанция до уровня, который реально станет опорой стопа для ЭТОЙ
         # сделки. Якорь обязан совпадать с тем, что возьмёт _calc_levels:

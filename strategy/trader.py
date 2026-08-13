@@ -197,7 +197,10 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
     # стоит ЗА уровнем, от которого сделка рассчитывает оттолкнуться: тезис
     # отрабатывает, а WIN не засчитывается. Показывать такой сигнал можно
     # (MIN_RR=1.5), торговать — нет.
-    if 0 < sig.headroom < cfg.MIN_TRADE_HEADROOM_R:
+    # Без нижней границы: headroom==0 означает «данных нет» (сигнал построен
+    # мимо _calc_levels — восстановлен из БД, создан вручную через API), и это
+    # обязано быть отказом, а не молчаливым отключением гейта целиком.
+    if sig.headroom < cfg.MIN_TRADE_HEADROOM_R:
         log.info(
             f"{sig.symbol}: запас до цели {sig.headroom:.2f}R < "
             f"{cfg.MIN_TRADE_HEADROOM_R}R — TP2 за уровнем, сигнал не торгуется"

@@ -69,7 +69,13 @@ async def evaluate_signal_outcomes(client: BybitClient) -> None:
                 # включать автоторговлю, и завышался он именно на залипших.
                 end_ms = sig_ms + _MAX_AGE_HOURS * 3600 * 1000
                 relevant = [k for k in klines if sig_ms <= k["ts"] <= end_ms]
-                if relevant and klines and klines[0]["ts"] > sig_ms:
+                # Шорткат берём ТОЛЬКО когда окно невосстановимо: упёрлись в
+                # лимит 200 свечей (≈50ч) или сигнал уже перезрел. Иначе
+                # временный провал в истории (пауза торгов, техработы у биржи)
+                # закрывал бы 4-часовой сигнал как EXPIRED навсегда, хотя у
+                # него оставалось ещё 44 часа и данные вот-вот вернутся.
+                if (relevant and klines and klines[0]["ts"] > sig_ms
+                        and (need >= 200 or age_h >= _MAX_AGE_HOURS)):
                     # Начало окна не покрыто — вердикт по неполным данным хуже
                     # отсутствия вердикта: неизвестно, был ли стоп задет раньше.
                     log.warning(

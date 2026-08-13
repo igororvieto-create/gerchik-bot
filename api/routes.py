@@ -53,7 +53,10 @@ def _require_token(request: Request) -> Optional[JSONResponse]:
            or request.query_params.get("token") or "")
     # compare_digest, а не ==: обычное сравнение строк выходит на первом
     # различающемся байте и по времени ответа выдаёт префикс токена.
-    if not hmac.compare_digest(got, token):
+    # Сравниваем БАЙТЫ: строковая форма бросает TypeError на не-ASCII, и
+    # кириллический DASHBOARD_TOKEN ронял бы каждый защищённый запрос в 500
+    # (фронтенд при этом молча показывал бы «—» без единого объяснения).
+    if not hmac.compare_digest(got.encode("utf-8", "ignore"), token.encode("utf-8")):
         log.warning(f"Отклонён запрос без валидного токена: {request.url.path}")
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return None
@@ -407,7 +410,10 @@ async def get_stats():
         by_type[r["signal_type"]] = by_type.get(r["signal_type"], 0) + 1
         by_dir[r["direction"]]    = by_dir.get(r["direction"], 0) + 1
     outcomes = await db.get_outcome_stats(days=7)
-    return {
+    # JSONResponse, а не голый dict: starlette отдал бы его без charset, и
+    # scan_error с русским текстом («все прокси исчерпаны») приезжал бы на
+    # телефон кракозябрами. _sanitize заодно чистит NaN в outcomes_7d.
+    return JSONResponse(_sanitize({
         "total_24h":    len(rows),
         "by_type":      by_type,
         "by_direction": by_dir,
@@ -421,7 +427,13 @@ async def get_stats():
         # Предохранитель виден и в фолбэке, иначе остановленный бот выглядит
         # работающим ровно в том режиме, где WS недоступен.
         "trading_halted": state.trading_halted,
-    }
+        # Причина остановки: halt выставляется и при сбое чтения БД, а фронт
+        # печатал единственную формулировку «дневной лимит убытка достигнут» —
+        # пользователь шёл искать несуществующие потери.
+        "halt_reason": ("daily_loss" if state.daily_pnl_date else "db_error")
+                       if state.trading_halted else None,
+        "daily_realized_pnl": round(state.daily_realized_pnl, 2),
+    }))
 
 
 @router.get("/api/settings")

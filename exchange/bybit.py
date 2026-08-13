@@ -6,7 +6,7 @@ import logging
 import os
 import time
 import uuid
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 import aiohttp
@@ -99,9 +99,18 @@ class BybitClient:
             "Content-Type":       "application/json",
         }
 
-    async def _raw_request(self, method: str, url: str, headers: Dict,
+    async def _raw_request(self, method: str, url: str,
+                           sign_fn: Callable[[], Dict],
                            data: Optional[str] = None) -> Tuple[int, str]:
         """HTTP-запрос с перебором прокси.
+
+        sign_fn вызывается ЗАНОВО на каждой попытке, а не подписывает один
+        раз: RECV_WINDOW = 5 секунд, и медленный ответ (прокси отдал 502
+        через 6 с) означал, что ретрай через следующий прокси уходит с
+        протухшим X-BAPI-TIMESTAMP и получает retCode=10002. Для
+        set_trading_stop это выглядело как «биржа отвергла стоп».
+        Тело запроса при этом НЕ пересобирается, поэтому orderLinkId
+        стабилен и идемпотентность ордера сохраняется.
 
         Failover раньше срабатывал ТОЛЬКО на исключении транспорта. Ответ
         с HTTP 403 (гео-блок Bybit на IP прокси) считался успехом: тело —
@@ -127,7 +136,7 @@ class BybitClient:
                 raise RuntimeError(f"{method} {url}: все прокси исчерпаны")
             tried.append(proxy)
             try:
-                kw: Dict = {"headers": headers,
+                kw: Dict = {"headers": sign_fn(),
                             "timeout": aiohttp.ClientTimeout(total=10, connect=3)}
                 if data is not None:
                     kw["data"] = data
@@ -150,11 +159,11 @@ class BybitClient:
                     continue
                 raise
 
-    async def _raw_get(self, url: str, headers: Dict) -> Tuple[int, str]:
-        return await self._raw_request("GET", url, headers)
+    async def _raw_get(self, url: str, sign_fn: Callable[[], Dict]) -> Tuple[int, str]:
+        return await self._raw_request("GET", url, sign_fn)
 
-    async def _raw_post(self, url: str, headers: Dict, data: str) -> Tuple[int, str]:
-        return await self._raw_request("POST", url, headers, data)
+    async def _raw_post(self, url: str, sign_fn: Callable[[], Dict], data: str) -> Tuple[int, str]:
+        return await self._raw_request("POST", url, sign_fn, data)
 
     async def _get(self, path: str, params: Dict = None, auth: bool = False) -> Dict:
         params = params or {}
@@ -162,8 +171,8 @@ class BybitClient:
         url = BASE_URL + path + (f"?{query}" if query else "")
         for attempt in range(3):
             try:
-                headers = self._sign(query) if auth else {}
-                status, text = await self._raw_get(url, headers)
+                sign_fn = (lambda: self._sign(query)) if auth else (lambda: {})
+                status, text = await self._raw_get(url, sign_fn)
                 try:
                     data = json.loads(text)
                 except Exception:
@@ -187,8 +196,7 @@ class BybitClient:
         url = BASE_URL + path
         for attempt in range(3):
             try:
-                headers = self._sign(raw)
-                status, text = await self._raw_post(url, headers, raw)
+                status, text = await self._raw_post(url, lambda: self._sign(raw), raw)
                 try:
                     data = json.loads(text)
                 except Exception:

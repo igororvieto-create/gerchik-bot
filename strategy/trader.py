@@ -364,6 +364,17 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
                     log.warning(f"{sig.symbol}: позиции нет — ордер действительно не прошёл")
                     _forget_symbol(sig.symbol)
                     return False
+                if lp.get("side") and lp.get("side") != side:
+                    # На символе живёт позиция ПРОТИВОПОЛОЖНОЙ стороны — она не
+                    # наша (ручная сделка, ещё не усыновлённая монитором).
+                    # Оформив её как свою, мы бы слали reduceOnly неверной
+                    # стороны и получали отказы вместо честного «это не наше».
+                    log.critical(
+                        f"{sig.symbol}: на бирже позиция {lp.get('side')}, а мы входили {side} — "
+                        f"чужая позиция, не трогаю"
+                    )
+                    _forget_symbol(sig.symbol)
+                    return False
                 log.warning(f"{sig.symbol}: позиция ЖИВА (size={lp.get('size')}) — оформляю как свою")
                 qty = abs(float(lp.get("size") or qty))
             else:
@@ -383,6 +394,12 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         # on the exchange from this point, and losing track of it (on any
         # later exception) is worse than any bookkeeping failure.
         state.positions[sig.symbol] = pos
+        # Бронь снимается ровно здесь: с этого момента сторону несёт сам
+        # Position, и учитывать её ВТОРОЙ раз через pending_entries нельзя —
+        # иначе одна живая позиция считается дважды, MAX_SAME_DIRECTION=2
+        # работает как 1, а ключи копятся навсегда и после пары сделок
+        # блокируют направление при НУЛЕ открытых позиций.
+        state.pending_entries.pop(sig.symbol, None)
         # Запись в trades СРАЗУ, до верификации SL: усыновление после
         # рестарта опознаёт свою позицию только по этой строке. Без неё
         # позиция бота получала ярлык MANUAL и навсегда лишалась защиты.
@@ -441,10 +458,39 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
                             if red.get("retCode", -1) == 0:
                                 await asyncio.sleep(1.0)
                                 after = await client.get_position(sig.symbol)
-                                if after:
+                                if after is None:
+                                    # Сбой API — состояние неизвестно. НЕ пишем
+                                    # «сокращено»: монитор пересверит размер.
+                                    log.critical(f"{sig.symbol}: не удалось сверить размер после сокращения")
+                                elif not after:
+                                    log.warning(f"{sig.symbol}: позиция закрылась целиком при сокращении")
+                                    qty = 0.0
+                                    pos.qty = 0.0
+                                else:
                                     qty = abs(float(after.get("size") or qty))
                                     pos.qty = qty
-                                    log.warning(f"{sig.symbol}: размер сокращён до {qty}")
+                                    # retCode==0 = ордер ПРИНЯТ: reduceOnly IOC в
+                                    # неликвиде заливается частично. Сверяем, что
+                                    # риск реально ушёл под потолок, а не просто
+                                    # уменьшился — иначе «сокращено» маскировало
+                                    # позицию, всё ещё несущую >3% риска.
+                                    left_risk = qty * abs(fill_px - sig.sl)
+                                    if left_risk > balance * 3.0 / 100:
+                                        log.critical(
+                                            f"{sig.symbol}: сокращение залилось частично — "
+                                            f"риск всё ещё {left_risk/balance*100:.2f}% "
+                                            f"(> 3%), закрываю позицию полностью"
+                                        )
+                                        done, rem = await close_and_verify(
+                                            client, sig.symbol, side, qty)
+                                        if done:
+                                            await _record_round_trip(client, pos)
+                                            _forget_symbol(sig.symbol)
+                                            return False
+                                        if rem > 0:
+                                            pos.qty = rem
+                                    else:
+                                        log.warning(f"{sig.symbol}: размер сокращён до {qty}")
                             else:
                                 log.critical(
                                     f"{sig.symbol}: сокращение отклонено — {red.get('retMsg')}"
@@ -634,6 +680,15 @@ async def monitor_positions(client: BybitClient) -> None:
                 started = state.pending_entries.get(sym, (None, None))[1]
                 if started is None or (now_utc - started).total_seconds() < _MIN_POSITION_AGE_S:
                     continue  # вход ещё может быть в полёте
+                if _ENTERING > 0:
+                    # enter_trade прямо сейчас работает. При деградировавших
+                    # POST-путях (3 попытки × 10 с × 2 прокси) он легко живёт
+                    # дольше 90 с, и без этой проверки монитор успевал забрать
+                    # его позицию как RECOVERED, не увидеть ещё не
+                    # пропагировавшийся stopLoss и аварийно её закрыть — а
+                    # enter_trade следом рапортовал успешный вход по позиции,
+                    # которой на бирже уже нет.
+                    continue
                 lp = live_map.get(sym)
                 if lp is None:
                     log.warning(f"{sym}: зависшая бронь входа, позиции на бирже нет — слот освобождён")
@@ -676,16 +731,14 @@ async def monitor_positions(client: BybitClient) -> None:
                     # дневном лимите — иначе прибыль ручного трейда могла бы
                     # "разморозить" сработавший предохранитель, а убыток —
                     # остановить автоторговлю без причины.
-                    state.positions.pop(sym, None)
-                    _TP_RETRIES.pop(sym, None)
+                    _forget_symbol(sym)
                     log.info(f"{sym}: ручная позиция закрыта (pnl={pnl:+.2f}) — вне учёта бота")
                 else:
                     if not pos.order_id:
                         # Восстановленная позиция могла не иметь строки в trades
                         await db.save_trade_open(pos)
                     await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
-                    state.positions.pop(sym, None)
-                    _TP_RETRIES.pop(sym, None)
+                    _forget_symbol(sym)
                     log.info(f"{sym}: closed (SL/TP) exit={exit_price:.4f} pnl={pnl:+.2f}")
                     record_realized_close(pnl)
             else:
@@ -706,6 +759,13 @@ async def monitor_positions(client: BybitClient) -> None:
                 # without a stop-loss is the recurring bug #1 made real.
                 exch_sl = float(lp.get("stopLoss") or 0)
                 exch_tp = float(lp.get("takeProfit") or 0)
+                if exch_sl > 0:
+                    # Счётчик означает «N осечек ПОДРЯД», как и говорит лог
+                    # «(1/3)». Без сброса он копился за всю жизнь позиции:
+                    # Bybit периодически отдаёт пустой stopLoss в снимке, хотя
+                    # стоп стоит, и три такие осечки за 6 часов приводили к
+                    # аварийному закрытию прибыльной ЗАЩИЩЁННОЙ позиции.
+                    _SL_RETRIES.pop(sym, None)
                 # Тейк отсутствует, но стоп есть и позиция наша — досылаем.
                 # Отсутствие TP не опасно (риск закрыт стопом), поэтому это
                 # тихая починка, без аварийного закрытия.

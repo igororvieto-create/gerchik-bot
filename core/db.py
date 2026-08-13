@@ -17,15 +17,20 @@ else:
     _DEFAULT_DB = os.path.normpath(
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "signals.db")
     )
-    # Громко: без тома вся история сделок и форвард-теста исчезает при каждом
-    # деплое, а get_open_trades() после рестарта не находит своих позиций —
-    # живые позиции бота получают ярлык MANUAL и лишаются защиты стопа.
-    log.error("Railway Volume (/data) НЕ подключён — база эфемерная, "
-              "история и открытые сделки не переживут деплой")
 DB_PATH = os.getenv("DB_PATH", _DEFAULT_DB)
 
 
 async def init_db() -> None:
+    # Предупреждение здесь, а не на уровне модуля: на импорте оно (а) уходило
+    # в stderr мимо настроенного в main.py формата, потому что basicConfig
+    # ещё не отработал, и (б) срабатывало ложно, когда том смонтирован не в
+    # /data, а путь задан через DB_PATH.
+    if not os.getenv("DB_PATH") and not DB_PATH.startswith("/data"):
+        # Без тома вся история сделок и форвард-теста исчезает при каждом
+        # деплое, а get_open_trades() после рестарта не находит своих позиций —
+        # живые позиции бота получают ярлык MANUAL и лишаются защиты стопа.
+        log.error("Railway Volume (/data) НЕ подключён — база эфемерная, "
+                  "история и открытые сделки не переживут деплой")
     dirpath = os.path.dirname(DB_PATH)
     if dirpath:
         try:
@@ -61,7 +66,12 @@ async def init_db() -> None:
         """)
         for col in ["entry REAL", "sl REAL", "tp1 REAL", "tp2 REAL",
                     "tp3 REAL", "rr REAL", "sl_pct REAL",
-                    "outcome TEXT", "outcome_price REAL", "outcome_at TEXT"]:
+                    "outcome TEXT", "outcome_price REAL", "outcome_at TEXT",
+                    # headroom нужен, чтобы ПРОВЕРИТЬ по истории гипотезу, ради
+                    # которой введён MIN_TRADE_HEADROOM_R: без него нельзя
+                    # срезать винрейт по запасу до цели и убедиться, что полоса
+                    # 1.5-2.0R действительно проигрышная.
+                    "headroom REAL"]:
             try:
                 await db.execute(f"ALTER TABLE signals ADD COLUMN {col}")
             except Exception as e:
@@ -113,15 +123,20 @@ async def init_db() -> None:
             # 'closed' с реализованным PnL. MIN(id) сохранял первую и удалял
             # вторую — убыток исчезал из дневного предохранителя, а вечная
             # open-строка заставляла бота считать чужую позицию своей.
+            # ROW_NUMBER, а не коррелированный подзапрос: тот сканировал
+            # таблицу целиком на КАЖДУЮ группу (частичный индекс во вложенном
+            # запросе неприменим) и рос квадратично — 5.6 с на 10 000 строк,
+            # ~22 с на 20 000. init_db ждётся синхронно до старта HTTP, то
+            # есть это была прямая задержка деплоя и риск провалить healthcheck.
             await db.execute(
                 "DELETE FROM trades WHERE order_id IS NOT NULL AND order_id != '' "
                 "AND id NOT IN ("
-                "  SELECT (SELECT u.id FROM trades u WHERE u.order_id = t.order_id"
-                "          ORDER BY (u.status='closed') DESC, (u.pnl IS NOT NULL) DESC,"
-                "                   u.id ASC LIMIT 1)"
-                "  FROM trades t"
-                "  WHERE t.order_id IS NOT NULL AND t.order_id != ''"
-                "  GROUP BY t.order_id"
+                "  SELECT id FROM ("
+                "    SELECT id, ROW_NUMBER() OVER ("
+                "      PARTITION BY order_id"
+                "      ORDER BY (status='closed') DESC, (pnl IS NOT NULL) DESC, id ASC"
+                "    ) rn FROM trades WHERE order_id IS NOT NULL AND order_id != ''"
+                "  ) WHERE rn = 1"
                 ")"
             )
             await db.execute(
@@ -143,12 +158,13 @@ async def save_signal(sig: Signal) -> None:
                 """INSERT INTO signals
                    (symbol, signal_type, direction, score, price,
                     oi_change, vol_ratio, funding, ob_bias, atr_pct, details,
-                    entry, sl, tp1, tp2, tp3, rr, sl_pct, ts)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    entry, sl, tp1, tp2, tp3, rr, sl_pct, headroom, ts)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (sig.symbol, sig.signal_type, sig.direction, sig.score, sig.price,
                  sig.oi_change, sig.vol_ratio, sig.funding, sig.ob_bias, sig.atr_pct,
                  sig.details,
                  sig.entry, sig.sl, sig.tp1, sig.tp2, sig.tp3, sig.rr, sig.sl_pct,
+                 sig.headroom,
                  sig.ts.isoformat()),
             )
             await db.commit()

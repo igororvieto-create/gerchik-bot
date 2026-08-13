@@ -730,7 +730,10 @@ async function refreshStats(){
     const oc=d.outcomes_7d;
     if(oc){
       $('s-wr').textContent=oc.winrate!=null?oc.winrate+'%':'—';
-      $('s-wr').className='stat-value '+(oc.winrate==null?'':oc.winrate>=50?'v-green':'v-red');
+      // 33.3 — точка безубытка при цели TP2=2R и стопе 1R. Порог 50 здесь
+      // противоречил модалке: винрейт 40% был красным в карточке и зелёным
+      // в разбивке, то есть два противоположных сигнала о том же числе.
+      $('s-wr').className='stat-value '+(oc.winrate==null?'':oc.winrate>=33.3?'v-green':'v-red');
       $('s-wr-sub').textContent=`${oc.win}W · ${oc.loss}L · ${oc.expired}E · ${oc.open} ждут`;
     }
     if(d.last_scan_at){
@@ -738,17 +741,28 @@ async function refreshStats(){
       $('s-lastscan').textContent=t;
       gLastScan=new Date(d.last_scan_at).toLocaleString('ru-RU');
       // не затираем сообщение об ошибке скана из heartbeat/doScan
-      if(d.scan_error)
+      if(d.scan_error){
+        gScanErr=true;
         $('scan-info').textContent=`⚠ Скан #${d.scan_count} · ${t} · ошибка: ${d.scan_error}`;
-      else if(!String($('scan-info').textContent).startsWith('⚠'))
+      } else {
+        gScanErr=false;
         $('scan-info').textContent=`Скан #${d.scan_count} · ${t} · найдено: ${d.total_24h??0}`;
+      }
       $('scan-pulse').className='scan-pulse';
     }
     // Дневной предохранитель: бот остановлен, а карточка показывала «🤖 Авто»,
     // и пользователь считал его вооружённым, пока сигналы шли мимо.
     if(d.trading_halted){
       $('s-trade').textContent='⛔ Стоп-день';
-      showAlert('⛔ Дневной лимит убытка достигнут — новые сделки не открываются до 00:00 UTC');
+      showAlert(d.halt_reason==='db_error'
+        ? '⛔ Торговля приостановлена: не удалось прочитать дневной PnL из базы'
+        : `⛔ Дневной лимит убытка достигнут (${d.daily_realized_pnl??'?'} USDT) — новые сделки до 00:00 UTC`,
+        'halt');
+    } else {
+      // Без ветки else «⛔ Стоп-день» висел и после сброса лимита в 00:00 UTC:
+      // бот торговал, а дашборд сутками показывал его выключенным.
+      clearAlert('halt');
+      refreshTradeMode();
     }
   }catch{}
 }
@@ -759,7 +773,8 @@ async function refreshBalance(){
     // Бэкенд специально формирует причину нулевого баланса (IP-whitelist,
     // нет прав у ключа, пустой счёт), а фронт её выбрасывал — карточка
     // вечно показывала «—» без единой подсказки.
-    if(d.error||d.warn) showAlert('⚠ Баланс: '+(d.error||d.warn));
+    if(d.error||d.warn) showAlert('⚠ Баланс: '+(d.error||d.warn), 'balance');
+    else clearAlert('balance');
   }catch{}
 }
 
@@ -835,15 +850,25 @@ async function refreshTradeMode(){
 
 /* Единая точка показа баннера: он уже поднимался вручную в диагностике,
    а предупреждения о балансе и стоп-дне показывать было нечем. */
-function showAlert(msg){
+let gScanErr=false;  // держит ли scan-info сообщение об ошибке скана
+const _alerts={};   // ключ источника -> текст
+function showAlert(msg, key='generic'){
+  _alerts[key]=msg;
+  _renderAlert();
+}
+function clearAlert(key='generic'){
+  delete _alerts[key];
+  _renderAlert();
+}
+function _renderAlert(){
   const b=$('alert');
   if(!b) return;
-  b.textContent=msg;
-  b.classList.add('show');
-}
-function clearAlert(){
-  const b=$('alert');
-  if(b) b.classList.remove('show');
+  // Ключи нужны, чтобы источники не стирали друг друга: диагностика гасила
+  // баннер про стоп-день, а исчезнувшая ошибка баланса не гасла вовсе и
+  // красная плашка висела сутками до перезагрузки страницы.
+  const msgs=Object.values(_alerts);
+  if(msgs.length){ b.textContent=msgs.join(' · '); b.classList.add('show'); }
+  else b.classList.remove('show');
 }
 
 /* ── Settings ── */
@@ -960,18 +985,51 @@ async function doScan(){
 (function(){
   const u = new URL(location.href);
   const t = u.searchParams.get('token');
-  if(t){ try{ localStorage.setItem('dash_token', t); }catch{}
-         u.searchParams.delete('token'); history.replaceState(null,'',u); }
+  if(t){
+    let saved=false;
+    try{ localStorage.setItem('dash_token', t); saved=true; }catch{}
+    // Токен из адреса убираем ТОЛЬКО если он реально сохранился: в приватном
+    // режиме Safari setItem бросает, и прежний код всё равно стирал токен из
+    // URL — после этого не помогала даже перезагрузка.
+    if(saved){ u.searchParams.delete('token'); history.replaceState(null,'',u); }
+  }
 })();
 function authHeaders(){
   let t=''; try{ t=localStorage.getItem('dash_token')||''; }catch{}
   return t ? {'X-Dashboard-Token': t} : {};
 }
+// Ввести токен из интерфейса было НЕЛЬЗЯ: единственный путь — ссылка с
+// ?token=, а она одноразовая. В PWA-контейнере (своё хранилище), в приватной
+// вкладке или после очистки ITP дашборд молча превращался в набор «—» и
+// «unauthorized», и закрыть позицию с телефона становилось невозможно.
+let _tokenPrompted=false;
+function askForToken(){
+  if(_tokenPrompted) return;
+  _tokenPrompted=true;
+  showAlert('🔑 Нужен токен доступа — нажми, чтобы ввести','auth');
+  const b=$('alert');
+  if(b) b.style.cursor='pointer';
+  setTimeout(()=>{
+    const t=prompt('Токен доступа (DASHBOARD_TOKEN из Railway):');
+    if(t){
+      try{ localStorage.setItem('dash_token', t.trim()); }catch{}
+      clearAlert('auth');
+      location.reload();
+    } else {
+      _tokenPrompted=false;   // отказался — предложим при следующем 401
+    }
+  }, 100);
+}
+
 const _origFetch = window.fetch;
 window.fetch = function(url, opts){
   opts = opts || {};
   if(typeof url==='string' && url.startsWith('/api/')){
     opts.headers = Object.assign({}, opts.headers||{}, authHeaders());
+    return _origFetch(url, opts).then(r=>{
+      if(r.status===401) askForToken();
+      return r;
+    });
   }
   return _origFetch(url, opts);
 };
@@ -1048,16 +1106,22 @@ async function pollOnce(){
         // Сканер двигает счётчик и время ДАЖЕ при провале, поэтому без
         // scan_error фолбэк рисовал растущий «Скан #43» и зелёный пульс,
         // пока каждый скан падал. Плюс охрана ⚠, как в refreshStats.
-        if(sr.scan_error)
+        // Флаг, а не разбор собственного текста: старая охрана
+        // startsWith('⚠') блокировала обновление НАВСЕГДА, и после починки
+        // сканов строка с ошибкой висела до перезагрузки страницы.
+        if(sr.scan_error){
+          gScanErr=true;
           $('scan-info').textContent=`⚠ Скан #${sr.scan_count} · ${t} · ошибка: ${sr.scan_error}`;
-        else if(!String($('scan-info').textContent).startsWith('⚠'))
+        } else {
+          gScanErr=false;
           $('scan-info').textContent=`Скан #${sr.scan_count} · ${t}`;
+        }
       }
     }
     if(wsOk) return;  // WS реконнектнулся, пока fetch'и были в полёте
     const rows=sgr.signals||[];
     if(rows.length) loadHistory(rows);
-    if(!String($('scan-info').textContent).startsWith('⚠')) setStatus('ok','HTTP режим');
+    if(!gScanErr) setStatus('ok','HTTP режим');
     await refreshBalance(); await refreshPositions();
   }catch{ setStatus('','Ошибка'); }
 }
@@ -1073,7 +1137,15 @@ function openDiag(){ $('diag-modal').classList.add('open'); }
 async function runDiag(){
   $('diag-body').innerHTML='<div style="color:var(--muted)">⏳ Проверяю (15-30 сек)…</div>';
   try{
-    const d=await fetch('/api/diagnostic').then(r=>r.json());
+    const r=await fetch('/api/diagnostic');
+    if(!r.ok){
+      // Без этой проверки ответ {"error":"unauthorized"} рисовался как
+      // «API Bybit ⚠ 0 тикеров» — прямое обвинение биржи в недоступности.
+      $('diag-body').innerHTML=`<div class="drow"><span class="dv derr">HTTP ${r.status}`
+        +`${r.status===401?' — нужен токен доступа, открой дашборд со ссылкой ?token=…':''}</span></div>`;
+      return;
+    }
+    const d=await r.json();
     const row=(k,v,cls)=>`<div class="drow"><span class="dk">${esc(k)}</span><span class="dv ${cls||''}">${esc(String(v??'—'))}</span></div>`;
     let html='';
     // Раньше здесь стояло безусловное «✅ OK»: при read-only томе или
@@ -1092,11 +1164,12 @@ async function runDiag(){
     html+=row('Сканов',gScanCount);
     html+=row('Последний скан',gLastScan||'—');
     $('diag-body').innerHTML=html;
-    const banner=$('alert');
-    if(d.tickers_error||d.tickers_total===0){
-      banner.textContent='⚠ Bybit API недоступен. Добавьте BYBIT_PROXY в Railway → Variables';
-      banner.classList.add('show');
-    } else banner.classList.remove('show');
+    // По своему ключу: раньше ветка else безусловно снимала баннер, стирая
+    // сообщения о стоп-дне и балансе — то есть инструмент, которым идут
+    // разбираться в проблеме, стирал единственное сообщение о проблеме.
+    if(d.tickers_error||d.tickers_total===0)
+      showAlert('⚠ Bybit API недоступен. Добавьте BYBIT_PROXY в Railway → Variables','diag');
+    else clearAlert('diag');
   }catch(e){ $('diag-body').innerHTML=`<div class="drow"><span class="dv derr">Ошибка: ${esc(String(e))}</span></div>`; }
 }
 
@@ -1106,7 +1179,9 @@ async function openOutcomes(){
   $('outcomes-modal').classList.add('open');
   $('outcomes-body').innerHTML='<div style="color:var(--muted);padding:12px">⏳ Загрузка…</div>';
   try{
-    const d=await fetch('/api/outcomes?days=7').then(r=>r.json());
+    const rr=await fetch('/api/outcomes?days=7');
+    if(!rr.ok) throw new Error('HTTP '+rr.status);
+    const d=await rr.json();
     const sec=(title,obj,hint)=>{
       const keys=Object.keys(obj||{});
       if(!keys.length) return '';

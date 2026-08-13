@@ -129,9 +129,24 @@ async def lifespan(app: FastAPI):
     # хватает pause(), но эта задача ему не подчиняется, и cancel() до цикла
     # ожидания активно убивал единственный незащищённый путь: CancelledError
     # прилетал в enter_trade между принятым ордером и подтверждением стопа,
-    # оставляя позицию на бирже голой. Цикл выше уже дождался _ENTERING==0,
-    # так что здесь отменять безопасно.
+    # оставляя позицию на бирже голой.
+    #
+    # Оговорка: цикл выше не даёт полной гарантии. Между снятием _SCANNING и
+    # взведением _ENTERING есть await'ы (save_signal, _ensure_daily_state), и
+    # SIGTERM ровно в этот момент застанет все флаги нулевыми. Окно узкое, но
+    # существует — поэтому здесь не «безопасно», а «настолько безопасно,
+    # насколько возможно без отдельного флага у самой задачи».
     initial_scan_task.cancel()
+    # Дать задаче доработать отмену ДО закрытия сессии: иначе её финализация
+    # вызывает _get_session(), который ПЕРЕСОЗДАЁТ закрытую сессию — она
+    # остаётся никем не закрытой, и сетевые запросы летят уже после
+    # "Shutdown complete".
+    try:
+        await asyncio.wait_for(asyncio.shield(initial_scan_task), timeout=3)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+    except Exception as ie:
+        log.warning(f"initial scan finalisation: {ie}")
 
     if _scheduler and _scheduler.running:
         try:

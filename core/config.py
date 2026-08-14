@@ -141,6 +141,10 @@ class Config:
     REQUIRE_MTF_ALIGN:  bool  = _env_bool("REQUIRE_MTF_ALIGN", True)
     MTF_TREND_LOOKBACK: int   = _env_int("MTF_TREND_LOOKBACK", 6)
     MIN_LISTING_AGE_DAYS: int = _env_int("MIN_LISTING_AGE_DAYS", 14)
+    # Глубина ленты сделок. 0 отключает запрос целиком (экономия ~100
+    # запросов на скан). 500 — компромисс: у неликвида покрывает часы,
+    # у ликвидного BTC — секунды, поэтому охват пишется рядом со значением.
+    TRADE_FLOW_LIMIT: int = _env_int("TRADE_FLOW_LIMIT", 500)
     MAX_LAST_CANDLE_ATR:  float = _env_float("MAX_LAST_CANDLE_ATR", 2.0)
 
     # Signal history
@@ -198,6 +202,7 @@ cfg.TOP_N_PAIRS         = int(_clamp(cfg.TOP_N_PAIRS,         5,   500, "TOP_N_P
 cfg.SCAN_BATCH_SIZE     = int(_clamp(cfg.SCAN_BATCH_SIZE,     1,    50, "SCAN_BATCH_SIZE"))
 cfg.SCAN_BATCH_DELAY    = _clamp(cfg.SCAN_BATCH_DELAY,      0.0,  10.0, "SCAN_BATCH_DELAY")
 cfg.SIGNAL_COOLDOWN_MIN = int(_clamp(cfg.SIGNAL_COOLDOWN_MIN, 0,  1440, "SIGNAL_COOLDOWN_MIN"))
+cfg.TRADE_FLOW_LIMIT    = int(_clamp(cfg.TRADE_FLOW_LIMIT,    0,  1000, "TRADE_FLOW_LIMIT"))
 
 # Связь из docs/REVIEW.md §2, которую поштучные клампы не ловят: порог показа
 # выше торгового делает торговый порог фиктивным (сигналов ниже него просто не

@@ -75,7 +75,11 @@ async def init_db() -> None:
                     # mfe_r — максимальный ход в плюс в единицах R до исхода.
                     # Позволяет подбирать порог переноса стопа в безубыток по
                     # фактическим данным, а не по модели случайного блуждания.
-                    "mfe_r REAL"]:
+                    "mfe_r REAL",
+                    # Лента исполненных сделок: направленное «усилие» VSA.
+                    # Пишется, но на решения пока не влияет — сначала
+                    # проверяем на исходах, потом (и только потом) включаем.
+                    "flow_delta REAL", "flow_span_min REAL", "flow_absorb INTEGER"]:
             try:
                 await db.execute(f"ALTER TABLE signals ADD COLUMN {col}")
             except Exception as e:
@@ -162,13 +166,15 @@ async def save_signal(sig: Signal) -> None:
                 """INSERT INTO signals
                    (symbol, signal_type, direction, score, price,
                     oi_change, vol_ratio, funding, ob_bias, atr_pct, details,
-                    entry, sl, tp1, tp2, tp3, rr, sl_pct, headroom, ts)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    entry, sl, tp1, tp2, tp3, rr, sl_pct, headroom,
+                    flow_delta, flow_span_min, flow_absorb, ts)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (sig.symbol, sig.signal_type, sig.direction, sig.score, sig.price,
                  sig.oi_change, sig.vol_ratio, sig.funding, sig.ob_bias, sig.atr_pct,
                  sig.details,
                  sig.entry, sig.sl, sig.tp1, sig.tp2, sig.tp3, sig.rr, sig.sl_pct,
                  sig.headroom,
+                 sig.flow_delta, sig.flow_span_min, int(sig.flow_absorb),
                  sig.ts.isoformat()),
             )
             await db.commit()
@@ -329,12 +335,13 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
     The go/no-go analysis tool: shows WHERE the strategy wins or loses."""
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
     out: Dict = {"by_score": {}, "by_direction": {}, "by_type": {},
-                 "by_sl_atr": {}, "by_headroom": {}, "recent": []}
+                 "by_sl_atr": {}, "by_headroom": {}, "by_flow": {}, "recent": []}
     # Явный порядок корзин. Фронт сортировал ключи лексикографически, а '<'
     # (0x3C) и '>' (0x3E) больше цифр — крайние корзины уезжали в середину и
     # хвост, ось переставала быть монотонной по ширине стопа. Именно её
     # монотонность и есть весь смысл среза: растёт ли винрейт с шириной.
     out["_order"] = {
+        "by_flow":     ["продавцы <-0.2", "нейтрально", "покупатели >+0.2", "поглощение"],
         "by_score":    ["30-44", "45-59", "60+"],
         "by_sl_atr":   ["<1.0 ATR", "1.0-1.5", "1.5-2.5", ">2.5 ATR"],
         "by_headroom": ["1.5-2.0R (не торгуется)", "2.0-3.0R", ">3.0R"],
@@ -358,6 +365,23 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
         if r < 2.5:  return "1.5-2.5"
         return ">2.5 ATR"
 
+    def _flow_bucket(delta, absorb) -> Optional[str]:
+        """Срез по направленному усилию из ленты сделок.
+
+        Проверяет ровно один вопрос: предсказывает ли перевес агрессора
+        исход сделки. Если срезы «покупатели» и «продавцы» дают одинаковое
+        матожидание — метрика бесполезна и её не надо встраивать в скор.
+        """
+        if delta is None:
+            return None
+        if absorb:
+            return "поглощение"
+        if delta <= -0.2:
+            return "продавцы <-0.2"
+        if delta >= 0.2:
+            return "покупатели >+0.2"
+        return "нейтрально"
+
     def _hr_bucket(hr) -> Optional[str]:
         """Запас до встречной цели. Торгуются только >=2R
         (MIN_TRADE_HEADROOM_R), полоса 1.5-2.0 показывается, но не торгуется —
@@ -373,7 +397,7 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """SELECT symbol, score, direction, signal_type, outcome, ts,
-                          sl_pct, atr_pct, headroom
+                          sl_pct, atr_pct, headroom, flow_delta, flow_absorb
                    FROM signals WHERE outcome IS NOT NULL AND ts >= ?
                    ORDER BY ts DESC""",
                 (cutoff,),
@@ -396,9 +420,12 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             hrb = _hr_bucket(r["headroom"])
             if hrb:
                 _acc(out["by_headroom"], hrb, r["outcome"])
+            fb = _flow_bucket(r["flow_delta"], r["flow_absorb"])
+            if fb:
+                _acc(out["by_flow"], fb, r["outcome"])
 
         for d in (out["by_score"], out["by_direction"], out["by_type"],
-                  out["by_sl_atr"], out["by_headroom"]):
+                  out["by_sl_atr"], out["by_headroom"], out["by_flow"]):
             for slot in d.values():
                 slot.update(_ev(slot))
 

@@ -78,6 +78,51 @@ def _calc_atr(klines: list, period: int = 14) -> float:
     return atr_val
 
 
+def _trade_flow(trades: list) -> dict:
+    """Направленное усилие из ленты исполненных сделок.
+
+    Возвращает:
+      delta    — (покупки − продажи) / оборот, от −1 до +1 по агрессору;
+      span_min — сколько МИНУТ покрывает лента (у ликвидных монет 500
+                 сделок это секунды, у неликвида — часы). Без этого числа
+                 перекос несопоставим между символами, и сравнивать их
+                 напрямую нельзя;
+      turnover — оборот ленты в котируемой валюте;
+      absorb   — признак поглощения: сильный односторонний агрессор, а цена
+                 внутри ленты не сдвинулась. В VSA это ядро разворота:
+                 усилие есть, результата нет, значит противоположная сторона
+                 принимает объём.
+
+    Намеренно НЕ возвращает bias/направление: пока метрика только
+    записывается и проверяется на исходах, а не влияет на решения.
+    """
+    out = {"delta": 0.0, "span_min": 0.0, "turnover": 0.0, "absorb": False}
+    if not trades:
+        return out
+    buy = sell = 0.0
+    hi = lo = trades[0]["price"]
+    for t in trades:
+        notional = t["price"] * t["qty"]
+        if t["side"] == "Buy":
+            buy += notional
+        elif t["side"] == "Sell":
+            sell += notional
+        hi = max(hi, t["price"])
+        lo = min(lo, t["price"])
+    total = buy + sell
+    if total <= 0:
+        return out
+    out["turnover"] = total
+    out["delta"] = (buy - sell) / total
+    out["span_min"] = max(0.0, (trades[-1]["ts"] - trades[0]["ts"]) / 60000.0)
+    # Поглощение: перекос агрессора больше 35%, а цена за то же окно прошла
+    # меньше 0.15% — объём принимают, не двигая цену.
+    mid = (hi + lo) / 2
+    move_pct = (hi - lo) / mid * 100 if mid > 0 else 0.0
+    out["absorb"] = abs(out["delta"]) >= 0.35 and move_pct < 0.15
+    return out
+
+
 def _ob_imbalance(ob: dict) -> tuple[float, str]:
     """Returns (imbalance ratio, bias). ratio > 0 = more bids (buy pressure)."""
     bids = ob.get("bids", [])
@@ -610,12 +655,28 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         # KEY_LEVEL_LOOKBACK/MTF_TREND_LOOKBACK > 25 молча отключали бы
         # 4h-часть MTF-фильтра (NEUTRAL) и урезали окно поиска уровней.
         kline_4h_limit = max(26, cfg.KEY_LEVEL_LOOKBACK + 2, cfg.MTF_TREND_LOOKBACK + 3)
-        oi_hist, klines, ob, klines_1h = await asyncio.gather(
+        # Лента сделок добавлена ПЯТЫМ запросом и пока только измеряется:
+        # на решения она не влияет, пока не наберётся статистика исходов.
+        # return_exceptions: сбой ленты не должен ронять анализ символа —
+        # это дополнительная метрика, а не обязательные данные.
+        oi_hist, klines, ob, klines_1h, trades = await asyncio.gather(
             client.get_open_interest(symbol, interval="4h", limit=2),
             client.get_klines(symbol, interval="240", limit=kline_4h_limit),
             client.get_orderbook(symbol, limit=20),
             client.get_klines(symbol, interval="60", limit=max(cfg.MTF_TREND_LOOKBACK + 3, 10)),
+            client.get_recent_trades(symbol, limit=cfg.TRADE_FLOW_LIMIT)
+            if cfg.TRADE_FLOW_LIMIT > 0 else asyncio.sleep(0, result=[]),
+            return_exceptions=True,
         )
+        if isinstance(trades, BaseException):
+            log.debug(f"{symbol}: лента сделок недоступна — {trades}")
+            trades = []
+        for _name, _val in (("oi_hist", oi_hist), ("klines", klines),
+                            ("ob", ob), ("klines_1h", klines_1h)):
+            if isinstance(_val, BaseException):
+                log.warning(f"{symbol}: {_name} — {_val}")
+                return None
+        flow = _trade_flow(trades)
 
         if not oi_hist or not klines:
             log.warning(f"{symbol}: partial data — oi_hist={len(oi_hist)} klines={len(klines)}")
@@ -830,6 +891,9 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             tp3=levels["tp3"],
             rr=levels["rr"],
             headroom=levels["headroom"],
+            flow_delta=flow["delta"],
+            flow_span_min=flow["span_min"],
+            flow_absorb=flow["absorb"],
             sl_pct=levels["sl_pct"],
         )
         sig._candle_ts = candle_ts   # для дедупа после доставки

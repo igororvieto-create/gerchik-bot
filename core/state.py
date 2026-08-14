@@ -25,6 +25,12 @@ class Signal:
     # Запас до встречного уровня в R. Читается трейдером: сделка, чей TP2=2R
     # лежит за уровнем-целью, структурно не может выиграть.
     headroom:    float    = 0.0
+    # Лента исполненных сделок: направленное «усилие» из VSA. Пока ТОЛЬКО
+    # измеряется и пишется в БД — на отбор и скор не влияет, пока не
+    # наберётся статистика исходов по этим срезам.
+    flow_delta:    float = 0.0   # (покупки-продажи)/оборот по агрессору
+    flow_span_min: float = 0.0   # сколько минут покрывает лента
+    flow_absorb:   bool  = False # усилие есть, движения нет = поглощение
     sl_pct:      float    = 0.0
     ts:          datetime = field(default_factory=datetime.utcnow)
 
@@ -48,6 +54,9 @@ class Signal:
             "tp3":         self.tp3,
             "rr":          round(self.rr, 2),
             "headroom":    round(self.headroom, 2),
+            "flow_delta":   round(self.flow_delta, 3),
+            "flow_span_min": round(self.flow_span_min, 1),
+            "flow_absorb":  self.flow_absorb,
             "sl_pct":      round(self.sl_pct, 2),
             "ts":          self.ts.isoformat() + "Z",
         }

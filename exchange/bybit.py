@@ -265,6 +265,37 @@ class BybitClient:
         raw = data.get("result", {}).get("list", [])
         return [{"ts": int(r["timestamp"]), "oi": float(r["openInterest"])} for r in reversed(raw)]
 
+    async def get_recent_trades(self, symbol: str, limit: int = 500) -> List[Dict]:
+        """Лента исполненных сделок. `side` — сторона АГРЕССОРА (тейкера).
+
+        Принципиально отличается от стакана: стакан показывает висящие
+        заявки, которые можно снять или выставить для вида, а здесь —
+        сделки, которые реально прошли. Для VSA это и есть «усилие», и в
+        отличие от объёма свечи оно направленное.
+
+        Bybit отдаёт ПОСЛЕДНИЕ N сделок, поэтому окно зависит от символа:
+        у ликвидного это секунды, у неликвида — часы. Временной охват
+        обязан учитываться вызывающим (см. _trade_flow в scanner).
+        """
+        data = await self._get("/v5/market/recent-trade", {
+            "category": "linear", "symbol": symbol, "limit": min(limit, 1000),
+        })
+        raw = data.get("result", {}).get("list", [])
+        out: List[Dict] = []
+        for r in raw:
+            try:
+                out.append({
+                    "ts":    int(r["time"]),
+                    "price": float(r["price"]),
+                    "qty":   float(r["size"]),
+                    # "Buy" = агрессор купил по аску, "Sell" = продал по биду
+                    "side":  r.get("side", ""),
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+        out.sort(key=lambda t: t["ts"])
+        return out
+
     async def get_closed_pnl(self, symbol: str, limit: int = 1) -> List[Dict]:
         """Get recently closed P&L for a symbol (authenticated)."""
         data = await self._get("/v5/position/closed-pnl", {

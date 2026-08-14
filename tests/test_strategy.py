@@ -171,3 +171,46 @@ def test_breakeven_converts_loss_when_enabled():
 
 def test_undecided_returns_none():
     assert _judge("LONG", 98.0, 104.0, [k(101.0, 99.0)], entry=100.0) is None
+
+
+# ── Лента исполненных сделок ─────────────────────────────────────────────────
+
+def _tr(ts, price, qty, side):
+    return {"ts": ts, "price": price, "qty": qty, "side": side}
+
+
+def test_flow_delta_sign_matches_aggressor():
+    buys = [_tr(0, 100, 1, "Buy"), _tr(1000, 100, 3, "Buy"), _tr(2000, 100, 1, "Sell")]
+    f = s._trade_flow(buys)
+    assert f["delta"] > 0, "перевес покупателей должен давать положительную дельту"
+    sells = [_tr(0, 100, 1, "Sell"), _tr(1000, 100, 3, "Sell"), _tr(2000, 100, 1, "Buy")]
+    assert s._trade_flow(sells)["delta"] < 0
+
+
+def test_flow_is_symmetric():
+    buys = [_tr(0, 100, 2, "Buy"), _tr(1000, 100, 1, "Sell")]
+    sells = [_tr(0, 100, 2, "Sell"), _tr(1000, 100, 1, "Buy")]
+    assert s._trade_flow(buys)["delta"] == pytest.approx(-s._trade_flow(sells)["delta"])
+
+
+def test_flow_reports_time_span():
+    """Без охвата по времени перекос несопоставим между символами:
+    500 сделок у BTC — это секунды, у неликвида — часы."""
+    f = s._trade_flow([_tr(0, 100, 1, "Buy"), _tr(600_000, 100, 1, "Sell")])
+    assert f["span_min"] == pytest.approx(10.0)
+
+
+def test_flow_handles_empty_and_broken_input():
+    assert s._trade_flow([])["delta"] == 0.0
+    # нулевые объёмы не должны давать деления на ноль
+    assert s._trade_flow([_tr(0, 100, 0, "Buy")])["delta"] == 0.0
+
+
+def test_absorption_requires_effort_without_result():
+    """Ядро VSA: сильный односторонний агрессор, а цена стоит."""
+    flat = [_tr(i * 100, 100.0, 5, "Buy") for i in range(10)]
+    assert s._trade_flow(flat)["absorb"] is True
+    moving = [_tr(i * 100, 100.0 + i * 0.5, 5, "Buy") for i in range(10)]
+    assert s._trade_flow(moving)["absorb"] is False
+    balanced = [_tr(i * 100, 100.0, 5, "Buy" if i % 2 else "Sell") for i in range(10)]
+    assert s._trade_flow(balanced)["absorb"] is False

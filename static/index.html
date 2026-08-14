@@ -1257,6 +1257,8 @@ async function openOutcomes(){
     let html=`<div class="drow"><span class="dk">Всего</span><span class="dv">`
       +`${sm.win??0}W · ${sm.loss??0}L · ${sm.expired??0}E · ${sm.open??0} ждут</span></div>`;
     html+=sec('По score', d.by_score, 'Торгуются только сигналы от TRADE_MIN_SCORE — смотри строку 45-59 и 60+', 'by_score');
+    html+=sec('По ленте сделок', d.by_flow,
+              'Перевес агрессора из исполненных сделок. Если «покупатели» и «продавцы» дают одинаковое матожидание — метрика бесполезна и в скор её включать нельзя', 'by_flow');
     html+=sec('По ширине стопа', d.by_sl_atr,
               'Пол стопа — 0.75 ATR. Если строка <1.0 ATR заметно хуже остальных, стоп выбивает шумом одной свечи, а не сломом идеи', 'by_sl_atr');
     html+=sec('По запасу до цели', d.by_headroom,

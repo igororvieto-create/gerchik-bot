@@ -1,0 +1,183 @@
+"""База и конфиг: миграции на старой схеме, дедуп, разбор env, клампы.
+
+Форвард-тест — единственное основание включать реальные деньги, поэтому
+целостность этих данных проверяется отдельно от торговой логики.
+"""
+import importlib
+import os
+import sqlite3
+import sys
+from datetime import datetime
+
+import pytest
+
+
+@pytest.fixture
+def legacy_db(tmp_path, monkeypatch):
+    """База СТАРОЙ схемы с накопленными данными — как на боевом томе."""
+    path = tmp_path / "legacy.db"
+    c = sqlite3.connect(path)
+    c.execute("""CREATE TABLE signals(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL,
+        signal_type TEXT NOT NULL, direction TEXT NOT NULL, score INTEGER NOT NULL,
+        price REAL NOT NULL, oi_change REAL, vol_ratio REAL, funding REAL,
+        ob_bias TEXT, atr_pct REAL, details TEXT, ts TEXT NOT NULL)""")
+    c.execute("CREATE INDEX idx_signals_symbol ON signals(symbol)")
+    c.execute("CREATE INDEX idx_signals_symbol_ts ON signals(symbol, ts)")
+    c.execute("""CREATE TABLE trades(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, side TEXT NOT NULL,
+        entry REAL, exit_price REAL, sl REAL, tp1 REAL, tp2 REAL, tp3 REAL,
+        qty REAL, pnl REAL, score INTEGER, signal_type TEXT, order_id TEXT,
+        status TEXT DEFAULT 'open', opened_at TEXT NOT NULL, closed_at TEXT)""")
+    now = datetime.utcnow().isoformat()
+    c.executemany(
+        "INSERT INTO trades(symbol,side,order_id,status,pnl,opened_at) VALUES(?,?,?,?,?,?)",
+        [("ETHUSDT", "Buy", "ord1", "open", None, now),      # дубль: open + closed
+         ("ETHUSDT", "Buy", "ord1", "closed", -12.5, now),
+         ("BTCUSDT", "Buy", "ord2", "closed", 7.0, now),     # обратный порядок id
+         ("BTCUSDT", "Buy", "ord2", "open", None, now),
+         ("SOLUSDT", "Buy", "", "open", None, now)])         # пустой order_id
+    c.execute("INSERT INTO signals(symbol,signal_type,direction,score,price,ts) "
+              "VALUES('X','MOMENTUM','LONG',50,1.0,?)", (now,))
+    c.commit()
+    c.close()
+    monkeypatch.setenv("DB_PATH", str(path))
+    for mod in [m for m in sys.modules if m.startswith("core.db")]:
+        del sys.modules[mod]
+    import core.db as db
+    importlib.reload(db)
+    return db, path
+
+
+async def test_migration_on_legacy_schema_adds_all_columns(legacy_db):
+    db, path = legacy_db
+    await db.init_db()
+    cols = [r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(signals)")]
+    for required in ("entry", "sl", "tp2", "outcome", "headroom", "mfe_r"):
+        assert required in cols, f"миграция не добавила колонку {required}"
+
+
+async def test_dedup_keeps_closed_row_with_pnl(legacy_db):
+    """MIN(id) выбрасывал закрытую строку с реализованным убытком:
+    он исчезал из дневного предохранителя, а вечная open-строка
+    заставляла бота считать чужую позицию своей."""
+    db, path = legacy_db
+    await db.init_db()
+    c = sqlite3.connect(path)
+    rows = c.execute("SELECT order_id, status, pnl FROM trades "
+                     "WHERE order_id != '' ORDER BY order_id").fetchall()
+    assert rows == [("ord1", "closed", -12.5), ("ord2", "closed", 7.0)]
+    total = c.execute("SELECT COALESCE(SUM(pnl),0) FROM trades "
+                      "WHERE status='closed'").fetchone()[0]
+    assert total == pytest.approx(-5.5), "PnL потерян при дедупе"
+
+
+async def test_unique_index_created_after_dedup(legacy_db):
+    db, path = legacy_db
+    await db.init_db()
+    idx = [r[0] for r in sqlite3.connect(path).execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'")]
+    assert "idx_trades_order" in idx
+    assert "idx_signals_symbol" not in idx, "мёртвый индекс не удалён"
+
+
+async def test_open_trades_raises_instead_of_returning_empty(legacy_db, monkeypatch):
+    """[] читается как «своих сделок нет» → позиции бота получают ярлык
+    MANUAL и теряют защиту стопа. Ошибка БД обязана быть исключением."""
+    db, _ = legacy_db
+    monkeypatch.setattr(db, "DB_PATH", "/nonexistent/dir/x.db")
+    with pytest.raises(Exception):
+        await db.get_open_trades()
+
+
+async def test_realized_pnl_raises_instead_of_zero(legacy_db, monkeypatch):
+    """0.0 означало «сегодня потерь нет» и тихо обнуляло предохранитель."""
+    db, _ = legacy_db
+    monkeypatch.setattr(db, "DB_PATH", "/nonexistent/dir/x.db")
+    with pytest.raises(Exception):
+        await db.get_realized_pnl_since("2026-01-01T00:00:00")
+
+
+async def test_expectancy_counts_breakeven_outcomes(legacy_db):
+    db, path = legacy_db
+    await db.init_db()
+    ev = db._ev({"win": 2, "loss": 2, "be": 1})
+    assert ev["winrate"] == pytest.approx(50.0)
+    # (2*2 + 1*0 - 2*1) / 5
+    assert ev["ev_r"] == pytest.approx(0.4)
+
+
+async def test_expired_excluded_from_winrate(legacy_db):
+    db, _ = legacy_db
+    ev = db._ev({"win": 1, "loss": 1, "be": 0, "expired": 98})
+    assert ev["winrate"] == pytest.approx(50.0), "EXPIRED попал в знаменатель винрейта"
+
+
+# ── Конфиг ───────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("env,attr,expected", [
+    ({"LEVERAGE": "inf"}, "LEVERAGE", 5),          # OverflowError ронял импорт
+    ({"RISK_PER_TRADE": "nan"}, "RISK_PER_TRADE", 1.0),   # nan проходил мимо клампов
+    ({"LEVERAGE": "99"}, "LEVERAGE", 5),           # инвариант: плечо <= 5
+    ({"RISK_PER_TRADE": "10"}, "RISK_PER_TRADE", 3.0),    # инвариант: риск <= 3%
+    ({"SCAN_INTERVAL_MIN": "0.5"}, "SCAN_INTERVAL_MIN", 1),   # 0 -> интервал 1 секунда
+    ({"ABORT_ON_LEVERAGE_FAIL": "enabled"}, "ABORT_ON_LEVERAGE_FAIL", True),  # мусор -> дефолт
+    ({"REQUIRE_MTF_ALIGN": "off"}, "REQUIRE_MTF_ALIGN", False),
+])
+def test_env_parsing_is_hardened(env, attr, expected, monkeypatch):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    for mod in [m for m in sys.modules if m.startswith("core.config")]:
+        del sys.modules[mod]
+    import core.config as conf
+    importlib.reload(conf)
+    assert getattr(conf.cfg, attr) == expected
+
+
+def test_risk_times_positions_cannot_exceed_daily_limit(monkeypatch):
+    """Полный набор позиций не должен пробивать дневной лимит разом."""
+    monkeypatch.setenv("RISK_PER_TRADE", "3.0")
+    monkeypatch.setenv("MAX_POSITIONS", "20")
+    for mod in [m for m in sys.modules if m.startswith("core.config")]:
+        del sys.modules[mod]
+    import core.config as conf
+    importlib.reload(conf)
+    worst = conf.cfg.RISK_PER_TRADE * conf.cfg.MAX_POSITIONS
+    assert worst <= conf.cfg.DAILY_LOSS_LIMIT_PCT
+
+
+def test_display_threshold_cannot_exceed_trade_threshold(monkeypatch):
+    """MIN_SCORE выше TRADE_MIN_SCORE делал торговый порог фиктивным."""
+    monkeypatch.setenv("MIN_SCORE", "60")
+    monkeypatch.setenv("TRADE_MIN_SCORE", "45")
+    for mod in [m for m in sys.modules if m.startswith("core.config")]:
+        del sys.modules[mod]
+    import core.config as conf
+    importlib.reload(conf)
+    assert conf.cfg.TRADE_MIN_SCORE >= conf.cfg.MIN_SCORE
+
+
+# ── Сериализация цен для биржи ───────────────────────────────────────────────
+
+@pytest.mark.parametrize("value", [0.00001234, 0.000098, 0.0000073, 7.0565e-05])
+def test_prices_never_use_scientific_notation(value):
+    """str(round(x,8)) давал '7.3e-06' — биржа такую строку не принимает,
+    то есть ордер уходил бы без стопа."""
+    from exchange.bybit import _fmt_price
+    assert "e" not in _fmt_price(value).lower()
+    assert float(_fmt_price(value)) == pytest.approx(value, rel=1e-6)
+
+
+@pytest.mark.parametrize("tick,value,mode", [
+    (0.00001, 0.136654321, "down"), (0.00001, 0.136654321, "up"),
+    (0.01, 100.837, "down"), (1e-8, 7.0565e-05, "up"),
+])
+def test_quantized_prices_land_on_exchange_grid(tick, value, mode):
+    from strategy.trader import _quantize
+    q = _quantize(value, tick, mode)
+    n = round(q / tick)
+    assert abs(n * tick - q) < tick * 1e-6, f"{q} не кратно шагу {tick}"
+    if mode == "down":
+        assert q <= value + tick * 1e-9
+    else:
+        assert q >= value - tick * 1e-9

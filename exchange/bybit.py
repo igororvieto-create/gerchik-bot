@@ -9,6 +9,8 @@ import uuid
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
+from decimal import Decimal
+
 import aiohttp
 
 log = logging.getLogger("bybit")
@@ -23,9 +25,17 @@ def _fmt_price(v: float) -> str:
     str(round(x, 8)) переключается на экспоненту ниже 1e-4: 7.3e-06,
     9.8e-05. Bybit такие строки не принимает, то есть на дешёвых монетах
     ордер отвергался бы вместе со стопом — и это касалось не только входа,
-    но и досылки стопа монитором. qty сериализуется этой же схемой давно.
+    но и досылки стопа монитором.
+
+    Decimal, а не f"{v:.8f}": формат с фиксированной точностью УСЕКАЕТ
+    девятизначные цены (0.000070565 -> 0.00007056), а усечение стопа для
+    шорта двигает его БЛИЖЕ к входу, то есть молча ужесточает риск.
     """
-    return f"{v:.8f}".rstrip("0").rstrip(".") or "0"
+    d = Decimal(str(v)).normalize()
+    s = format(d, "f")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s or "0"
 
 
 class BybitClient:

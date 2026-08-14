@@ -18,7 +18,9 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
 
       - name: Import check
         run: |
@@ -26,3 +28,37 @@ jobs:
           python -c "from exchange.bybit import BybitClient; print('bybit OK')"
           python -c "from strategy.scanner import scan_all; print('scanner OK')"
           python -c "from api.routes import router; print('routes OK')"
+
+      # Каждый тест здесь соответствует багу, который УЖЕ случался в проекте:
+      # инварианты риска, рецидивирующие баги SL/score, миграции БД, разбор
+      # env, сериализация цен. Падение = вернулся конкретный баг.
+      - name: Regression tests
+        run: python -m pytest tests/ -q
+
+      # Дашборд — один файл со встроенным JS: разъехавшиеся скобки ломают
+      # его целиком, а синтаксис Python этого не ловит.
+      - name: Frontend sanity
+        run: |
+          python - <<'EOF'
+          import re, sys
+          s = open('static/index.html', encoding='utf-8').read()
+          code = "\n".join(re.findall(r'<script[^>]*>(.*?)</script>', s, re.S))
+          bad = False
+          for op, cl in (('{', '}'), ('(', ')'), ('[', ']')):
+              if code.count(op) != code.count(cl):
+                  print(f"BALANCE MISMATCH {op}{cl}: {code.count(op)}/{code.count(cl)}")
+                  bad = True
+          called = set(re.findall(r'onclick="(\w+)\(', s))
+          defined = set(re.findall(r'function\s+(\w+)\s*\(', code))
+          missing = called - defined
+          if missing:
+              print("onclick handlers without definition:", missing)
+              bad = True
+          ids = set(re.findall(r'id="([\w-]+)"', s))
+          used = set(re.findall(r"\$\('([\w-]+)'\)", code))
+          absent = used - ids
+          if absent:
+              print("references to non-existent element ids:", absent)
+              bad = True
+          sys.exit(1 if bad else 0)
+          EOF

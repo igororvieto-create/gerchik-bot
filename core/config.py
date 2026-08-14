@@ -104,6 +104,31 @@ class Config:
     # EXPIRED. Такая сделка не может выиграть по построению, поэтому торгуем
     # только при запасе >= 2R, а сигналы 1.5-2.0R остаются информационными.
     MIN_TRADE_HEADROOM_R: float = _env_float("MIN_TRADE_HEADROOM_R", 2.0)
+    # Перенос стопа в безубыток после хода в плюс на BREAKEVEN_AT_R.
+    # ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН (0.0).
+    #
+    # Механизм предлагался как способ получить плюс без преимущества сетапа:
+    # 14.7% сигналов доходят до +1R и возвращаются в стоп, и перенос делает
+    # их нулём вместо убытка. Но этот расчёт учитывает только убытки,
+    # ставшие безубытком, и игнорирует победы, которые перенос убивает:
+    # путь 0 -> +1R -> откат к БУ -> +2R без переноса был бы WIN, с
+    # переносом становится нулём.
+    #
+    # Поминутная симуляция (20 000 путей, честные хай/лоу 15м-баров):
+    #   без сноса:      EV +0.023R без переноса / +0.009R с переносом
+    #   снос +0.3R/48ч: EV +0.146R без переноса / +0.126R с переносом
+    # То есть преимущества перенос не создаёт, а при наличии преимущества
+    # его уменьшает. Это согласуется с теоремой об остановке: для процесса
+    # без сноса НИКАКОЕ правило выхода не создаёт матожидания.
+    #
+    # Механизм оставлен рабочим и протестированным: он снижает разброс и
+    # просадку (реальная польза для управления риском, но не для EV), и
+    # включается одной переменной, когда накопленные mfe_r это оправдают.
+    BREAKEVEN_AT_R: float = _env_float("BREAKEVEN_AT_R", 0.0)
+    # Стоп переносится не ровно на вход, а на вход + издержки круга:
+    # тейкер 0.055% × 2 входа/выхода. Стоп ровно на входе давал бы минус
+    # на комиссиях при каждом срабатывании.
+    BREAKEVEN_FEE_PCT: float = _env_float("BREAKEVEN_FEE_PCT", 0.12)
     KEY_LEVEL_LOOKBACK: int   = _env_int("KEY_LEVEL_LOOKBACK", 20)
     KEY_LEVEL_WING:     int   = _env_int("KEY_LEVEL_WING", 2)
     KEY_LEVEL_ATR_MULT: float = _env_float("KEY_LEVEL_ATR_MULT", 1.2)
@@ -173,6 +198,23 @@ cfg.TOP_N_PAIRS         = int(_clamp(cfg.TOP_N_PAIRS,         5,   500, "TOP_N_P
 cfg.SCAN_BATCH_SIZE     = int(_clamp(cfg.SCAN_BATCH_SIZE,     1,    50, "SCAN_BATCH_SIZE"))
 cfg.SCAN_BATCH_DELAY    = _clamp(cfg.SCAN_BATCH_DELAY,      0.0,  10.0, "SCAN_BATCH_DELAY")
 cfg.SIGNAL_COOLDOWN_MIN = int(_clamp(cfg.SIGNAL_COOLDOWN_MIN, 0,  1440, "SIGNAL_COOLDOWN_MIN"))
+
+# Связь из docs/REVIEW.md §2, которую поштучные клампы не ловят: порог показа
+# выше торгового делает торговый порог фиктивным (сигналов ниже него просто не
+# существует, и enter_trade не отсекает ничего). В /api/settings это проверяется,
+# а через env проходило молча.
+if cfg.MIN_SCORE > cfg.TRADE_MIN_SCORE:
+    _log.error(
+        f"MIN_SCORE({cfg.MIN_SCORE}) > TRADE_MIN_SCORE({cfg.TRADE_MIN_SCORE}) — "
+        f"торговый порог стал бы фиктивным, поднимаю его до {cfg.MIN_SCORE}"
+    )
+    cfg.TRADE_MIN_SCORE = cfg.MIN_SCORE
+
+# Безубыток должен наступать РАНЬШЕ цели, иначе механизм недостижим
+cfg.BREAKEVEN_AT_R    = _clamp(cfg.BREAKEVEN_AT_R,    0.0, 1.9, "BREAKEVEN_AT_R")
+cfg.BREAKEVEN_FEE_PCT = _clamp(cfg.BREAKEVEN_FEE_PCT, 0.0, 1.0, "BREAKEVEN_FEE_PCT")
+cfg.MIN_TRADE_HEADROOM_R = _clamp(cfg.MIN_TRADE_HEADROOM_R, cfg.MIN_RR, 10.0,
+                                  "MIN_TRADE_HEADROOM_R")
 
 # Связь из docs/REVIEW.md §2: полный набор позиций не должен пробивать
 # дневной лимит. Поштучные клампы это не ловили: MAX_POSITIONS=10 при риске

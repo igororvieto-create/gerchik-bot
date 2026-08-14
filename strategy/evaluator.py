@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timezone
 
 from core import db
+from core.config import cfg
 from exchange.bybit import BybitClient
 
 log = logging.getLogger("evaluator")
@@ -20,20 +21,59 @@ _EVALUATING = False
 _MAX_AGE_HOURS = 48
 
 
-def _judge(direction: str, sl: float, tp2: float, klines: list) -> tuple[str, float] | None:
-    """Walk candles chronologically; return (outcome, price) or None if undecided."""
+def _judge(direction: str, sl: float, tp2: float, klines: list,
+           entry: float = 0.0) -> tuple[str, float, float] | None:
+    """Walk candles chronologically; return (outcome, price, mfe_r) or None.
+
+    Судейство ОБЯЗАНО повторять то, что делает бот на бирже, иначе
+    форвард-тест меряет не ту стратегию. Бот переносит стоп в безубыток
+    после хода в плюс на BREAKEVEN_AT_R (trader.monitor_positions), поэтому
+    и здесь после достижения этого уровня стоп становится безубыточным.
+
+    Исходы: WIN (дошли до TP2), BE (сработал перенесённый стоп — примерно
+    ноль), LOSS (исходный стоп), None (ещё не решено).
+
+    mfe_r — максимальный ход В ПЛЮС в единицах R до момента исхода. Нужен,
+    чтобы оценивать пороги переноса по фактическим данным, а не по модели.
+    """
+    if entry <= 0:
+        entry = 0.0
+    risk = abs(entry - sl) if entry > 0 else 0.0
+    be_arm = cfg.BREAKEVEN_AT_R if (cfg.BREAKEVEN_AT_R > 0 and risk > 0) else 0.0
+    fee = entry * cfg.BREAKEVEN_FEE_PCT / 100 if entry > 0 else 0.0
+    be_price = (entry + fee) if direction == "LONG" else (entry - fee)
+
+    cur_sl = sl
+    armed = False
+    mfe_r = 0.0
     for k in klines:
         hi, lo = k["high"], k["low"]
+        # Ход в плюс на этой свече — считаем ДО проверки стопа, иначе
+        # свеча, в которой цель и стоп задеты вместе, не даст своего MFE.
+        if risk > 0:
+            fav = (hi - entry) if direction == "LONG" else (entry - lo)
+            mfe_r = max(mfe_r, fav / risk)
+
         if direction == "LONG":
-            hit_sl = lo <= sl
+            hit_sl = lo <= cur_sl
             hit_tp = hi >= tp2
-        else:  # SHORT
-            hit_sl = hi >= sl
+        else:
+            hit_sl = hi >= cur_sl
             hit_tp = lo <= tp2
-        if hit_sl:            # включая случай "обе в одной свече" → худшее
-            return "LOSS", sl
+
+        # Стоп проверяется ПЕРВЫМ: внутрисвечный порядок неизвестен, берём
+        # худшее. Это же правило действовало и до переноса.
+        if hit_sl:
+            return ("BE" if armed else "LOSS"), cur_sl, mfe_r
         if hit_tp:
-            return "WIN", tp2
+            return "WIN", tp2, mfe_r
+
+        # Взводим безубыток по ЗАКРЫТОЙ свече: внутри свечи неизвестно,
+        # был ли ход в плюс до или после касания стопа, и взвод по хвосту
+        # той же свечи завышал бы результат.
+        if be_arm and not armed and mfe_r >= be_arm:
+            armed = True
+            cur_sl = be_price
     return None
 
 
@@ -95,13 +135,19 @@ async def evaluate_signal_outcomes(client: BybitClient) -> None:
                         decided += 1
                     continue
 
-                verdict = _judge(row["direction"], row["sl"], row["tp2"], relevant)
+                verdict = _judge(row["direction"], row["sl"], row["tp2"], relevant,
+                                 entry=row["entry"] or 0.0)
                 if verdict:
-                    await db.set_signal_outcome(row["id"], verdict[0], verdict[1])
+                    await db.set_signal_outcome(row["id"], verdict[0], verdict[1],
+                                                mfe_r=verdict[2])
                     decided += 1
                 elif age_h >= _MAX_AGE_HOURS:
                     last_close = relevant[-1]["close"]
-                    await db.set_signal_outcome(row["id"], "EXPIRED", last_close)
+                    # MFE у просроченного тоже полезен: показывает, насколько
+                    # близко сетап подходил к цели, прежде чем застрять.
+                    _, _, mfe = _judge(row["direction"], row["sl"], row["tp2"],
+                                       relevant, entry=row["entry"] or 0.0) or (None, None, 0.0)
+                    await db.set_signal_outcome(row["id"], "EXPIRED", last_close, mfe_r=mfe)
                     decided += 1
             except Exception as e:
                 log.warning(f"evaluate {row.get('symbol')}: {e}")

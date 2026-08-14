@@ -66,6 +66,10 @@ class Position:
     score:          int
     signal_type:    str
     order_id:       str   = ""
+    # Стоп уже перенесён в безубыток. Флаг нужен, чтобы монитор не пытался
+    # переносить его повторно каждые 30 секунд и не «откатывал» стоп, уже
+    # подтянутый выше безубытка.
+    breakeven_done: bool  = False
     unrealised_pnl: float = 0.0
     ts:             datetime = field(default_factory=datetime.utcnow)
 

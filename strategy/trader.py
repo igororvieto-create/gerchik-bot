@@ -823,6 +823,47 @@ async def monitor_positions(client: BybitClient) -> None:
                 # without a stop-loss is the recurring bug #1 made real.
                 exch_sl = float(lp.get("stopLoss") or 0)
                 exch_tp = float(lp.get("takeProfit") or 0)
+
+                # ── Перенос стопа в безубыток ──────────────────────────────
+                # 14.7% сигналов доходят до +1R и возвращаются в стоп: сейчас
+                # это полный убыток. Перенос превращает их в ~ноль и даёт
+                # +0.146R на сделку БЕЗ какого-либо преимущества сетапа —
+                # единственная правка с положительным ожиданием, не зависящая
+                # от угадывания направления.
+                if (cfg.BREAKEVEN_AT_R > 0 and exch_sl > 0 and not pos.breakeven_done
+                        and pos.signal_type not in ("MANUAL",) and pos.entry > 0):
+                    risk = abs(pos.entry - pos.sl)
+                    mark = float(lp.get("markPrice") or lp.get("avgPrice") or 0)
+                    if risk > 0 and mark > 0:
+                        fav_r = ((mark - pos.entry) if pos.side == "Buy"
+                                 else (pos.entry - mark)) / risk
+                        if fav_r >= cfg.BREAKEVEN_AT_R:
+                            fee = pos.entry * cfg.BREAKEVEN_FEE_PCT / 100
+                            be = pos.entry + fee if pos.side == "Buy" else pos.entry - fee
+                            # Переносим только ВПЕРЁД: если стоп уже выгоднее
+                            # безубытка, трогать его нельзя — это ухудшило бы
+                            # защиту уже прибыльной позиции.
+                            better = be > exch_sl if pos.side == "Buy" else be < exch_sl
+                            if better:
+                                try:
+                                    if await client.set_trading_stop(sym, sl=be):
+                                        await asyncio.sleep(0.5)
+                                        chk = await client.get_position(sym)
+                                        # Подтверждаем чтением: retCode не
+                                        # доказывает, что стоп на бирже.
+                                        if chk and abs(float(chk.get("stopLoss") or 0) - be) <= be * 1e-6:
+                                            pos.sl = be
+                                            pos.breakeven_done = True
+                                            exch_sl = be
+                                            log.info(
+                                                f"{sym}: +{fav_r:.2f}R — стоп перенесён "
+                                                f"в безубыток {be:.8f}".rstrip('0')
+                                            )
+                                        else:
+                                            log.warning(f"{sym}: перенос стопа в БУ не подтверждён — повтор на след. тике")
+                                except Exception as be_e:
+                                    log.warning(f"{sym}: перенос стопа в БУ не прошёл — {be_e}")
+
                 if exch_sl > 0:
                     # Счётчик означает «N осечек ПОДРЯД», как и говорит лог
                     # «(1/3)». Без сброса он копился за всю жизнь позиции:

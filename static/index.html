@@ -351,7 +351,7 @@ input[type=range]::-moz-range-thumb{
     <div class="stat-sub" id="s-trade">—</div>
   </div>
   <div class="stat-card" style="cursor:pointer" onclick="openOutcomes()" title="Разбивка по score">
-    <div class="stat-label">Винрейт 7д ▸</div>
+    <div class="stat-label">Матожидание 7д ▸</div>
     <div class="stat-value v-accent" id="s-wr">—</div>
     <div class="stat-sub" id="s-wr-sub">форвард-тест сигналов</div>
   </div>
@@ -729,12 +729,16 @@ async function refreshStats(){
     gScanCount=d.scan_count??0;
     const oc=d.outcomes_7d;
     if(oc){
-      $('s-wr').textContent=oc.winrate!=null?oc.winrate+'%':'—';
+      $('s-wr').textContent=oc.ev_r!=null?(oc.ev_r>0?'+':'')+oc.ev_r+'R':'—';
       // 33.3 — точка безубытка при цели TP2=2R и стопе 1R. Порог 50 здесь
       // противоречил модалке: винрейт 40% был красным в карточке и зелёным
       // в разбивке, то есть два противоположных сигнала о том же числе.
-      $('s-wr').className='stat-value '+(oc.winrate==null?'':oc.winrate>=33.3?'v-green':'v-red');
-      $('s-wr-sub').textContent=`${oc.win}W · ${oc.loss}L · ${oc.expired}E · ${oc.open} ждут`;
+      // Критерий — матожидание, а не процент побед: с переносом стопа в
+      // безубыток исход BE даёт ~0R и в винрейт не входит, но забирает
+      // сделки, которые раньше были полным убытком.
+      $('s-wr').className='stat-value '+(oc.ev_r==null?'':oc.ev_r>0?'v-green':'v-red');
+      $('s-wr-sub').textContent=`${oc.win}W · ${oc.loss}L · ${oc.be??0}БУ · `
+        +`${oc.winrate!=null?oc.winrate+'%':'—'} · ${oc.open} ждут`;
     }
     if(d.last_scan_at){
       const t=new Date(d.last_scan_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
@@ -1240,12 +1244,12 @@ async function openOutcomes(){
       keys.sort();
       for(const k of keys){
         const v=obj[k], dec=v.win+v.loss;
-        // Безубыток при TP2=2R и SL=1R — 33.3%: ниже него стратегия теряет
-        const col=v.winrate==null?'var(--muted)':(v.winrate>=33.3?'var(--green)':'var(--red)');
+        const evc = v.ev_r==null?'var(--muted)':(v.ev_r>0?'var(--green)':'var(--red)');
         h+=`<div class="drow"><span class="dk">${esc(k)}</span>`
-          +`<span class="dv" style="color:${col}">`
-          +`${v.winrate==null?'—':v.winrate+'%'} <span style="color:var(--muted)">`
-          +`(${v.win}W/${v.loss}L${v.expired?'/'+v.expired+'E':''}${dec<10?', мало данных':''})</span></span></div>`;
+          +`<span class="dv" style="color:${evc}">`
+          +`${v.ev_r==null?'—':(v.ev_r>0?'+':'')+v.ev_r+'R'} <span style="color:var(--muted)">`
+          +`(${v.win}W/${v.loss}L${v.be?'/'+v.be+'БУ':''}${v.expired?'/'+v.expired+'E':''}`
+          +`${v.winrate!=null?', '+v.winrate+'%':''}${dec<10?', мало данных':''})</span></span></div>`;
       }
       return h;
     };
@@ -1260,8 +1264,9 @@ async function openOutcomes(){
     html+=sec('По направлению', d.by_direction);
     html+=sec('По типу сигнала', d.by_type);
     html+=`<div style="margin-top:12px;color:var(--muted);font-size:11px;line-height:1.5">`
-      +`Зелёный — выше точки безубытка (33.3% при цели TP2=2R и стопе 1R).`
-      +` Красный — на дистанции такой срез теряет деньги.</div>`;
+      +`Показано матожидание в R: цель TP2=+2R, стоп −1R, безубыток 0R.`
+      +` Зелёный — срез зарабатывает на дистанции, красный — теряет.`
+      +` Процент побед указан в скобках, но решает именно матожидание.</div>`;
     $('outcomes-body').innerHTML=html;
   }catch(e){
     $('outcomes-body').innerHTML=`<div class="drow"><span class="dv derr">Ошибка: ${esc(String(e))}</span></div>`;

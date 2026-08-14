@@ -71,7 +71,11 @@ async def init_db() -> None:
                     # которой введён MIN_TRADE_HEADROOM_R: без него нельзя
                     # срезать винрейт по запасу до цели и убедиться, что полоса
                     # 1.5-2.0R действительно проигрышная.
-                    "headroom REAL"]:
+                    "headroom REAL",
+                    # mfe_r — максимальный ход в плюс в единицах R до исхода.
+                    # Позволяет подбирать порог переноса стопа в безубыток по
+                    # фактическим данным, а не по модели случайного блуждания.
+                    "mfe_r REAL"]:
             try:
                 await db.execute(f"ALTER TABLE signals ADD COLUMN {col}")
             except Exception as e:
@@ -263,22 +267,43 @@ async def get_pending_signals(max_age_hours: int = 48) -> List[Dict]:
         return []
 
 
-async def set_signal_outcome(signal_id: int, outcome: str, price: float) -> None:
+async def set_signal_outcome(signal_id: int, outcome: str, price: float,
+                             mfe_r: float = 0.0) -> None:
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                "UPDATE signals SET outcome=?, outcome_price=?, outcome_at=? WHERE id=?",
-                (outcome, price, datetime.utcnow().isoformat(), signal_id),
+                "UPDATE signals SET outcome=?, outcome_price=?, outcome_at=?, mfe_r=? "
+                "WHERE id=?",
+                (outcome, price, datetime.utcnow().isoformat(), mfe_r, signal_id),
             )
             await db.commit()
     except Exception as e:
         log.error(f"set_signal_outcome error: {e}")
 
 
+def _ev(slot: Dict) -> Dict:
+    """Винрейт и матожидание в R.
+
+    С переносом стопа в безубыток одного винрейта мало: исход BE даёт ~0R и
+    в знаменатель винрейта не входит, но на матожидание влияет — он забирает
+    сделки, которые раньше были полным убытком. Решение о реальных деньгах
+    принимается по ev_r, а не по проценту побед.
+
+    Цель — TP2 = 2R, стоп — 1R, безубыток — 0R.
+    """
+    win, loss, be = slot.get("win", 0), slot.get("loss", 0), slot.get("be", 0)
+    decided = win + loss
+    out: Dict = {"winrate": round(win / decided * 100, 1) if decided else None}
+    total = win + loss + be
+    out["ev_r"] = round((win * 2.0 + be * 0.0 + loss * -1.0) / total, 3) if total else None
+    return out
+
+
 async def get_outcome_stats(days: int = 7) -> Dict:
     """Forward-test scoreboard: how many signals hit TP2 before SL and vice versa."""
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
-    stats = {"win": 0, "loss": 0, "expired": 0, "open": 0, "winrate": None}
+    stats = {"win": 0, "loss": 0, "be": 0, "expired": 0, "open": 0,
+             "winrate": None, "ev_r": None}
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
@@ -289,11 +314,10 @@ async def get_outcome_stats(days: int = 7) -> Dict:
                 for o, c in await cur.fetchall():
                     if o == "WIN":       stats["win"] = c
                     elif o == "LOSS":    stats["loss"] = c
+                    elif o == "BE":      stats["be"] = c
                     elif o == "EXPIRED": stats["expired"] = c
                     else:                stats["open"] = c
-        decided = stats["win"] + stats["loss"]
-        if decided:
-            stats["winrate"] = round(stats["win"] / decided * 100, 1)
+        stats.update(_ev(stats))
         return stats
     except Exception as e:
         log.error(f"get_outcome_stats error: {e}")
@@ -357,7 +381,7 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
                 rows = await cur.fetchall()
 
         def _acc(d: Dict, key: str, outcome: str) -> None:
-            slot = d.setdefault(key, {"win": 0, "loss": 0, "expired": 0})
+            slot = d.setdefault(key, {"win": 0, "loss": 0, "be": 0, "expired": 0})
             k = outcome.lower()
             if k in slot:
                 slot[k] += 1
@@ -376,8 +400,7 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
         for d in (out["by_score"], out["by_direction"], out["by_type"],
                   out["by_sl_atr"], out["by_headroom"]):
             for slot in d.values():
-                decided = slot["win"] + slot["loss"]
-                slot["winrate"] = round(slot["win"] / decided * 100, 1) if decided else None
+                slot.update(_ev(slot))
 
         out["recent"] = [
             {"symbol": r["symbol"], "score": r["score"], "dir": r["direction"],

@@ -1203,6 +1203,10 @@ async function openOutcomes(){
     let html=`<div class="drow"><span class="dk">Всего</span><span class="dv">`
       +`${sm.win??0}W · ${sm.loss??0}L · ${sm.expired??0}E · ${sm.open??0} ждут</span></div>`;
     html+=sec('По score', d.by_score, 'Торгуются только сигналы от TRADE_MIN_SCORE — смотри строку 45-59 и 60+');
+    html+=sec('По ширине стопа', d.by_sl_atr,
+              'Пол стопа — 0.75 ATR. Если строка <1.0 ATR заметно хуже остальных, стоп выбивает шумом одной свечи, а не сломом идеи');
+    html+=sec('По запасу до цели', d.by_headroom,
+              'Полоса 1.5-2.0R показывается, но НЕ торгуется — строка проверяет, оправдано ли отсечение');
     html+=sec('По направлению', d.by_direction);
     html+=sec('По типу сигнала', d.by_type);
     html+=`<div style="margin-top:12px;color:var(--muted);font-size:11px;line-height:1.5">`

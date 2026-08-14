@@ -1,7 +1,7 @@
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import aiosqlite
 
@@ -304,18 +304,43 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
     """Winrate sliced by score bucket / direction / signal type + last decided.
     The go/no-go analysis tool: shows WHERE the strategy wins or loses."""
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
-    out: Dict = {"by_score": {}, "by_direction": {}, "by_type": {}, "recent": []}
+    out: Dict = {"by_score": {}, "by_direction": {}, "by_type": {},
+                 "by_sl_atr": {}, "by_headroom": {}, "recent": []}
 
     def _bucket(score: int) -> str:
         if score >= 60: return "60+"
         if score >= 45: return "45-59"
         return "30-44"
 
+    def _sl_bucket(sl_pct, atr_pct) -> Optional[str]:
+        """Ширина стопа в ATR. Пол в _calc_levels при найденном уровне —
+        0.75 ATR, то есть стоп может оказаться УЖЕ типичного хода одной
+        4-часовой свечи и выбиваться шумом, а не сломом идеи сделки.
+        Этот срез отвечает на вопрос данными, а не рассуждением."""
+        if not sl_pct or not atr_pct or atr_pct <= 0:
+            return None
+        r = sl_pct / atr_pct
+        if r < 1.0:  return "<1.0 ATR"
+        if r < 1.5:  return "1.0-1.5"
+        if r < 2.5:  return "1.5-2.5"
+        return ">2.5 ATR"
+
+    def _hr_bucket(hr) -> Optional[str]:
+        """Запас до встречной цели. Торгуются только >=2R
+        (MIN_TRADE_HEADROOM_R), полоса 1.5-2.0 показывается, но не торгуется —
+        срез показывает, оправдано ли это отсечение."""
+        if hr is None or hr <= 0:
+            return None
+        if hr < 2.0: return "1.5-2.0R (не торгуется)"
+        if hr < 3.0: return "2.0-3.0R"
+        return ">3.0R"
+
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                """SELECT symbol, score, direction, signal_type, outcome, ts
+                """SELECT symbol, score, direction, signal_type, outcome, ts,
+                          sl_pct, atr_pct, headroom
                    FROM signals WHERE outcome IS NOT NULL AND ts >= ?
                    ORDER BY ts DESC""",
                 (cutoff,),
@@ -332,8 +357,15 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             _acc(out["by_score"], _bucket(r["score"]), r["outcome"])
             _acc(out["by_direction"], r["direction"], r["outcome"])
             _acc(out["by_type"], r["signal_type"], r["outcome"])
+            slb = _sl_bucket(r["sl_pct"], r["atr_pct"])
+            if slb:
+                _acc(out["by_sl_atr"], slb, r["outcome"])
+            hrb = _hr_bucket(r["headroom"])
+            if hrb:
+                _acc(out["by_headroom"], hrb, r["outcome"])
 
-        for d in (out["by_score"], out["by_direction"], out["by_type"]):
+        for d in (out["by_score"], out["by_direction"], out["by_type"],
+                  out["by_sl_atr"], out["by_headroom"]):
             for slot in d.values():
                 decided = slot["win"] + slot["loss"]
                 slot["winrate"] = round(slot["win"] / decided * 100, 1) if decided else None

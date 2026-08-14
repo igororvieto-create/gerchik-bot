@@ -410,6 +410,7 @@ async def get_stats():
         by_type[r["signal_type"]] = by_type.get(r["signal_type"], 0) + 1
         by_dir[r["direction"]]    = by_dir.get(r["direction"], 0) + 1
     outcomes = await db.get_outcome_stats(days=7)
+    from strategy.trader import _today_utc
     # JSONResponse, а не голый dict: starlette отдал бы его без charset, и
     # scan_error с русским текстом («все прокси исчерпаны») приезжал бы на
     # телефон кракозябрами. _sanitize заодно чистит NaN в outcomes_7d.
@@ -430,8 +431,14 @@ async def get_stats():
         # Причина остановки: halt выставляется и при сбое чтения БД, а фронт
         # печатал единственную формулировку «дневной лимит убытка достигнут» —
         # пользователь шёл искать несуществующие потери.
-        "halt_reason": ("daily_loss" if state.daily_pnl_date else "db_error")
-                       if state.trading_halted else None,
+        # Сравнение с СЕГОДНЯШНЕЙ датой, а не проверка на truthy: при сбое БД
+        # _ensure_daily_state выходит ДО присвоения daily_pnl_date, и она
+        # остаётся вчерашней (то есть truthy). После полуночного роллбэка это
+        # давало "daily_loss" с суммой за вчерашний, уже закрытый день —
+        # ровно та ложь, ради устранения которой поле и вводилось.
+        "halt_reason": (
+            "daily_loss" if state.daily_pnl_date == _today_utc() else "db_error"
+        ) if state.trading_halted else None,
         "daily_realized_pnl": round(state.daily_realized_pnl, 2),
     }))
 

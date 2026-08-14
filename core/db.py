@@ -306,6 +306,15 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
     out: Dict = {"by_score": {}, "by_direction": {}, "by_type": {},
                  "by_sl_atr": {}, "by_headroom": {}, "recent": []}
+    # Явный порядок корзин. Фронт сортировал ключи лексикографически, а '<'
+    # (0x3C) и '>' (0x3E) больше цифр — крайние корзины уезжали в середину и
+    # хвост, ось переставала быть монотонной по ширине стопа. Именно её
+    # монотонность и есть весь смысл среза: растёт ли винрейт с шириной.
+    out["_order"] = {
+        "by_score":    ["30-44", "45-59", "60+"],
+        "by_sl_atr":   ["<1.0 ATR", "1.0-1.5", "1.5-2.5", ">2.5 ATR"],
+        "by_headroom": ["1.5-2.0R (не торгуется)", "2.0-3.0R", ">3.0R"],
+    }
 
     def _bucket(score: int) -> str:
         if score >= 60: return "60+"

@@ -17,6 +17,17 @@ BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api.bybit.com")
 RECV_WINDOW = 5000
 
 
+def _fmt_price(v: float) -> str:
+    """Цена как строка БЕЗ научной нотации.
+
+    str(round(x, 8)) переключается на экспоненту ниже 1e-4: 7.3e-06,
+    9.8e-05. Bybit такие строки не принимает, то есть на дешёвых монетах
+    ордер отвергался бы вместе со стопом — и это касалось не только входа,
+    но и досылки стопа монитором. qty сериализуется этой же схемой давно.
+    """
+    return f"{v:.8f}".rstrip("0").rstrip(".") or "0"
+
+
 class BybitClient:
     def __init__(self, api_key: str = "", secret: str = "",
                  extra_proxies: List[str] = None):
@@ -329,10 +340,10 @@ class BybitClient:
             return False
         body: Dict = {"category": "linear", "symbol": symbol, "positionIdx": 0}
         if sl > 0:
-            body["stopLoss"] = str(round(sl, 8))
+            body["stopLoss"] = _fmt_price(sl)
             body["slTriggerBy"] = "MarkPrice"
         if tp > 0:
-            body["takeProfit"] = str(round(tp, 8))
+            body["takeProfit"] = _fmt_price(tp)
             body["tpTriggerBy"] = "LastPrice"
         data = await self._post("/v5/position/trading-stop", body)
         return data.get("retCode", -1) in (0, 34040)
@@ -360,8 +371,8 @@ class BybitClient:
             "orderType":   "Market",
             "qty":         f"{qty:.8f}".rstrip('0').rstrip('.'),
             "timeInForce": "IOC",
-            "stopLoss":    str(round(sl, 8)),
-            "takeProfit":  str(round(tp, 8)),
+            "stopLoss":    _fmt_price(sl),
+            "takeProfit":  _fmt_price(tp),
             "slTriggerBy": "MarkPrice",
             "tpTriggerBy": "LastPrice",
             "positionIdx": 0,
@@ -381,9 +392,14 @@ class BybitClient:
                 return None
             result = data.get("result", {})
             positions.extend(result.get("list", []))
-            cursor = result.get("nextPageCursor", "")
-            if not cursor:
+            nxt = result.get("nextPageCursor", "")
+            # Без этой защиты неизменный курсор от биржи давал бесконечный
+            # цикл: monitor_positions висел с _MONITORING=True, и НЕПРЕРЫВНАЯ
+            # проверка стопов — единственная страховка для всех веток
+            # «не удалось подтвердить» — прекращалась навсегда.
+            if not nxt or nxt == cursor or len(positions) > 2000:
                 break
+            cursor = nxt
         return [p for p in positions if float(p.get("size", 0)) > 0]
 
     async def get_position(self, symbol: str) -> Optional[Dict]:

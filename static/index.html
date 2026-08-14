@@ -644,7 +644,7 @@ function buildCard(s, isNew){
     <span class="card-time">${fmtT(s.ts)}</span>
     <div class="card-spacer2"></div>
     <button class="chart-btn" data-sym="${sym}">📊 Graf</button>
-    <span class="rr-badge">1:${(s.rr||2).toFixed(1)}</span>
+    ${hrBadge(s.headroom)}
   </div>
 </div>`;
 }
@@ -747,6 +747,10 @@ async function refreshStats(){
       } else {
         gScanErr=false;
         $('scan-info').textContent=`Скан #${d.scan_count} · ${t} · найдено: ${d.total_24h??0}`;
+        // Баннер диагностики гасился ТОЛЬКО внутри самой модалки, поэтому
+        // «⚠ Bybit API недоступен» висел сутками рядом со строкой об
+        // успешном скане — два противоположных утверждения на одном экране.
+        clearAlert('diag');
       }
       $('scan-pulse').className='scan-pulse';
     }
@@ -848,6 +852,22 @@ async function refreshTradeMode(){
   }catch{}
 }
 
+// Бейдж «1:2.0» стоял на КАЖДОЙ карточке: scanner.py пишет rr=2.0 константой,
+// поэтому он не различал сигналы вовсе. Показываем запас до цели — именно он
+// решает, возьмёт бот сигнал или нет (trader: headroom < MIN_TRADE_HEADROOM_R
+// -> отказ), и именно его полосу 1.5-2.0R проверяет новый срез в разбивке.
+const MIN_TRADE_HEADROOM_R = 2.0;
+function hrBadge(hr){
+  const v = Number(hr);
+  if(!Number.isFinite(v) || v <= 0)
+    return '<span class="rr-badge" style="color:var(--muted);background:rgba(100,116,139,.12)">запас ?</span>';
+  const ok = v >= MIN_TRADE_HEADROOM_R;
+  const col = ok ? 'var(--green)' : 'var(--muted)';
+  const bg  = ok ? 'rgba(34,197,94,.12)' : 'rgba(100,116,139,.12)';
+  const tag = ok ? '' : ' · не торгуется';
+  return `<span class="rr-badge" style="color:${col};background:${bg}">запас ${v.toFixed(1)}R${tag}</span>`;
+}
+
 /* Единая точка показа баннера: он уже поднимался вручную в диагностике,
    а предупреждения о балансе и стоп-дне показывать было нечем. */
 let gScanErr=false;  // держит ли scan-info сообщение об ошибке скана
@@ -868,7 +888,7 @@ function _renderAlert(){
   // красная плашка висела сутками до перезагрузки страницы.
   const msgs=Object.values(_alerts);
   if(msgs.length){ b.textContent=msgs.join(' · '); b.classList.add('show'); }
-  else b.classList.remove('show');
+  else { b.classList.remove('show'); b.style.cursor=''; b.onclick=null; }
 }
 
 /* ── Settings ── */
@@ -987,7 +1007,9 @@ async function doScan(){
   const t = u.searchParams.get('token');
   if(t){
     let saved=false;
-    try{ localStorage.setItem('dash_token', t); saved=true; }catch{}
+    // trim: сервер сравнивает со .strip()-нутым значением, поэтому ссылка
+    // с ?token=abc%20 давала вечный 401 и prompt каждую минуту.
+    try{ localStorage.setItem('dash_token', t.trim()); saved=true; }catch{}
     // Токен из адреса убираем ТОЛЬКО если он реально сохранился: в приватном
     // режиме Safari setItem бросает, и прежний код всё равно стирал токен из
     // URL — после этого не помогала даже перезагрузка.
@@ -1003,22 +1025,35 @@ function authHeaders(){
 // вкладке или после очистки ITP дашборд молча превращался в набор «—» и
 // «unauthorized», и закрыть позицию с телефона становилось невозможно.
 let _tokenPrompted=false;
+function promptToken(){
+  const t=prompt('Токен доступа (DASHBOARD_TOKEN из Railway):');
+  if(!t){
+    _tokenPrompted=false;   // отказался — предложим при следующем 401
+    return;
+  }
+  let saved=false;
+  try{ localStorage.setItem('dash_token', t.trim()); saved=true; }catch{}
+  if(!saved){
+    // Без этой проверки был вечный цикл: setItem бросает (приватная вкладка
+    // Safari, PWA-контейнер с отключённым хранилищем), бросок глотался, и
+    // location.reload() грузил страницу снова без токена -> 401 -> prompt.
+    showAlert('🔑 Браузер запрещает сохранение — открой обычную вкладку (не приватную)','auth');
+    _tokenPrompted=false;
+    return;
+  }
+  clearAlert('auth');
+  location.reload();
+}
 function askForToken(){
   if(_tokenPrompted) return;
   _tokenPrompted=true;
   showAlert('🔑 Нужен токен доступа — нажми, чтобы ввести','auth');
   const b=$('alert');
-  if(b) b.style.cursor='pointer';
-  setTimeout(()=>{
-    const t=prompt('Токен доступа (DASHBOARD_TOKEN из Railway):');
-    if(t){
-      try{ localStorage.setItem('dash_token', t.trim()); }catch{}
-      clearAlert('auth');
-      location.reload();
-    } else {
-      _tokenPrompted=false;   // отказался — предложим при следующем 401
-    }
-  }, 100);
+  // Обработчик реально вешаем: раньше баннер предлагал нажать, но слушателя
+  // не было, и после отмены prompt'а тап по нему ничего не делал — а на
+  // телефоне это единственный видимый способ действия.
+  if(b){ b.style.cursor='pointer'; b.onclick=()=>{ _tokenPrompted=true; promptToken(); }; }
+  setTimeout(promptToken, 100);
 }
 
 const _origFetch = window.fetch;
@@ -1182,9 +1217,24 @@ async function openOutcomes(){
     const rr=await fetch('/api/outcomes?days=7');
     if(!rr.ok) throw new Error('HTTP '+rr.status);
     const d=await rr.json();
-    const sec=(title,obj,hint)=>{
-      const keys=Object.keys(obj||{});
-      if(!keys.length) return '';
+    const order=d._order||{};
+    const sec=(title,obj,hint,key)=>{
+      const all=Object.keys(obj||{});
+      if(!all.length){
+        // Не молча пропускаем: пустая секция неотличима от «деплой не доехал»
+        // и от «get_outcome_breakdown упала» (она отдаёт 200 с пустым срезом).
+        return `<div style="margin:10px 0 4px;font-weight:700;color:var(--accent)">${esc(title)}</div>`
+             + `<div style="color:var(--muted);font-size:11px;margin-bottom:4px">нет данных за период</div>`;
+      }
+      // Порядок из ответа бэкенда; чего в эталоне нет — в хвост по алфавиту.
+      const ref=order[key]||[];
+      const keys=all.slice().sort((a,b)=>{
+        const ia=ref.indexOf(a), ib=ref.indexOf(b);
+        if(ia<0&&ib<0) return a.localeCompare(b);
+        if(ia<0) return 1;
+        if(ib<0) return -1;
+        return ia-ib;
+      });
       let h=`<div style="margin:10px 0 4px;font-weight:700;color:var(--accent)">${esc(title)}</div>`;
       if(hint) h+=`<div style="color:var(--muted);font-size:11px;margin-bottom:4px">${esc(hint)}</div>`;
       keys.sort();
@@ -1202,11 +1252,11 @@ async function openOutcomes(){
     const sm=d.summary||{};
     let html=`<div class="drow"><span class="dk">Всего</span><span class="dv">`
       +`${sm.win??0}W · ${sm.loss??0}L · ${sm.expired??0}E · ${sm.open??0} ждут</span></div>`;
-    html+=sec('По score', d.by_score, 'Торгуются только сигналы от TRADE_MIN_SCORE — смотри строку 45-59 и 60+');
+    html+=sec('По score', d.by_score, 'Торгуются только сигналы от TRADE_MIN_SCORE — смотри строку 45-59 и 60+', 'by_score');
     html+=sec('По ширине стопа', d.by_sl_atr,
-              'Пол стопа — 0.75 ATR. Если строка <1.0 ATR заметно хуже остальных, стоп выбивает шумом одной свечи, а не сломом идеи');
+              'Пол стопа — 0.75 ATR. Если строка <1.0 ATR заметно хуже остальных, стоп выбивает шумом одной свечи, а не сломом идеи', 'by_sl_atr');
     html+=sec('По запасу до цели', d.by_headroom,
-              'Полоса 1.5-2.0R показывается, но НЕ торгуется — строка проверяет, оправдано ли отсечение');
+              'Полоса 1.5-2.0R показывается, но НЕ торгуется — строка проверяет, оправдано ли отсечение', 'by_headroom');
     html+=sec('По направлению', d.by_direction);
     html+=sec('По типу сигнала', d.by_type);
     html+=`<div style="margin-top:12px;color:var(--muted);font-size:11px;line-height:1.5">`

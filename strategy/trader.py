@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import math
+from decimal import Decimal, ROUND_FLOOR, ROUND_CEILING
 from datetime import datetime, timezone
 
 from core.config import cfg
@@ -72,6 +73,21 @@ async def close_and_verify(client: BybitClient, symbol: str, side: str,
         log.critical(f"{symbol}: закрыто ЧАСТИЧНО, остаток {remaining} — остаётся под наблюдением")
         return False, remaining
     return True, 0.0
+
+
+def _quantize(value: float, tick: float, mode: str) -> float:
+    """Привести цену к сетке tickSize. Decimal, а не float-арифметика:
+    value/tick на мелких шагах даёт хвост вида 7.0564999999e-05, и
+    round() уводил бы цену на тик в непредсказуемую сторону.
+
+    mode='down' — вниз (для стопа LONG и тейка LONG),
+    mode='up'   — вверх (для стопа SHORT и тейка SHORT)."""
+    if tick <= 0:
+        return value
+    dv, dt = Decimal(str(value)), Decimal(str(tick))
+    n = dv / dt
+    n = n.to_integral_value(rounding=ROUND_FLOOR if mode == "down" else ROUND_CEILING)
+    return float(n * dt)
 
 
 def _round_step(value: float, step: float) -> float:
@@ -269,19 +285,10 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             _forget_symbol(sig.symbol)
             return False
 
-        # Position size: risk RISK_PER_TRADE% of balance
-        risk_usdt     = balance * cfg.RISK_PER_TRADE / 100
-        position_usdt = risk_usdt / (sig.sl_pct / 100)  # notional value
-
-        # Cap by max margin: never use more than MAX_MARGIN_PCT% of balance as margin
-        max_notional_margin = balance * cfg.MAX_MARGIN_PCT / 100 * cfg.LEVERAGE
-        # Also cap at balance × leverage to avoid margin rejection
-        max_notional = min(balance * cfg.LEVERAGE, max_notional_margin)
-        if position_usdt > max_notional:
-            position_usdt = max_notional
-            log.debug(f"{sig.symbol}: notional capped to {max_notional:.2f}")
-
-        # Qty precision from instrument info
+        # Параметры инструмента ДО расчёта размера: квантование цен по шагу
+        # биржи меняет расстояние до стопа, а значит и sl_pct, от которого
+        # считается объём. Считать объём по неквантованному стопу — значит
+        # промахнуться мимо целевого риска.
         info = await client.get_instrument_info(sig.symbol)
         lot  = info.get("lotSizeFilter", {})
         if not lot:
@@ -292,6 +299,46 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             return False
         qty_step = float(lot.get("qtyStep",      "0.001"))
         min_qty  = float(lot.get("minOrderQty",  "0.001"))
+        min_notional = float(lot.get("minNotionalValue", "5") or 5)
+
+        # Квантование SL/TP по tickSize. Bybit валидирует ценовые поля по
+        # priceFilter.tickSize, а _calc_levels отдаёт сырые float'ы — на
+        # символах с мелким шагом НИ ОДНО значение не было кратно тику, и
+        # первый же ордер был бы отвергнут (либо принят без стопа, что есть
+        # рецидивирующий баг №1). Стоп округляем ОТ входа, тейк — К входу:
+        # так квантование не может ужесточить риск и не может завысить цель.
+        tick = float(info.get("priceFilter", {}).get("tickSize", "0") or 0)
+        entry_px = sig.entry
+        sl_px, tp_px = sig.sl, sig.tp2
+        if tick > 0:
+            if sig.direction == "LONG":
+                sl_px = _quantize(sl_px, tick, "down")   # стоп ниже входа — дальше
+                tp_px = _quantize(tp_px, tick, "down")   # тейк выше входа — ближе
+            else:
+                sl_px = _quantize(sl_px, tick, "up")     # стоп выше входа — дальше
+                tp_px = _quantize(tp_px, tick, "up")     # тейк ниже входа — ближе
+            if sl_px <= 0 or tp_px <= 0 or abs(sl_px - entry_px) <= 0:
+                log.warning(f"{sig.symbol}: после квантования по тику {tick} стоп вырожден — пропуск")
+                _forget_symbol(sig.symbol)
+                return False
+
+        # sl_pct пересчитывается от КВАНТОВАННОГО стопа — именно он поедет на биржу
+        sl_pct = abs(entry_px - sl_px) / entry_px * 100
+        if sl_pct <= 0:
+            _forget_symbol(sig.symbol)
+            return False
+
+        # Position size: risk RISK_PER_TRADE% of balance
+        risk_usdt     = balance * cfg.RISK_PER_TRADE / 100
+        position_usdt = risk_usdt / (sl_pct / 100)  # notional value
+
+        # Cap by max margin: never use more than MAX_MARGIN_PCT% of balance as margin
+        max_notional_margin = balance * cfg.MAX_MARGIN_PCT / 100 * cfg.LEVERAGE
+        # Also cap at balance × leverage to avoid margin rejection
+        max_notional = min(balance * cfg.LEVERAGE, max_notional_margin)
+        if position_usdt > max_notional:
+            position_usdt = max_notional
+            log.debug(f"{sig.symbol}: notional capped to {max_notional:.2f}")
 
         qty = _round_step(position_usdt / sig.entry, qty_step)
         if qty < min_qty:
@@ -300,7 +347,7 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         # qty < min_qty: _round_step округляет к БЛИЖАЙШЕМУ шагу, поэтому
         # qty 0.51 при шаге 1 превращалась в 1.0 (риск ×1.96) и проверка
         # min_qty не срабатывала вовсе — потолок риска обходился молча.
-        actual_risk = qty * sig.entry * sig.sl_pct / 100
+        actual_risk = qty * entry_px * sl_pct / 100
         # Два потолка: относительный (допуск на округление лота) и АБСОЛЮТНЫЙ
         # (инвариант проекта — не более 3% баланса). Раньше был только первый,
         # и при RISK_PER_TRADE=3% округление вверх давало 4% фактического
@@ -315,8 +362,10 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             _forget_symbol(sig.symbol)
             return False
 
-        if qty * sig.entry < 5.0:
-            log.debug(f"{sig.symbol}: notional {qty*sig.entry:.2f} < 5 USDT min")
+        # minNotionalValue из инструмента, а не хардкод 5.0: у части символов
+        # минимум другой, и ордер отвергался бы биржей.
+        if qty * entry_px < min_notional:
+            log.debug(f"{sig.symbol}: notional {qty*entry_px:.2f} < {min_notional} USDT min")
             _forget_symbol(sig.symbol)
             return False
 
@@ -333,7 +382,7 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
 
         # Use TP2 (1:2 R:R) as primary target — more likely to be hit than TP3
         result = await client.place_order(
-            symbol=sig.symbol, side=side, qty=qty, sl=sig.sl, tp=sig.tp2,
+            symbol=sig.symbol, side=side, qty=qty, sl=sl_px, tp=tp_px,
         )
 
         ret_code = result.get("retCode", -1)
@@ -388,8 +437,8 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         order_id = result.get("result", {}).get("orderId", "")
         pos = Position(
             symbol=sig.symbol, side=side,
-            entry=sig.entry, sl=sig.sl,
-            tp1=sig.tp1, tp2=sig.tp2, tp3=sig.tp3,
+            entry=sig.entry, sl=sl_px,
+            tp1=sig.tp1, tp2=tp_px, tp3=sig.tp3,
             qty=qty, score=sig.score,
             signal_type=sig.signal_type, order_id=order_id,
         )
@@ -444,11 +493,20 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             # проскальзывания = 4.6% баланса). Считаем по фактической цене.
             fill_px  = float(live_pos.get("avgPrice") or 0)
             fill_qty = abs(float(live_pos.get("size") or 0))
-            if fill_px > 0 and fill_qty > 0 and sig.sl > 0:
-                real_risk = fill_qty * abs(fill_px - sig.sl)
+            if fill_px > 0 and fill_qty > 0 and sl_px > 0:
+                real_risk = fill_qty * abs(fill_px - sl_px)
                 if real_risk > balance * 3.0 / 100:
-                    allowed_qty = _round_step(
-                        (balance * 3.0 / 100) / abs(fill_px - sig.sl), qty_step)
+                    # ВНИЗ, а не к ближайшему: округление вверх оставляло
+                    # left_risk выше потолка, и следующая проверка отправляла
+                    # здоровую позицию в полное закрытие (спред + две
+                    # тейкер-комиссии). На крупном шаге лота оно же съедало
+                    # весь excess, и позиция жила с риском 3.25% — то есть
+                    # инвариант пробивался. Для потолка риска корректно
+                    # только округление вниз.
+                    allowed_qty = math.floor(
+                        (balance * 3.0 / 100) / abs(fill_px - sl_px) / qty_step
+                    ) * qty_step
+                    allowed_qty = round(allowed_qty, 8)
                     excess = _round_step(fill_qty - allowed_qty, qty_step)
                     log.error(
                         f"{sig.symbol}: проскальзывание подняло риск до "
@@ -477,8 +535,11 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
                                     # риск реально ушёл под потолок, а не просто
                                     # уменьшился — иначе «сокращено» маскировало
                                     # позицию, всё ещё несущую >3% риска.
-                                    left_risk = qty * abs(fill_px - sig.sl)
-                                    if left_risk > balance * 3.0 / 100:
+                                    left_risk = qty * abs(fill_px - sl_px)
+                                    # допуск в один шаг лота: иначе превышение
+                                    # на доли цента гонит позицию в закрытие
+                                    tol = qty_step * abs(fill_px - sl_px)
+                                    if left_risk > balance * 3.0 / 100 + tol:
                                         log.critical(
                                             f"{sig.symbol}: сокращение залилось частично — "
                                             f"риск всё ещё {left_risk/balance*100:.2f}% "
@@ -512,7 +573,7 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             log.warning(f"{sig.symbol}: TP не прикрепился (SL={exch_sl}) — досылаю takeProfit")
             tp_ok = False
             try:
-                tp_ok = await client.set_trading_stop(sig.symbol, tp=sig.tp2)
+                tp_ok = await client.set_trading_stop(sig.symbol, tp=tp_px)
             except Exception as te:
                 log.warning(f"{sig.symbol}: не удалось дослать TP — {te}")
             if not tp_ok:

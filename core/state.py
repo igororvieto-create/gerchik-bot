@@ -32,6 +32,11 @@ class Signal:
     flow_span_min: float = 0.0   # сколько минут покрывает лента
     flow_absorb:   bool  = False # усилие есть, движения нет = поглощение
     sl_pct:      float    = 0.0
+    # Метка 4h-свечи, по которой построен сигнал. Нужна для дедупа: один
+    # сетап = один сигнал. Раньше навешивалась на объект динамически
+    # (sig._candle_ts) — работало только потому, что у dataclass нет
+    # __slots__, и молча сломалось бы при их добавлении.
+    candle_ts:   int      = 0
     ts:          datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> dict:
@@ -108,7 +113,10 @@ class AppState:
         self.last_scan_at: Optional[datetime] = None
         self.scan_count: int = 0
         self.total_signals: int = 0
-        self.positions: Dict[str, Position] = {}
+        # Optional[Position]: значение None — это sentinel заброни-
+        # рованного слота на время enter_trade. Тип отражает реальность,
+        # иначе mypy не сможет ловить настоящие None-разыменования здесь.
+        self.positions: Dict[str, Optional[Position]] = {}
         # symbol → (side, started_at) для входов В ПОЛЁТЕ. Слот в positions
         # резервируется значением None, которое стороны не несёт, поэтому
         # MAX_SAME_DIRECTION не видел параллельные входы и пропускал третий

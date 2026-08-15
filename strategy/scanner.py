@@ -140,7 +140,7 @@ def _ob_imbalance(ob: dict) -> tuple[float, str]:
     return ratio, "NEUTRAL"
 
 
-def _trend_direction(klines: list, lookback: int = None) -> str:
+def _trend_direction(klines: list, lookback: Optional[int] = None) -> str:
     """Грубый тренд TF: сравниваем текущий закрытый close с close N баров назад."""
     if lookback is None:
         lookback = cfg.MTF_TREND_LOOKBACK
@@ -159,8 +159,8 @@ def _trend_direction(klines: list, lookback: int = None) -> str:
     return "NEUTRAL"
 
 
-def _find_swing_levels(klines: list, price: float = 0.0, lookback: int = None,
-                        wing: int = None, atr: float = 0.0) -> tuple[Optional[float], Optional[float]]:
+def _find_swing_levels(klines: list, price: float = 0.0, lookback: Optional[int] = None,
+                        wing: Optional[int] = None, atr: float = 0.0) -> tuple[Optional[float], Optional[float]]:
     """
     Фрактальный поиск swing low / swing high за последние `lookback` завершённых
     свечей. Возвращает (support, resistance) — БЛИЖАЙШИЕ к цене уровни с
@@ -896,7 +896,7 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             flow_absorb=flow["absorb"],
             sl_pct=levels["sl_pct"],
         )
-        sig._candle_ts = candle_ts   # для дедупа после доставки
+        sig.candle_ts = candle_ts   # для дедупа после доставки
         return sig
     except Exception as e:
         log.warning(f"{symbol}: analysis error — {e}")
@@ -1008,7 +1008,7 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "",
         if last_seen and (now - last_seen) < cooldown:
             continue  # пометка свечи ещё не поставлена — сигнал не потерян
         state.signal_seen[sig.symbol] = now
-        ct = getattr(sig, "_candle_ts", None)
+        ct = sig.candle_ts or None
         if ct is not None:
             _SIGNALLED_CANDLE[sig.symbol] = ct
 

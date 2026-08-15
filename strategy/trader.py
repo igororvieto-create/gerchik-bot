@@ -753,11 +753,12 @@ async def monitor_positions(client: BybitClient) -> None:
                     # enter_trade следом рапортовал успешный вход по позиции,
                     # которой на бирже уже нет.
                     continue
-                lp = live_map.get(sym)
-                if lp is None:
+                lp_opt = live_map.get(sym)
+                if lp_opt is None:
                     log.warning(f"{sym}: зависшая бронь входа, позиции на бирже нет — слот освобождён")
                     _forget_symbol(sym)
                     continue
+                lp = lp_opt
                 # Позиция всё-таки открылась. Берём под учёт: следующие ветки
                 # этого же цикла проверят стоп и при необходимости починят его.
                 try:

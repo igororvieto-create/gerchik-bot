@@ -114,47 +114,59 @@ async def test_expired_excluded_from_winrate(legacy_db):
 
 
 # ── Конфиг ───────────────────────────────────────────────────────────────────
+#
+# Проверяется в ОТДЕЛЬНОМ ПРОЦЕССЕ, а не через importlib.reload.
+# reload создаёт новый объект cfg, но модули, уже сделавшие
+# `from core.config import cfg`, продолжают держать старый — а те, что
+# импортируются ПОСЛЕ, получают новый, собранный с подставленными env.
+# Из-за этого набор падал плавающе, в зависимости от порядка тестов.
+# Подпроцесс исключает протечку полностью.
 
-@pytest.mark.parametrize("env,attr,expected", [
-    ({"LEVERAGE": "inf"}, "LEVERAGE", 5),          # OverflowError ронял импорт
-    ({"RISK_PER_TRADE": "nan"}, "RISK_PER_TRADE", 1.0),   # nan проходил мимо клампов
-    ({"LEVERAGE": "99"}, "LEVERAGE", 5),           # инвариант: плечо <= 5
-    ({"RISK_PER_TRADE": "10"}, "RISK_PER_TRADE", 3.0),    # инвариант: риск <= 3%
-    ({"SCAN_INTERVAL_MIN": "0.5"}, "SCAN_INTERVAL_MIN", 1),   # 0 -> интервал 1 секунда
-    ({"ABORT_ON_LEVERAGE_FAIL": "enabled"}, "ABORT_ON_LEVERAGE_FAIL", True),  # мусор -> дефолт
-    ({"REQUIRE_MTF_ALIGN": "off"}, "REQUIRE_MTF_ALIGN", False),
+def _cfg_value(env: dict, expr: str) -> str:
+    import subprocess
+    import os as _os
+    code = (
+        "import json\n"
+        "from core.config import cfg\n"
+        f"print(json.dumps({expr}))\n"
+    )
+    envs = dict(_os.environ)
+    envs.update({k: str(v) for k, v in env.items()})
+    envs["PYTHONPATH"] = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       text=True, env=envs, timeout=60)
+    assert r.returncode == 0, f"импорт конфига упал: {r.stderr[-500:]}"
+    import json as _json
+    return _json.loads(r.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize("env,expr,expected", [
+    ({"LEVERAGE": "inf"}, "cfg.LEVERAGE", 5),              # OverflowError ронял импорт
+    ({"RISK_PER_TRADE": "nan"}, "cfg.RISK_PER_TRADE", 1.0),  # nan проходил мимо клампов
+    ({"LEVERAGE": "99"}, "cfg.LEVERAGE", 5),               # инвариант: плечо <= 5
+    ({"RISK_PER_TRADE": "10"}, "cfg.RISK_PER_TRADE", 3.0),   # инвариант: риск <= 3%
+    ({"SCAN_INTERVAL_MIN": "0.5"}, "cfg.SCAN_INTERVAL_MIN", 1),  # 0 -> интервал 1 секунда
+    ({"ABORT_ON_LEVERAGE_FAIL": "enabled"}, "cfg.ABORT_ON_LEVERAGE_FAIL", True),  # мусор -> дефолт
+    ({"REQUIRE_MTF_ALIGN": "off"}, "cfg.REQUIRE_MTF_ALIGN", False),
+    ({"TRADE_FLOW_LIMIT": "99999"}, "cfg.TRADE_FLOW_LIMIT", 1000),
 ])
-def test_env_parsing_is_hardened(env, attr, expected, monkeypatch):
-    for k, v in env.items():
-        monkeypatch.setenv(k, v)
-    for mod in [m for m in sys.modules if m.startswith("core.config")]:
-        del sys.modules[mod]
-    import core.config as conf
-    importlib.reload(conf)
-    assert getattr(conf.cfg, attr) == expected
+def test_env_parsing_is_hardened(env, expr, expected):
+    assert _cfg_value(env, expr) == expected
 
 
-def test_risk_times_positions_cannot_exceed_daily_limit(monkeypatch):
+def test_risk_times_positions_cannot_exceed_daily_limit():
     """Полный набор позиций не должен пробивать дневной лимит разом."""
-    monkeypatch.setenv("RISK_PER_TRADE", "3.0")
-    monkeypatch.setenv("MAX_POSITIONS", "20")
-    for mod in [m for m in sys.modules if m.startswith("core.config")]:
-        del sys.modules[mod]
-    import core.config as conf
-    importlib.reload(conf)
-    worst = conf.cfg.RISK_PER_TRADE * conf.cfg.MAX_POSITIONS
-    assert worst <= conf.cfg.DAILY_LOSS_LIMIT_PCT
+    worst, limit = _cfg_value(
+        {"RISK_PER_TRADE": "3.0", "MAX_POSITIONS": "20"},
+        "[cfg.RISK_PER_TRADE * cfg.MAX_POSITIONS, cfg.DAILY_LOSS_LIMIT_PCT]")
+    assert worst <= limit
 
 
-def test_display_threshold_cannot_exceed_trade_threshold(monkeypatch):
+def test_display_threshold_cannot_exceed_trade_threshold():
     """MIN_SCORE выше TRADE_MIN_SCORE делал торговый порог фиктивным."""
-    monkeypatch.setenv("MIN_SCORE", "60")
-    monkeypatch.setenv("TRADE_MIN_SCORE", "45")
-    for mod in [m for m in sys.modules if m.startswith("core.config")]:
-        del sys.modules[mod]
-    import core.config as conf
-    importlib.reload(conf)
-    assert conf.cfg.TRADE_MIN_SCORE >= conf.cfg.MIN_SCORE
+    mn, trade = _cfg_value({"MIN_SCORE": "60", "TRADE_MIN_SCORE": "45"},
+                           "[cfg.MIN_SCORE, cfg.TRADE_MIN_SCORE]")
+    assert trade >= mn
 
 
 # ── Сериализация цен для биржи ───────────────────────────────────────────────

@@ -162,7 +162,7 @@ async def debug(request: Request):
     if (deny := _require_token(request)) is not None:
         return deny
     from core.config import cfg
-    info = {
+    info: dict = {
         "auto_trade":    cfg.AUTO_TRADE,
         "min_score":     cfg.MIN_SCORE,
         "api_key_set":   bool(cfg.BYBIT_API_KEY),
@@ -481,7 +481,7 @@ async def update_settings(request: Request):
             return v.strip().lower() in ("true", "1", "yes")
         raise ValueError(f"ожидается true/false, получено {v!r}")
 
-    spec = {
+    spec: dict = {
         "auto_trade":      (_as_bool, None,     None),
         "min_score":       (int,   5,           100),
         "trade_min_score": (int,   5,           100),

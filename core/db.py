@@ -432,7 +432,7 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
         out["recent"] = [
             {"symbol": r["symbol"], "score": r["score"], "dir": r["direction"],
              "type": r["signal_type"], "outcome": r["outcome"], "ts": r["ts"]}
-            for r in rows[:25]
+            for r in list(rows)[:25]
         ]
         return out
     except Exception as e:
@@ -500,7 +500,10 @@ async def get_realized_pnl_since(closed_after_iso: str) -> float:
             (closed_after_iso,),
         ) as cur:
             row = await cur.fetchone()
-    return float(row[0] or 0.0)
+    # Агрегат всегда даёт ровно одну строку, но проверка явная: молчаливый
+    # TypeError здесь ушёл бы в _ensure_daily_state и остановил торговлю
+    # с невнятной причиной в логе.
+    return float(row[0] or 0.0) if row else 0.0
 
 
 async def get_trades(limit: int = 50) -> List[Dict]:

@@ -40,7 +40,7 @@ def _fmt_price(v: float) -> str:
 
 class BybitClient:
     def __init__(self, api_key: str = "", secret: str = "",
-                 extra_proxies: List[str] = None):
+                 extra_proxies: Optional[List[str]] = None):
         self.api_key = api_key
         self.secret = secret
         self._session: Optional[aiohttp.ClientSession] = None
@@ -186,7 +186,7 @@ class BybitClient:
     async def _raw_post(self, url: str, sign_fn: Callable[[], Dict], data: str) -> Tuple[int, str]:
         return await self._raw_request("POST", url, sign_fn, data)
 
-    async def _get(self, path: str, params: Dict = None, auth: bool = False) -> Dict:
+    async def _get(self, path: str, params: Optional[Dict] = None, auth: bool = False) -> Dict:
         params = params or {}
         query = urlencode(sorted(params.items()))
         url = BASE_URL + path + (f"?{query}" if query else "")
@@ -212,7 +212,7 @@ class BybitClient:
                 await asyncio.sleep(2 ** attempt)
         return {}
 
-    async def _post(self, path: str, body: dict = None) -> Dict:
+    async def _post(self, path: str, body: Optional[dict] = None) -> Dict:
         raw = json.dumps(body or {})
         url = BASE_URL + path
         for attempt in range(3):

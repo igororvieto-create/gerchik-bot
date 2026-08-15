@@ -21,6 +21,25 @@ _EVALUATING = False
 _MAX_AGE_HOURS = 48
 
 
+def _mfe(direction: str, entry: float, sl: float, klines: list) -> float:
+    """Максимальный ход В ПЛЮС в единицах R по всему окну.
+
+    Отдельно от _judge намеренно: у EXPIRED вердикта нет, а `_judge(...) or
+    (None, None, 0.0)` подставлял ноль КАЖДОМУ просроченному сигналу —
+    функция детерминирована, повторный вызов давал то же None. Именно у
+    LOSS и EXPIRED эта величина и информативна (у WIN она тавтологична),
+    а доля EXPIRED доходит до 90% при широких стопах.
+    """
+    risk = abs(entry - sl) if entry > 0 else 0.0
+    if risk <= 0:
+        return 0.0
+    best = 0.0
+    for k in klines:
+        fav = (k["high"] - entry) if direction == "LONG" else (entry - k["low"])
+        best = max(best, fav / risk)
+    return best
+
+
 def _judge(direction: str, sl: float, tp2: float, klines: list,
            entry: float = 0.0) -> tuple[str, float, float] | None:
     """Walk candles chronologically; return (outcome, price, mfe_r) or None.
@@ -36,6 +55,10 @@ def _judge(direction: str, sl: float, tp2: float, klines: list,
     mfe_r — максимальный ход В ПЛЮС в единицах R до момента исхода. Нужен,
     чтобы оценивать пороги переноса по фактическим данным, а не по модели.
     """
+    if direction not in ("LONG", "SHORT"):
+        # Раньше всё, кроме "LONG", молча трактовалось как SHORT — тот же
+        # класс, что рецидив «NEUTRAL превращается в шорт» в сканере.
+        return None
     if entry <= 0:
         entry = 0.0
     risk = abs(entry - sl) if entry > 0 else 0.0
@@ -68,12 +91,17 @@ def _judge(direction: str, sl: float, tp2: float, klines: list,
         if hit_tp:
             return "WIN", tp2, mfe_r
 
-        # Взводим безубыток по ЗАКРЫТОЙ свече: внутри свечи неизвестно,
-        # был ли ход в плюс до или после касания стопа, и взвод по хвосту
-        # той же свечи завышал бы результат.
+        # Взвод по ЗАКРЫТИЮ свечи, а не по её хвосту. Иначе свеча, которая
+        # дотянулась до порога хвостом и закрылась ниже безубытка, ставила
+        # cur_sl ВЫШЕ рынка, и следующая свеча давала исход BE по цене, до
+        # которой рынок в тот момент не доходил, — то есть смещение В ПОЛЬЗУ
+        # переноса (1.1% исходов при пороге 0.3R).
         if be_arm and not armed and mfe_r >= be_arm:
-            armed = True
-            cur_sl = be_price
+            close = k.get("close", 0.0)
+            reached = (close >= be_price) if direction == "LONG" else (close <= be_price)
+            if reached:
+                armed = True
+                cur_sl = be_price
     return None
 
 
@@ -145,8 +173,8 @@ async def evaluate_signal_outcomes(client: BybitClient) -> None:
                     last_close = relevant[-1]["close"]
                     # MFE у просроченного тоже полезен: показывает, насколько
                     # близко сетап подходил к цели, прежде чем застрять.
-                    _, _, mfe = _judge(row["direction"], row["sl"], row["tp2"],
-                                       relevant, entry=row["entry"] or 0.0) or (None, None, 0.0)
+                    mfe = _mfe(row["direction"], row["entry"] or 0.0,
+                               row["sl"], relevant)
                     await db.set_signal_outcome(row["id"], "EXPIRED", last_close, mfe_r=mfe)
                     decided += 1
             except Exception as e:

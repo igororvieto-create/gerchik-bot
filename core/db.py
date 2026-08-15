@@ -287,7 +287,15 @@ async def set_signal_outcome(signal_id: int, outcome: str, price: float,
         log.error(f"set_signal_outcome error: {e}")
 
 
-def _ev(slot: Dict) -> Dict:
+# Круговые издержки: тейкер 0.055% × 2 + типичное проскальзывание.
+# В единицах R это FEE_PCT / sl_pct, то есть для узкого стопа они В РАЗЫ
+# тяжелее: при стопе 0.7% это 0.19R, при 7% — 0.019R. Без этой поправки
+# срез by_sl_atr смещён в пользу узких стопов на ~0.15R — больше любого
+# правдоподобного реального эффекта, и сравнивать корзины нельзя.
+ROUND_TRIP_FEE_PCT = 0.13
+
+
+def _ev(slot: Dict, sl_pct: Optional[float] = None) -> Dict:
     """Винрейт и матожидание в R.
 
     С переносом стопа в безубыток одного винрейта мало: исход BE даёт ~0R и
@@ -301,7 +309,18 @@ def _ev(slot: Dict) -> Dict:
     decided = win + loss
     out: Dict = {"winrate": round(win / decided * 100, 1) if decided else None}
     total = win + loss + be
-    out["ev_r"] = round((win * 2.0 + be * 0.0 + loss * -1.0) / total, 3) if total else None
+    if not total:
+        out["ev_r"] = None
+        out["ev_gross_r"] = None
+        return out
+    gross = (win * 2.0 + be * 0.0 + loss * -1.0) / total
+    out["ev_gross_r"] = round(gross, 3)
+    # Комиссия вычитается по СРЕДНЕМУ стопу корзины: в R она зависит от
+    # ширины стопа, поэтому одна константа для всех корзин снова дала бы
+    # смещение.
+    fee_r = (ROUND_TRIP_FEE_PCT / sl_pct) if (sl_pct and sl_pct > 0) else 0.0
+    out["ev_r"] = round(gross - fee_r, 3)
+    out["fee_r"] = round(fee_r, 3)
     return out
 
 
@@ -413,30 +432,38 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             ) as cur:
                 rows = await cur.fetchall()
 
-        def _acc(d: Dict, key: str, outcome: str) -> None:
-            slot = d.setdefault(key, {"win": 0, "loss": 0, "be": 0, "expired": 0})
+        def _acc(d: Dict, key: str, outcome: str, sl_pct=None) -> None:
+            slot = d.setdefault(key, {"win": 0, "loss": 0, "be": 0, "expired": 0,
+                                      "_sl_sum": 0.0, "_sl_n": 0})
             k = outcome.lower()
             if k in slot:
                 slot[k] += 1
+            if sl_pct and sl_pct > 0:
+                slot["_sl_sum"] += sl_pct
+                slot["_sl_n"] += 1
 
         for r in rows:
-            _acc(out["by_score"], _bucket(r["score"]), r["outcome"])
-            _acc(out["by_direction"], r["direction"], r["outcome"])
-            _acc(out["by_type"], r["signal_type"], r["outcome"])
+            _sl = r["sl_pct"]
+            _acc(out["by_score"], _bucket(r["score"]), r["outcome"], _sl)
+            _acc(out["by_direction"], r["direction"], r["outcome"], _sl)
+            _acc(out["by_type"], r["signal_type"], r["outcome"], _sl)
             slb = _sl_bucket(r["sl_pct"], r["atr_pct"])
             if slb:
-                _acc(out["by_sl_atr"], slb, r["outcome"])
+                _acc(out["by_sl_atr"], slb, r["outcome"], _sl)
             hrb = _hr_bucket(r["headroom"])
             if hrb:
-                _acc(out["by_headroom"], hrb, r["outcome"])
+                _acc(out["by_headroom"], hrb, r["outcome"], _sl)
             fb = _flow_bucket(r["flow_delta"], r["flow_absorb"], r["flow_span_min"])
             if fb:
-                _acc(out["by_flow"], fb, r["outcome"])
+                _acc(out["by_flow"], fb, r["outcome"], _sl)
 
         for d in (out["by_score"], out["by_direction"], out["by_type"],
                   out["by_sl_atr"], out["by_headroom"], out["by_flow"]):
             for slot in d.values():
-                slot.update(_ev(slot))
+                avg_sl = (slot["_sl_sum"] / slot["_sl_n"]) if slot["_sl_n"] else None
+                slot.update(_ev(slot, avg_sl))
+                slot.pop("_sl_sum", None)
+                slot.pop("_sl_n", None)
 
         out["recent"] = [
             {"symbol": r["symbol"], "score": r["score"], "dir": r["direction"],

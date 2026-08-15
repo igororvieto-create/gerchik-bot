@@ -1268,7 +1268,8 @@ async function openOutcomes(){
         h+=`<div class="drow"><span class="dk">${esc(k)}</span>`
           +`<span class="dv" style="color:${evc}">`
           +`${v.ev_r==null?'—':(v.ev_r>0?'+':'')+v.ev_r+'R'} <span style="color:var(--muted)">`
-          +`(${v.win}W/${v.loss}L${v.be?'/'+v.be+'БУ':''}${v.expired?'/'+v.expired+'E':''}`
+          +`(${v.fee_r?'до комиссий '+(v.ev_gross_r>0?'+':'')+v.ev_gross_r+'R, ':''}`
+          +`${v.win}W/${v.loss}L${v.be?'/'+v.be+'БУ':''}${v.expired?'/'+v.expired+'E':''}`
           +`${v.winrate!=null?', '+v.winrate+'%':''}${dec<10?', мало данных':''})</span></span></div>`;
       }
       return h;
@@ -1289,7 +1290,9 @@ async function openOutcomes(){
     html+=sec('По направлению', d.by_direction);
     html+=sec('По типу сигнала', d.by_type);
     html+=`<div style="margin-top:12px;color:var(--muted);font-size:11px;line-height:1.5">`
-      +`Показано матожидание в R: цель TP2=+2R, стоп −1R, безубыток 0R.`
+      +`Матожидание в R ПОСЛЕ комиссий (тейкер ×2 + проскальзывание ≈0.13% цены).`
+      +` В единицах R издержки тем тяжелее, чем уже стоп: при стопе 0.7% это 0.19R,`
+      +` при 7% — 0.02R. Без этой поправки узкие стопы выглядели бы лучше на ~0.15R.`
       +` Зелёный — срез зарабатывает на дистанции, красный — теряет.`
       +` Процент побед указан в скобках, но решает именно матожидание.</div>`;
     $('outcomes-body').innerHTML=html;

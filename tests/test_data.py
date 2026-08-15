@@ -235,3 +235,20 @@ async def test_flow_buckets_separate_missing_short_and_real(legacy_db):
     assert flow["поглощение"]["loss"] == 1
     # порядок корзин задаётся бэкендом и монотонен
     assert b["_order"]["by_flow"][0] == "продавцы <-0.2"
+
+
+def test_expectancy_subtracts_round_trip_fees():
+    """В единицах R издержки тем тяжелее, чем уже стоп. Без поправки срез
+    by_sl_atr смещён в пользу узких стопов больше, чем любой реальный
+    эффект, и сравнивать корзины нельзя."""
+    import core.db as db
+    slot = {"win": 33, "loss": 67, "be": 0}
+    narrow = db._ev(dict(slot), sl_pct=0.7)
+    wide = db._ev(dict(slot), sl_pct=7.0)
+    assert narrow["ev_gross_r"] == wide["ev_gross_r"], "брутто обязано совпадать"
+    assert narrow["ev_r"] < wide["ev_r"], "издержки не учтены по ширине стопа"
+    assert narrow["fee_r"] == pytest.approx(0.186, abs=0.005)
+    assert wide["fee_r"] == pytest.approx(0.019, abs=0.005)
+    # без sl_pct поправку применить не к чему — брутто и нетто совпадают
+    unknown = db._ev(dict(slot))
+    assert unknown["ev_r"] == unknown["ev_gross_r"]

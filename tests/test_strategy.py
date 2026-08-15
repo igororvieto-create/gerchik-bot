@@ -223,3 +223,32 @@ def test_absorption_requires_effort_without_result():
     assert s._trade_flow(moving)["absorb"] is False
     balanced = [_tr(i * 100, 100.0, 5, "Buy" if i % 2 else "Sell") for i in range(10)]
     assert s._trade_flow(balanced)["absorb"] is False
+
+
+def test_mfe_recorded_for_undecided_signals():
+    """У просроченного сигнала вердикта нет, но MFE обязан считаться:
+    `_judge(...) or (None,None,0.0)` подставлял ноль КАЖДОМУ EXPIRED, а
+    доля EXPIRED доходит до 90% при широких стопах."""
+    from strategy.evaluator import _mfe
+    ks = [k(101.0, 99.5), k(103.4, 100.0), k(101.0, 99.8)]
+    assert _judge("LONG", 98.0, 110.0, ks, entry=100.0) is None
+    assert _mfe("LONG", 100.0, 98.0, ks) == pytest.approx(1.7, abs=0.01)
+
+
+def test_breakeven_arms_on_close_not_wick():
+    """Свеча, дотянувшаяся до порога ХВОСТОМ и закрывшаяся ниже безубытка,
+    ставила стоп ВЫШЕ рынка — исход BE по цене, которой не было."""
+    saved = cfg.BREAKEVEN_AT_R
+    cfg.BREAKEVEN_AT_R = 1.0
+    try:
+        wick = [k(101.0, 99.5), k(99.9, 99.5)]
+        for c in wick:
+            c["close"] = 99.6
+        assert _judge("LONG", 99.0, 104.0, wick, entry=100.0) is None
+    finally:
+        cfg.BREAKEVEN_AT_R = saved
+
+
+def test_unknown_direction_is_refused_not_treated_as_short():
+    assert _judge("", 98.0, 104.0, [k(105.0, 97.0)], entry=100.0) is None
+    assert _judge("NEUTRAL", 98.0, 104.0, [k(105.0, 97.0)], entry=100.0) is None

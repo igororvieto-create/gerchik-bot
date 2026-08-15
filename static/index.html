@@ -277,7 +277,7 @@ input[type=range]::-moz-range-thumb{
 .save-msg{font-size:12px;color:var(--green);text-align:center;height:16px;margin-top:4px;padding:0 20px}
 
 /* ── ALERT BANNER ── */
-#alert{display:none;background:rgba(239,68,68,.1);border-bottom:1px solid rgba(239,68,68,.3);padding:8px 16px;font-size:12px;color:var(--red);text-align:center}
+#alert{display:none;position:sticky;top:52px;z-index:29;background:rgba(239,68,68,.1);border-bottom:1px solid rgba(239,68,68,.3);padding:8px 16px;font-size:12px;color:var(--red);text-align:center}
 #alert.show{display:block}
 
 /* ── TOAST ── */
@@ -350,7 +350,7 @@ input[type=range]::-moz-range-thumb{
     <div class="stat-value" id="s-pos">0</div>
     <div class="stat-sub" id="s-trade">—</div>
   </div>
-  <div class="stat-card" style="cursor:pointer" onclick="openOutcomes()" title="Разбивка по score">
+  <div class="stat-card" style="cursor:pointer" onclick="openOutcomes()" title="Разбивка по срезам">
     <div class="stat-label">Матожидание 7д ▸</div>
     <div class="stat-value v-accent" id="s-wr">—</div>
     <div class="stat-sub" id="s-wr-sub">форвард-тест сигналов</div>
@@ -425,7 +425,7 @@ input[type=range]::-moz-range-thumb{
 <div class="modal" id="outcomes-modal">
   <div class="diag-box" style="max-width:600px">
     <div class="diag-hdr">
-      <h2>📊 Винрейт по срезам (7д)</h2>
+      <h2>📊 Матожидание по срезам (7д)</h2>
       <button class="modal-close" onclick="closeModal('outcomes-modal')">✕</button>
     </div>
     <div id="outcomes-body" style="font-size:12px"></div>
@@ -644,7 +644,7 @@ function buildCard(s, isNew){
     <span class="card-time">${fmtT(s.ts)}</span>
     <div class="card-spacer2"></div>
     <button class="chart-btn" data-sym="${sym}">📊 Graf</button>
-    ${hrBadge(s.headroom)}
+    ${hrBadge(s.headroom, s.score)}
   </div>
 </div>`;
 }
@@ -853,6 +853,8 @@ async function refreshTradeMode(){
   try{
     const d=await fetch('/api/settings').then(r=>r.json());
     $('s-trade').textContent=d.auto_trade?'🤖 Авто':'👁 Мониторинг';
+    if(Number.isFinite(d.min_trade_headroom_r)) gMinHeadroomR=d.min_trade_headroom_r;
+    if(Number.isFinite(d.trade_min_score))      gTradeMinScore=d.trade_min_score;
   }catch{}
 }
 
@@ -860,12 +862,17 @@ async function refreshTradeMode(){
 // поэтому он не различал сигналы вовсе. Показываем запас до цели — именно он
 // решает, возьмёт бот сигнал или нет (trader: headroom < MIN_TRADE_HEADROOM_R
 // -> отказ), и именно его полосу 1.5-2.0R проверяет новый срез в разбивке.
-const MIN_TRADE_HEADROOM_R = 2.0;
-function hrBadge(hr){
+// Пороги приходят с бэкенда: захардкоженные значения врали о решении бота
+// при других настройках в env.
+let gMinHeadroomR = 2.0;
+let gTradeMinScore = 45;
+function hrBadge(hr, score){
   const v = Number(hr);
   if(!Number.isFinite(v) || v <= 0)
     return '<span class="rr-badge" style="color:var(--muted);background:rgba(100,116,139,.12)">запас ?</span>';
-  const ok = v >= MIN_TRADE_HEADROOM_R;
+  // Бот отклоняет сигнал и по score, и по запасу — бейдж обязан учитывать
+  // оба, иначе обещает вход, которого не будет.
+  const ok = v >= gMinHeadroomR && (score == null || score >= gTradeMinScore);
   const col = ok ? 'var(--green)' : 'var(--muted)';
   const bg  = ok ? 'rgba(34,197,94,.12)' : 'rgba(100,116,139,.12)';
   const tag = ok ? '' : ' · не торгуется';
@@ -1020,8 +1027,13 @@ async function doScan(){
     if(saved){ u.searchParams.delete('token'); history.replaceState(null,'',u); }
   }
 })();
+let _memToken='';
 function authHeaders(){
+  // Фолбэк в память: в приватной вкладке и в PWA-контейнере setItem бросает,
+  // и валидный токен из ссылки терялся — закрыть позицию с телефона было
+  // нельзя, хотя токен лежал прямо в адресной строке.
   let t=''; try{ t=localStorage.getItem('dash_token')||''; }catch{}
+  if(!t) t=_memToken;
   return t ? {'X-Dashboard-Token': t} : {};
 }
 // Ввести токен из интерфейса было НЕЛЬЗЯ: единственный путь — ссылка с
@@ -1036,12 +1048,14 @@ function promptToken(){
     return;
   }
   let saved=false;
+  _memToken=t.trim();          // работает и без хранилища, в пределах сессии
   try{ localStorage.setItem('dash_token', t.trim()); saved=true; }catch{}
   if(!saved){
     // Без этой проверки был вечный цикл: setItem бросает (приватная вкладка
     // Safari, PWA-контейнер с отключённым хранилищем), бросок глотался, и
     // location.reload() грузил страницу снова без токена -> 401 -> prompt.
-    showAlert('🔑 Браузер запрещает сохранение — открой обычную вкладку (не приватную)','auth');
+    showAlert('🔑 Токен принят на эту сессию. Браузер запрещает сохранение — '
+             +'в приватной вкладке он забудется при закрытии','auth');
     _tokenPrompted=false;
     return;
   }
@@ -1227,7 +1241,10 @@ async function openOutcomes(){
       if(!all.length){
         // Не молча пропускаем: пустая секция неотличима от «деплой не доехал»
         // и от «get_outcome_breakdown упала» (она отдаёт 200 с пустым срезом).
+        // Подсказку показываем И здесь: именно у пустого нового среза она и
+        // нужна, иначе непонятно, что вообще меряется.
         return `<div style="margin:10px 0 4px;font-weight:700;color:var(--accent)">${esc(title)}</div>`
+             + (hint?`<div style="color:var(--muted);font-size:11px;margin-bottom:4px">${esc(hint)}</div>`:'')
              + `<div style="color:var(--muted);font-size:11px;margin-bottom:4px">нет данных за период</div>`;
       }
       // Порядок из ответа бэкенда; чего в эталоне нет — в хвост по алфавиту.
@@ -1241,7 +1258,10 @@ async function openOutcomes(){
       });
       let h=`<div style="margin:10px 0 4px;font-weight:700;color:var(--accent)">${esc(title)}</div>`;
       if(hint) h+=`<div style="color:var(--muted);font-size:11px;margin-bottom:4px">${esc(hint)}</div>`;
-      keys.sort();
+      // НЕТ keys.sort() — она пережила ввод _order и затирала его
+      // лексикографически: «<1.0 ATR» уезжала третьей, потому что '<' (0x3C)
+      // больше цифр. Ось переставала быть монотонной по ширине стопа, а
+      // именно её монотонность этот срез и измеряет.
       for(const k of keys){
         const v=obj[k], dec=v.win+v.loss;
         const evc = v.ev_r==null?'var(--muted)':(v.ev_r>0?'var(--green)':'var(--red)');
@@ -1254,8 +1274,11 @@ async function openOutcomes(){
       return h;
     };
     const sm=d.summary||{};
-    let html=`<div class="drow"><span class="dk">Всего</span><span class="dv">`
-      +`${sm.win??0}W · ${sm.loss??0}L · ${sm.expired??0}E · ${sm.open??0} ждут</span></div>`;
+    const smc = sm.ev_r==null?'var(--muted)':(sm.ev_r>0?'var(--green)':'var(--red)');
+    let html=`<div class="drow"><span class="dk">Всего</span><span class="dv" style="color:${smc}">`
+      +`${sm.ev_r==null?'—':(sm.ev_r>0?'+':'')+sm.ev_r+'R'} <span style="color:var(--muted)">`
+      +`(${sm.win??0}W/${sm.loss??0}L${sm.be?'/'+sm.be+'БУ':''}/${sm.expired??0}E`
+      +`${sm.winrate!=null?', '+sm.winrate+'%':''}, ${sm.open??0} ждут)</span></span></div>`;
     html+=sec('По score', d.by_score, 'Торгуются только сигналы от TRADE_MIN_SCORE — смотри строку 45-59 и 60+', 'by_score');
     html+=sec('По ленте сделок', d.by_flow,
               'Перевес агрессора из исполненных сделок. Если «покупатели» и «продавцы» дают одинаковое матожидание — метрика бесполезна и в скор её включать нельзя', 'by_flow');

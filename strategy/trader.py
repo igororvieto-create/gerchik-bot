@@ -487,6 +487,17 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
                 break
 
         if verified and live_pos:
+            # Фактическая цена залива ОБЯЗАНА заменить цену сигнала: от
+            # pos.entry считается и безубыток, и весь последующий разбор в R
+            # по таблице trades. При проскальзывании 0.8% «безубыток»
+            # фиксировал бы гарантированный минус в ~11% целевого риска.
+            _fill = float(live_pos.get("avgPrice") or 0)
+            if _fill > 0:
+                pos.entry = _fill
+                try:
+                    await db.update_trade_entry(pos.order_id, sig.symbol, _fill)
+                except Exception as ue:
+                    log.warning(f"{sig.symbol}: не удалось обновить цену входа в БД — {ue}")
             # Инвариант «риск ≤3% баланса» проверялся по sig.entry, а вход идёт
             # ПО РЫНКУ: при проскальзывании реальное расстояние до стопа больше
             # расчётного, и потолок пробивался незамеченным (риск 3% + 0.8%
@@ -612,7 +623,7 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
 
         log.info(
             f"Opened {side} {sig.symbol} qty={qty} "
-            f"entry≈{sig.entry:.4f} SL={sig.sl:.4f} TP={sig.tp2:.4f} "
+            f"entry={pos.entry:.8f} SL={sl_px:.8f} TP={tp_px:.8f} "
             f"risk={risk_usdt:.2f} USDT orderId={order_id}"
         )
         return True
@@ -841,6 +852,21 @@ async def monitor_positions(client: BybitClient) -> None:
                         if fav_r >= cfg.BREAKEVEN_AT_R:
                             fee = pos.entry * cfg.BREAKEVEN_FEE_PCT / 100
                             be = pos.entry + fee if pos.side == "Buy" else pos.entry - fee
+                            # Квантование по сетке биржи — как и для входа.
+                            # Некратная цена либо отвергается (10001) и шлётся
+                            # каждые 30 секунд без счётчика попыток, либо
+                            # принимается с округлением, и тогда сверка не
+                            # сходится: в памяти остаётся старый стоп, а ветка
+                            # восстановления потом ОТКАТЫВАЕТ уже поставленную
+                            # защиту обратно на полный 1R.
+                            _tick = 0.0
+                            try:
+                                _pf = (await client.get_instrument_info(sym)).get("priceFilter", {})
+                                _tick = float(_pf.get("tickSize", "0") or 0)
+                            except Exception:
+                                pass
+                            if _tick > 0:
+                                be = _quantize(be, _tick, "up" if pos.side == "Buy" else "down")
                             # Переносим только ВПЕРЁД: если стоп уже выгоднее
                             # безубытка, трогать его нельзя — это ухудшило бы
                             # защиту уже прибыльной позиции.
@@ -852,7 +878,8 @@ async def monitor_positions(client: BybitClient) -> None:
                                         chk = await client.get_position(sym)
                                         # Подтверждаем чтением: retCode не
                                         # доказывает, что стоп на бирже.
-                                        if chk and abs(float(chk.get("stopLoss") or 0) - be) <= be * 1e-6:
+                                        _tol = max(_tick, be * 1e-6)
+                                        if chk and abs(float(chk.get("stopLoss") or 0) - be) <= _tol:
                                             pos.sl = be
                                             pos.breakeven_done = True
                                             exch_sl = be
@@ -965,6 +992,49 @@ async def monitor_positions(client: BybitClient) -> None:
                                 pos.qty = remaining
                                 _SL_RETRIES[sym] = 0  # остаток — новая цель, даём полный круг попыток
                             log.critical(f"{sym}: аварийное закрытие не завершено — повтор на следующем тике")
+
+        # Сделки, закрывшиеся ПОКА ПРОЦЕСС ЛЕЖАЛ. Оба цикла выше идут от
+        # того, что видно СЕЙЧАС: orphans — по бирже, основной — по памяти.
+        # Позиция, чей стоп сработал во время рестарта, не попадает ни туда,
+        # ни туда: на бирже её уже нет, в памяти ещё нет. Строка в trades
+        # оставалась 'open' с pnl=NULL, а get_realized_pnl_since суммирует
+        # только 'closed' — то есть убыток НИКОГДА не входил в дневной
+        # предохранитель, а через сутки строка становилась 'stale' и
+        # терялась насовсем. При деплое после каждого пуша это штатная
+        # ситуация, а не экзотика.
+        try:
+            for row in await db.get_open_trades():
+                sym_r = row["symbol"]
+                if sym_r in live_map or sym_r in state.positions:
+                    continue
+                opened = row.get("opened_at") or ""
+                try:
+                    op_ts = datetime.fromisoformat(str(opened).rstrip("Z"))
+                except (ValueError, TypeError):
+                    continue
+                # Грейс-период: строка могла быть записана секунду назад
+                # входом, чья позиция ещё не появилась в снимке биржи.
+                if (now_utc - op_ts).total_seconds() < _MIN_POSITION_AGE_S:
+                    continue
+                ghost = Position(
+                    symbol=sym_r, side=row["side"], entry=row["entry"] or 0.0,
+                    sl=row["sl"] or 0.0, tp1=row["tp1"] or 0.0,
+                    tp2=row["tp2"] or 0.0, tp3=row["tp3"] or 0.0,
+                    qty=row["qty"] or 0.0, score=row["score"] or 0,
+                    signal_type=row["signal_type"] or "RESTORED",
+                    order_id=row["order_id"] or "",
+                )
+                ghost.ts = op_ts
+                exit_price, pnl = await fetch_matching_closed_pnl(
+                    client, ghost, attempts=2)
+                await db.save_trade_close(ghost, exit_price=exit_price, pnl=pnl)
+                record_realized_close(pnl)
+                log.warning(
+                    f"{sym_r}: сделка закрылась во время простоя — "
+                    f"учтена задним числом, pnl={pnl:+.2f}"
+                )
+        except Exception as ge:
+            log.error(f"реконсиляция закрытых во время простоя: {ge}")
 
         # Реконсиляция "зависших" open-строк — ПОСЛЕ обработки закрытий:
         # если сделать раньше, строка помечается stale, и последующий

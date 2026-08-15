@@ -17,6 +17,8 @@ log = logging.getLogger("bybit")
 
 BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api.bybit.com")
 RECV_WINDOW = 5000
+# Сколько прокси пробовать в пределах ОДНОГО запроса (см. _raw_request)
+_MAX_PROXY_TRIES = 4
 
 
 def _fmt_price(v: float) -> str:
@@ -147,7 +149,13 @@ class BybitClient:
         last: Optional[Tuple[int, str]] = None
         while True:
             proxy = self._proxy
-            if proxy in tried:
+            # Потолок перебора. Список прокси доходит до 28 (25 от Webshare
+            # + 2 из env + прямое), а _get/_post оборачивают этот перебор
+            # ещё тремя попытками с бэкоффом. При массовом отказе прокси
+            # один запрос занимал до 250 секунд, всё это время монитор
+            # держал _MONITORING=True, и планировщик отбрасывал ~8 тиков
+            # подряд — проверка стопов стояла минутами.
+            if len(tried) >= _MAX_PROXY_TRIES or proxy in tried:
                 # Круг замкнулся: список прокси исчерпан. Возвращаем последний
                 # реальный ответ, если он был, иначе — честная ошибка (раньше
                 # здесь был `break`, функция отдавала None, и вызывающий падал

@@ -341,7 +341,8 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
     # хвост, ось переставала быть монотонной по ширине стопа. Именно её
     # монотонность и есть весь смысл среза: растёт ли винрейт с шириной.
     out["_order"] = {
-        "by_flow":     ["продавцы <-0.2", "нейтрально", "покупатели >+0.2", "поглощение"],
+        "by_flow":     ["продавцы <-0.2", "нейтрально", "покупатели >+0.2",
+                        "поглощение", "лента <1 мин"],
         "by_score":    ["30-44", "45-59", "60+"],
         "by_sl_atr":   ["<1.0 ATR", "1.0-1.5", "1.5-2.5", ">2.5 ATR"],
         "by_headroom": ["1.5-2.0R (не торгуется)", "2.0-3.0R", ">3.0R"],
@@ -365,7 +366,9 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
         if r < 2.5:  return "1.5-2.5"
         return ">2.5 ATR"
 
-    def _flow_bucket(delta, absorb) -> Optional[str]:
+    _FLOW_MIN_SPAN_MIN = 1.0   # лента короче минуты ничего не говорит о 48 часах
+
+    def _flow_bucket(delta, absorb, span_min) -> Optional[str]:
         """Срез по направленному усилию из ленты сделок.
 
         Проверяет ровно один вопрос: предсказывает ли перевес агрессора
@@ -374,6 +377,11 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
         """
         if delta is None:
             return None
+        # Охват обязан учитываться: 500 сделок у ликвидной монеты — это
+        # секунды, у неликвида — часы. Слишком короткая лента попадает в
+        # отдельную корзину, а не смешивается с содержательными.
+        if not span_min or span_min < _FLOW_MIN_SPAN_MIN:
+            return "лента <1 мин"
         if absorb:
             return "поглощение"
         if delta <= -0.2:
@@ -397,7 +405,8 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """SELECT symbol, score, direction, signal_type, outcome, ts,
-                          sl_pct, atr_pct, headroom, flow_delta, flow_absorb
+                          sl_pct, atr_pct, headroom,
+                          flow_delta, flow_absorb, flow_span_min
                    FROM signals WHERE outcome IS NOT NULL AND ts >= ?
                    ORDER BY ts DESC""",
                 (cutoff,),
@@ -420,7 +429,7 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             hrb = _hr_bucket(r["headroom"])
             if hrb:
                 _acc(out["by_headroom"], hrb, r["outcome"])
-            fb = _flow_bucket(r["flow_delta"], r["flow_absorb"])
+            fb = _flow_bucket(r["flow_delta"], r["flow_absorb"], r["flow_span_min"])
             if fb:
                 _acc(out["by_flow"], fb, r["outcome"])
 
@@ -438,6 +447,28 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
     except Exception as e:
         log.error(f"get_outcome_breakdown error: {e}")
         return out
+
+
+async def update_trade_entry(order_id: str, symbol: str, entry: float) -> None:
+    """Заменить цену входа фактической ценой залива.
+
+    save_trade_open пишется ДО верификации (чтобы усыновление после
+    рестарта опознало позицию), поэтому там лежит цена сигнала. Без этой
+    поправки любой последующий разбор в R по таблице trades систематически
+    смещён на величину проскальзывания."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            if order_id:
+                await db.execute(
+                    "UPDATE trades SET entry=? WHERE order_id=? AND status='open'",
+                    (entry, order_id))
+            else:
+                await db.execute(
+                    "UPDATE trades SET entry=? WHERE symbol=? AND status='open'",
+                    (entry, symbol))
+            await db.commit()
+    except Exception as e:
+        log.error(f"update_trade_entry error: {e}")
 
 
 async def get_open_trades() -> List[Dict]:

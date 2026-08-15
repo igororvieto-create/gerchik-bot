@@ -28,7 +28,10 @@ class Signal:
     # Лента исполненных сделок: направленное «усилие» из VSA. Пока ТОЛЬКО
     # измеряется и пишется в БД — на отбор и скор не влияет, пока не
     # наберётся статистика исходов по этим срезам.
-    flow_delta:    float = 0.0   # (покупки-продажи)/оборот по агрессору
+    # None = ленты не было (сбой запроса, TRADE_FLOW_LIMIT=0). Отличать от
+    # 0.0 («поток сбалансирован») обязательно: иначе срез по потоку меряет
+    # не поток, а долю символов с недоступной лентой.
+    flow_delta:    Optional[float] = None  # (покупки-продажи)/оборот по агрессору
     flow_span_min: float = 0.0   # сколько минут покрывает лента
     flow_absorb:   bool  = False # усилие есть, движения нет = поглощение
     sl_pct:      float    = 0.0
@@ -59,7 +62,7 @@ class Signal:
             "tp3":         self.tp3,
             "rr":          round(self.rr, 2),
             "headroom":    round(self.headroom, 2),
-            "flow_delta":   round(self.flow_delta, 3),
+            "flow_delta":   round(self.flow_delta, 3) if self.flow_delta is not None else None,
             "flow_span_min": round(self.flow_span_min, 1),
             "flow_absorb":  self.flow_absorb,
             "sl_pct":      round(self.sl_pct, 2),

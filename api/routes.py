@@ -375,7 +375,11 @@ async def get_status(request: Request):
 
 
 @router.get("/api/outcomes")
-async def get_outcomes(days: int = 7):
+async def get_outcomes(request: Request, days: int = 7):
+    # История сделок и форвард-тест содержат реализованный PnL — тот же
+    # класс данных, что и баланс, ради которого вводился токен.
+    if (deny := _require_token(request)) is not None:
+        return deny
     """Forward-test breakdown: winrate by score bucket, direction, signal type."""
     summary = await db.get_outcome_stats(days=days)
     breakdown = await db.get_outcome_breakdown(days=days)
@@ -383,7 +387,11 @@ async def get_outcomes(days: int = 7):
 
 
 @router.get("/api/trades")
-async def get_trades(limit: int = 50):
+async def get_trades(request: Request, limit: int = 50):
+    # История сделок и форвард-тест содержат реализованный PnL — тот же
+    # класс данных, что и баланс, ради которого вводился токен.
+    if (deny := _require_token(request)) is not None:
+        return deny
     rows = await db.get_trades(limit=limit)
     for r in rows:
         for f in ("opened_at", "closed_at"):
@@ -402,7 +410,10 @@ async def get_signals(hours: int = 24, limit: int = 100):
 
 
 @router.get("/api/stats")
-async def get_stats():
+async def get_stats(request: Request):
+    # daily_realized_pnl — денежная величина; закрываем тем же токеном.
+    if (deny := _require_token(request)) is not None:
+        return deny
     rows = await db.get_recent_signals(hours=24, limit=500)
     by_type: dict[str, int] = {}
     by_dir:  dict[str, int] = {}
@@ -455,6 +466,12 @@ async def get_settings():
         "leverage":            cfg.LEVERAGE,
         "scan_interval_min":   cfg.SCAN_INTERVAL_MIN,
         "signal_cooldown_min": cfg.SIGNAL_COOLDOWN_MIN,
+        # Пороги, по которым фронт решает, возьмёт ли бот сигнал. Раньше он
+        # хардкодил MIN_TRADE_HEADROOM_R=2.0, и при другом значении в env
+        # бейдж «запас» врал о решении бота — ровно тот дефект, ради
+        # которого убрали константный «1:2.0».
+        "min_trade_headroom_r": cfg.MIN_TRADE_HEADROOM_R,
+        "min_rr": cfg.MIN_RR,
     })
 
 
@@ -555,7 +572,7 @@ async def close_position_route(symbol: str, request: Request):
         return JSONResponse({"error": "client not initialized"}, status_code=503)
     from core.state import Position
     from strategy.trader import (fetch_matching_closed_pnl, record_realized_close,
-                                 close_and_verify)
+                                 close_and_verify, _forget_symbol)
     import asyncio as _asyncio
     pos = state.positions.get(symbol)
     if not isinstance(pos, Position):
@@ -582,7 +599,12 @@ async def close_position_route(symbol: str, request: Request):
                 status_code=502,
             )
         is_manual = getattr(pos, "signal_type", "") == "MANUAL"
-        state.positions.pop(symbol, None)
+        # _forget_symbol, а не pop: счётчики попыток обязаны умирать вместе
+        # с позицией. Пользователь жмёт «закрыть» как раз тогда, когда видит
+        # предупреждение о неподтверждённом стопе, то есть при _SL_RETRIES=2 —
+        # и следующая сделка по этому символу шла бы в аварийное закрытие
+        # с первой же осечки.
+        _forget_symbol(symbol)
         if is_manual:
             # Чужая сделка: закрыли по просьбе пользователя, но в историю
             # бота и в дневной предохранитель она не идёт.

@@ -193,3 +193,45 @@ def test_quantized_prices_land_on_exchange_grid(tick, value, mode):
         assert q <= value + tick * 1e-9
     else:
         assert q >= value - tick * 1e-9
+
+
+async def test_flow_buckets_separate_missing_short_and_real(legacy_db):
+    """Срез по ленте не должен смешивать три разные вещи: «данных нет»,
+    «лента короче минуты» и содержательный перекос агрессора. Иначе он
+    меряет долю сбоев запроса, а не предсказательную силу потока."""
+    db, path = legacy_db
+    await db.init_db()
+    now = datetime.utcnow().isoformat()
+    rows = [
+        # (flow_delta, flow_span_min, flow_absorb, outcome)
+        (None,  0.0,  0, "WIN"),    # ленты не было
+        (None,  0.0,  0, "LOSS"),
+        (0.5,   0.2,  0, "WIN"),    # лента слишком короткая
+        (-0.5,  0.3,  0, "LOSS"),
+        (0.45,  30.0, 0, "WIN"),    # содержательный перекос покупателей
+        (-0.45, 30.0, 0, "LOSS"),   # содержательный перекос продавцов
+        (0.02,  30.0, 0, "WIN"),    # реально сбалансированная лента
+        (0.60,  30.0, 1, "LOSS"),   # поглощение
+    ]
+    c = sqlite3.connect(path)
+    for delta, span, absorb, outcome in rows:
+        c.execute(
+            "INSERT INTO signals(symbol,signal_type,direction,score,price,ts,"
+            "outcome,flow_delta,flow_span_min,flow_absorb) "
+            "VALUES('S','VSA_CLIMAX','LONG',60,1.0,?,?,?,?,?)",
+            (now, outcome, delta, span, absorb))
+    c.commit()
+    c.close()
+
+    b = await db.get_outcome_breakdown(days=7)
+    flow = b["by_flow"]
+    # строки без ленты в срез вообще не попадают
+    assert sum(v["win"] + v["loss"] for v in flow.values()) == 6, \
+        "сигналы без ленты не должны попадать в срез по потоку"
+    assert flow["лента <1 мин"]["win"] == 1 and flow["лента <1 мин"]["loss"] == 1
+    assert flow["покупатели >+0.2"]["win"] == 1
+    assert flow["продавцы <-0.2"]["loss"] == 1
+    assert flow["нейтрально"]["win"] == 1
+    assert flow["поглощение"]["loss"] == 1
+    # порядок корзин задаётся бэкендом и монотонен
+    assert b["_order"]["by_flow"][0] == "продавцы <-0.2"

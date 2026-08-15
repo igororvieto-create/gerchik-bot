@@ -200,10 +200,19 @@ def test_flow_reports_time_span():
     assert f["span_min"] == pytest.approx(10.0)
 
 
-def test_flow_handles_empty_and_broken_input():
-    assert s._trade_flow([])["delta"] == 0.0
-    # нулевые объёмы не должны давать деления на ноль
-    assert s._trade_flow([_tr(0, 100, 0, "Buy")])["delta"] == 0.0
+def test_missing_flow_is_none_not_zero():
+    """delta=None означает «ленты не было» и ОБЯЗАНА отличаться от 0.0
+    («поток сбалансирован»). Иначе символы с недоступной лентой попадают
+    в корзину «нейтрально», и срез меряет не поток, а долю сбоев."""
+    assert s._trade_flow([])["delta"] is None
+    # нулевые объёмы — тоже отсутствие данных, а не баланс
+    assert s._trade_flow([_tr(0, 100, 0, "Buy")])["delta"] is None
+    # а вот реально сбалансированная лента даёт именно 0.0
+    balanced = s._trade_flow([_tr(0, 100, 1, "Buy"), _tr(1000, 100, 1, "Sell")])
+    assert balanced["delta"] == pytest.approx(0.0)
+
+
+
 
 
 def test_absorption_requires_effort_without_result():

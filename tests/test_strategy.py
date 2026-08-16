@@ -37,10 +37,30 @@ def test_contradicting_funding_gives_no_points():
 
 def test_neutral_bybit_funding_casts_no_vote():
     """0.01% — базовая ставка Bybit. Порог на ней задавал направление
-    почти всем символам: 2/3 сделок были шортами из-за константы."""
-    long_side, _ = s._direction("SQUEEZE", 0.5, "NEUTRAL", -0.01)
-    short_side, _ = s._direction("SQUEEZE", 0.5, "NEUTRAL", 0.01)
-    assert long_side == short_side, "нейтральная ставка фандинга задаёт направление"
+    почти всем символам: 2/3 сделок были шортами из-за константы.
+
+    price_change=0 обязателен: при ненулевом движении голос цены
+    перевешивает и маскирует голос фандинга — тест проходил бы при ЛЮБОМ
+    пороге (мутационная проверка это и вскрыла)."""
+    # нейтральная ставка не должна давать голоса вовсе -> направления нет
+    assert s._direction("SQUEEZE", 0.0, "NEUTRAL", -0.01)[0] == "NEUTRAL"
+    assert s._direction("SQUEEZE", 0.0, "NEUTRAL", 0.01)[0] == "NEUTRAL"
+    # а действительно экстремальный фандинг голос подаёт, и он контрарен
+    assert s._direction("SQUEEZE", 0.0, "NEUTRAL", -0.05)[0] == "LONG"
+    assert s._direction("SQUEEZE", 0.0, "NEUTRAL", 0.05)[0] == "SHORT"
+
+
+def test_funding_points_start_at_extreme_threshold():
+    """Очки за фандинг тоже обязаны начинаться с FUNDING_EXTREME, иначе
+    базовая ставка биржи подкармливает скор почти каждому символу."""
+    base = dict(oi_change=5.0, vol_ratio=2.2, ob_ratio=0.0, price_change=2.0,
+                vsa_type="NEUTRAL", vsa_bias="NEUTRAL", level_dist_atr=0.9,
+                direction="SHORT")
+    neutral_rate, _ = s._score_signal(funding=0.01, **base)
+    no_funding, _ = s._score_signal(funding=0.0, **base)
+    assert neutral_rate == no_funding, "нейтральная ставка Bybit начислила очки"
+    extreme, _ = s._score_signal(funding=0.05, **base)
+    assert extreme > no_funding, "экстремальный фандинг очков не дал"
 
 
 @pytest.mark.parametrize("sig_type,pchg,fund", [

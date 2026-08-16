@@ -219,13 +219,19 @@ async def test_direction_cap_counts_each_position_once():
         "живая позиция посчиталась дважды (Position + собственная бронь)"
 
 
-async def test_retry_counters_die_with_position():
-    """Счётчики попыток обязаны умирать вместе с символом."""
+async def test_forget_symbol_clears_every_trace():
+    """_forget_symbol обязан снимать ВСЁ: счётчики попыток и бронь входа.
+    Утечка брони раньше останавливала торговлю целиком — направление
+    блокировалось при нуле открытых позиций."""
     tr._SL_RETRIES["ZZZUSDT"] = 2
     tr._TP_RETRIES["ZZZUSDT"] = 3
+    state.positions["ZZZUSDT"] = None
+    state.pending_entries["ZZZUSDT"] = ("Buy", datetime.utcnow())
     tr._forget_symbol("ZZZUSDT")
     assert "ZZZUSDT" not in tr._SL_RETRIES
     assert "ZZZUSDT" not in tr._TP_RETRIES
+    assert "ZZZUSDT" not in state.positions
+    assert "ZZZUSDT" not in state.pending_entries, "бронь входа осталась висеть"
 
 
 # ── Частичное закрытие ───────────────────────────────────────────────────────

@@ -156,6 +156,26 @@ class BybitClient:
             # держал _MONITORING=True, и планировщик отбрасывал ~8 тиков
             # подряд — проверка стопов стояла минутами.
             if len(tried) >= _MAX_PROXY_TRIES or proxy in tried:
+                # Прямое соединение — последний рубеж, и оно ОБЯЗАНО быть
+                # опробовано в пределах одного запроса. Оно стоит последним
+                # в списке, поэтому при 25 прокси от Webshare потолок в 4
+                # попытки до него не добирался: индекс переживает запросы, и
+                # прямое достигалось лишь к СЕДЬМОМУ — шесть отказов подряд,
+                # а для монитора это три минуты без проверки стопов.
+                if None not in tried:
+                    tried.append(None)
+                    try:
+                        kw_d: Dict = {"headers": sign_fn(),
+                                      "timeout": aiohttp.ClientTimeout(total=10, connect=3)}
+                        if data is not None:
+                            kw_d["data"] = data
+                        async with session.request(method, url, **kw_d) as rd:
+                            body_d = await rd.text()
+                            if rd.status < 400:
+                                return rd.status, body_d
+                            last = (rd.status, body_d)
+                    except Exception:
+                        pass
                 # Круг замкнулся: список прокси исчерпан. Возвращаем последний
                 # реальный ответ, если он был, иначе — честная ошибка (раньше
                 # здесь был `break`, функция отдавала None, и вызывающий падал

@@ -120,7 +120,12 @@ async def sw():
 
 
 @router.get("/api/positions")
-async def get_positions():
+async def get_positions(request: Request):
+    # Отдаёт entry/sl/tp2/qty/order_id живых позиций — тот же класс данных,
+    # что баланс: точный уровень стопа и объём публичны для любого, кто
+    # знает адрес Railway.
+    if (deny := _require_token(request)) is not None:
+        return deny
     positions = [p.to_dict() for p in state.positions.values() if p is not None]
     # _sanitize: unrealised_pnl is parsed from Bybit strings — a single NaN
     # would make JSONResponse raise (json.dumps allow_nan=False) and 500 the route

@@ -315,7 +315,6 @@ input[type=range]::-moz-range-thumb{
 </head>
 <body>
 
-<div id="alert"></div>
 <div id="toast"></div>
 
 <div class="topbar">
@@ -328,6 +327,13 @@ input[type=range]::-moz-range-thumb{
   <button class="tb-btn" onclick="openSettings()">⚙️</button>
   <button class="tb-btn primary" id="scan-btn" onclick="doScan()">🔍 Скан</button>
 </div>
+
+<!-- ПОСЛЕ топбара, а не до него. Липкий блок смещается вниз от своей
+     нормальной позиции, поэтому стоя выше топбара он уезжал ровно ПОД
+     него: сообщение о стоп-дне и единственная тапабельная кнопка ввода
+     токена были физически не видны, а на короткой странице (401 ->
+     сигналов нет) их нельзя было даже доскроллить. -->
+<div id="alert"></div>
 
 <div class="stats-row">
   <div class="stat-card">
@@ -760,6 +766,15 @@ async function refreshStats(){
     }
     // Дневной предохранитель: бот остановлен, а карточка показывала «🤖 Авто»,
     // и пользователь считал его вооружённым, пока сигналы шли мимо.
+    if(d.error || d.trading_halted===undefined){
+      // 401 отдаёт валидный JSON {"error":"unauthorized"} — r.json() не
+      // бросает, catch{} не срабатывает, и прежняя ветка else ГАСИЛА
+      // баннер стоп-дня, попутно рисуя «🤖 Авто». То есть ровно та ложь,
+      // ради устранения которой поле trading_halted и вводилось.
+      // «Не знаю» обязано отличаться от «стоп-дня нет».
+      $('s-trade').textContent='🔒 нет доступа';
+      return;
+    }
     if(d.trading_halted){
       $('s-trade').textContent='⛔ Стоп-день';
       showAlert(d.halt_reason==='db_error'
@@ -1012,12 +1027,18 @@ async function doScan(){
 }
 
 /* ── Токен доступа ── */
+// Объявление ДО IIFE ниже: она заполняет _memToken токеном из ссылки, а
+// обращение к let-переменной раньше её объявления даёт ReferenceError.
+let _memToken='';
 // Открой дашборд один раз как ...app/?token=ТВОЙ_ТОКЕН — он сохранится.
 (function(){
   const u = new URL(location.href);
   const t = u.searchParams.get('token');
   if(t){
     let saved=false;
+    // В память — ВСЕГДА: в приватной вкладке и в PWA setItem бросает, и
+    // валидный токен из ссылки терялся, хотя он виден в адресной строке.
+    _memToken=t.trim();
     // trim: сервер сравнивает со .strip()-нутым значением, поэтому ссылка
     // с ?token=abc%20 давала вечный 401 и prompt каждую минуту.
     try{ localStorage.setItem('dash_token', t.trim()); saved=true; }catch{}
@@ -1027,7 +1048,6 @@ async function doScan(){
     if(saved){ u.searchParams.delete('token'); history.replaceState(null,'',u); }
   }
 })();
-let _memToken='';
 function authHeaders(){
   // Фолбэк в память: в приватной вкладке и в PWA-контейнере setItem бросает,
   // и валидный токен из ссылки терялся — закрыть позицию с телефона было

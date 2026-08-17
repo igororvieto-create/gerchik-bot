@@ -165,17 +165,34 @@ async def fetch_matching_closed_pnl(client: BybitClient, pos: Position,
     tz: pos.ts is naive-UTC; naive .timestamp() would use the process's LOCAL
     timezone — replace(tzinfo=utc) keeps this correct even if TZ != UTC."""
     opened_ms = pos.ts.replace(tzinfo=timezone.utc).timestamp() * 1000
+    # Верхняя граница обязательна. Раньше стояла только нижняя, и для
+    # позиции, открытой часы назад, условие выполнялось для ЛЮБОЙ записи —
+    # брался closed[0], то есть САМАЯ СВЕЖАЯ сделка по символу. Это давало
+    # двойной учёт (повторный вход по тому же символу) и занос ЧУЖОГО PnL,
+    # включая ручные сделки пользователя, специально исключённые из
+    # дневного предохранителя. Окно: от открытия до сейчас + запас.
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    upper_ms = now_ms + 60_000
     for i in range(attempts):
         if i:
             await asyncio.sleep(delay)
         try:
             closed = await client.get_closed_pnl(pos.symbol, limit=5)
+            # Самая РАННЯЯ подходящая запись: она соответствует закрытию
+            # именно этой позиции, а не последующей сделке по символу.
+            best = None
             for rec in closed:
                 rec_ms = float(rec.get("updatedTime") or rec.get("createdTime") or 0)
-                if rec_ms >= opened_ms - 60_000:  # 1min slack for clock skew
-                    return float(rec.get("avgExitPrice", 0)), float(rec.get("closedPnl", 0))
+                if opened_ms - 60_000 <= rec_ms <= upper_ms:
+                    if best is None or rec_ms < best[0]:
+                        best = (rec_ms, rec)
+            if best is not None:
+                rec = best[1]
+                return float(rec.get("avgExitPrice", 0)), float(rec.get("closedPnl", 0))
         except Exception as ce:
             log.warning(f"{pos.symbol}: could not fetch closed PnL (attempt {i+1}) — {ce}")
+    # (0.0, 0.0) означает «не нашли», а НЕ «PnL равен нулю» — вызывающий
+    # обязан различать: запись нулём запечатывает строку навсегда.
     return 0.0, 0.0
 
 
@@ -477,9 +494,16 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         live_pos = None
         for attempt in range(3):
             await asyncio.sleep(0.5 if attempt == 0 else 1.5)
-            live_pos = await client.get_position(sig.symbol)
-            if not live_pos:
+            snap = await client.get_position(sig.symbol)
+            if not snap:
                 continue  # None = сбой API, {} = ещё не появилась — обе ждут ретрая
+            # Не затираем последний НЕПУСТОЙ снимок: verified взводится на
+            # первой удачной попытке и не сбрасывается, а live_pos раньше
+            # обнулялся при сбое API в попытках 2-3. Тогда условие
+            # `verified and live_pos` было ложным, и вместе с ним
+            # пропускались И фиксация фактической цены входа, И ПОСТ-проверка
+            # потолка риска 3% по этой цене.
+            live_pos = snap
             exch_sl = float(live_pos.get("stopLoss") or 0)
             exch_tp = float(live_pos.get("takeProfit") or 0)
             verified = True
@@ -1026,8 +1050,24 @@ async def monitor_positions(client: BybitClient) -> None:
                 )
                 ghost.ts = op_ts
                 exit_price, pnl = await fetch_matching_closed_pnl(
-                    client, ghost, attempts=2)
-                await db.save_trade_close(ghost, exit_price=exit_price, pnl=pnl)
+                    client, ghost, attempts=4)
+                if exit_price <= 0 and pnl == 0.0:
+                    # Запись closed-pnl не найдена (гео-блок, 403, лаг
+                    # биржи). Писать (0,0) НЕЛЬЗЯ: строка перестанет быть
+                    # open, следующий тик её не увидит, и убыток потеряется
+                    # НАВСЕГДА — ровно то, что этот блок и должен был
+                    # починить. Оставляем как есть, повторим на след. тике.
+                    log.warning(f"{sym_r}: закрытие во время простоя не подтверждено "
+                                f"биржей — повтор на следующем тике")
+                    continue
+                # PnL идёт в предохранитель ТОЛЬКО после успешной записи:
+                # save_trade_close глушит свои исключения, и при
+                # заблокированной базе один и тот же убыток капал в
+                # счётчик каждые 30 секунд (три тика — тройной убыток).
+                if not await db.save_trade_close(ghost, exit_price=exit_price, pnl=pnl):
+                    log.error(f"{sym_r}: не удалось записать закрытие — "
+                              f"PnL не учтён, повтор на следующем тике")
+                    continue
                 record_realized_close(pnl)
                 log.warning(
                     f"{sym_r}: сделка закрылась во время простоя — "

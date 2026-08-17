@@ -212,7 +212,14 @@ async def save_trade_open(pos: Position) -> None:
         log.error(f"save_trade_open error: {e}")
 
 
-async def save_trade_close(pos: Position, exit_price: float = 0.0, pnl: float = 0.0) -> None:
+async def save_trade_close(pos: Position, exit_price: float = 0.0,
+                           pnl: float = 0.0) -> bool:
+    """True — строка ДЕЙСТВИТЕЛЬНО переведена в closed.
+
+    Возврат нужен для идемпотентности: вызывающий обязан учитывать PnL в
+    дневном предохранителе ТОЛЬКО после успешной записи. Иначе при
+    заблокированной базе (WAL + параллельная чистка) один и тот же убыток
+    капал в счётчик каждые 30 секунд — три тика давали тройной убыток."""
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             # Filter by order_id to avoid closing the wrong row on re-entry
@@ -234,8 +241,10 @@ async def save_trade_close(pos: Position, exit_price: float = 0.0, pnl: float = 
                     (exit_price, pnl, datetime.utcnow().isoformat(), pos.symbol),
                 )
             await db.commit()
+        return True
     except Exception as e:
         log.error(f"save_trade_close error: {e}")
+        return False
 
 
 async def get_recent_signals(hours: int = 24, limit: int = 200) -> List[Dict]:
@@ -295,7 +304,8 @@ async def set_signal_outcome(signal_id: int, outcome: str, price: float,
 ROUND_TRIP_FEE_PCT = 0.13
 
 
-def _ev(slot: Dict, sl_pct: Optional[float] = None) -> Dict:
+def _ev(slot: Dict, sl_pct: Optional[float] = None,
+        fee_r: Optional[float] = None) -> Dict:
     """Винрейт и матожидание в R.
 
     С переносом стопа в безубыток одного винрейта мало: исход BE даёт ~0R и
@@ -318,7 +328,8 @@ def _ev(slot: Dict, sl_pct: Optional[float] = None) -> Dict:
     # Комиссия вычитается по СРЕДНЕМУ стопу корзины: в R она зависит от
     # ширины стопа, поэтому одна константа для всех корзин снова дала бы
     # смещение.
-    fee_r = (ROUND_TRIP_FEE_PCT / sl_pct) if (sl_pct and sl_pct > 0) else 0.0
+    if fee_r is None:
+        fee_r = (ROUND_TRIP_FEE_PCT / sl_pct) if (sl_pct and sl_pct > 0) else 0.0
     out["ev_r"] = round(gross - fee_r, 3)
     out["fee_r"] = round(fee_r, 3)
     return out
@@ -331,6 +342,23 @@ async def get_outcome_stats(days: int = 7) -> Dict:
              "winrate": None, "ev_r": None}
     try:
         async with aiosqlite.connect(DB_PATH) as db:
+            # Средний стоп по РЕШЁННЫМ сигналам: без него _ev не может
+            # вычесть комиссии, и карточка показывала бы БРУТТО, тогда как
+            # срезы показывают НЕТТО. Одно имя поля — две разные величины
+            # на одном экране, вплоть до смены знака (+0.05R зелёным в
+            # шапке против -0.14R красным в срезе по тем же сделкам).
+            async with db.execute(
+                """SELECT AVG(1.0 / sl_pct) FROM signals
+                   WHERE ts >= ? AND outcome IN ('WIN','LOSS','BE')
+                     AND sl_pct IS NOT NULL AND sl_pct > 0""",
+                (cutoff,),
+            ) as cur_sl:
+                row_sl = await cur_sl.fetchone()
+            # AVG(1/sl), а не 1/AVG(sl): усреднение обратной величины —
+            # единственный корректный способ, иначе издержки занижаются.
+            # И только по РЕШЁННЫМ: просрочки в знаменатель EV не входят.
+            avg_fee = (ROUND_TRIP_FEE_PCT * float(row_sl[0])
+                       if (row_sl and row_sl[0]) else None)
             async with db.execute(
                 """SELECT COALESCE(outcome, 'OPEN') o, COUNT(*) c FROM signals
                    WHERE ts >= ? GROUP BY o""",
@@ -342,7 +370,7 @@ async def get_outcome_stats(days: int = 7) -> Dict:
                     elif o == "BE":      stats["be"] = c
                     elif o == "EXPIRED": stats["expired"] = c
                     else:                stats["open"] = c
-        stats.update(_ev(stats))
+        stats.update(_ev(stats, fee_r=avg_fee))
         return stats
     except Exception as e:
         log.error(f"get_outcome_stats error: {e}")
@@ -434,13 +462,19 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
 
         def _acc(d: Dict, key: str, outcome: str, sl_pct=None) -> None:
             slot = d.setdefault(key, {"win": 0, "loss": 0, "be": 0, "expired": 0,
-                                      "_sl_sum": 0.0, "_sl_n": 0})
+                                      "_fee_sum": 0.0, "_fee_n": 0})
             k = outcome.lower()
             if k in slot:
                 slot[k] += 1
-            if sl_pct and sl_pct > 0:
-                slot["_sl_sum"] += sl_pct
-                slot["_sl_n"] += 1
+            # Комиссия копится ПОСТРОЧНО и только по РЕШЁННЫМ исходам.
+            # Усреднение sl_pct занижало издержки: E[1/sl] > 1/E[sl]
+            # (неравенство Йенсена), а EXPIRED-строки, которых нет в
+            # знаменателе матожидания, тянули среднее вверх. На корзине
+            # «10 решённых со стопом 0.7% + 90 просроченных со стопом 5%»
+            # занижение доходило до 6.6 раза — больше самого эффекта.
+            if sl_pct and sl_pct > 0 and k in ("win", "loss", "be"):
+                slot["_fee_sum"] += ROUND_TRIP_FEE_PCT / sl_pct
+                slot["_fee_n"] += 1
 
         for r in rows:
             _sl = r["sl_pct"]
@@ -460,10 +494,10 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
         for d in (out["by_score"], out["by_direction"], out["by_type"],
                   out["by_sl_atr"], out["by_headroom"], out["by_flow"]):
             for slot in d.values():
-                avg_sl = (slot["_sl_sum"] / slot["_sl_n"]) if slot["_sl_n"] else None
-                slot.update(_ev(slot, avg_sl))
-                slot.pop("_sl_sum", None)
-                slot.pop("_sl_n", None)
+                fee = (slot["_fee_sum"] / slot["_fee_n"]) if slot["_fee_n"] else None
+                slot.update(_ev(slot, fee_r=fee))
+                slot.pop("_fee_sum", None)
+                slot.pop("_fee_n", None)
 
         out["recent"] = [
             {"symbol": r["symbol"], "score": r["score"], "dir": r["direction"],
@@ -490,8 +524,16 @@ async def update_trade_entry(order_id: str, symbol: str, entry: float) -> None:
                     "UPDATE trades SET entry=? WHERE order_id=? AND status='open'",
                     (entry, order_id))
             else:
+                # Только САМАЯ СВЕЖАЯ открытая строка: без order_id (ветка
+                # дубликата 110072 и потерянного ответа) общий WHERE
+                # проставлял цену чужого залива всем открытым строкам
+                # символа. save_trade_close рядом делает так же и объясняет
+                # почему — новая функция этот урок не переняла.
                 await db.execute(
-                    "UPDATE trades SET entry=? WHERE symbol=? AND status='open'",
+                    """UPDATE trades SET entry=?
+                       WHERE id = (SELECT id FROM trades
+                                   WHERE symbol=? AND status='open'
+                                   ORDER BY opened_at DESC LIMIT 1)""",
                     (entry, symbol))
             await db.commit()
     except Exception as e:

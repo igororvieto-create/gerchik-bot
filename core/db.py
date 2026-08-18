@@ -79,7 +79,17 @@ async def init_db() -> None:
                     # Лента исполненных сделок: направленное «усилие» VSA.
                     # Пишется, но на решения пока не влияет — сначала
                     # проверяем на исходах, потом (и только потом) включаем.
-                    "flow_delta REAL", "flow_span_min REAL", "flow_absorb INTEGER"]:
+                    "flow_delta REAL", "flow_span_min REAL", "flow_absorb INTEGER",
+                    # Замеры из docs/LITERATURE.md §1 и §3. Как и лента:
+                    # пишутся, но на решения НЕ влияют, пока срез по исходам
+                    # не покажет разницу в ev_r.
+                    # ob_ratio — числовой перекос стакана (в ob_bias лежала
+                    # только корзина); confidence — доля согласных голосов,
+                    # ею ограничивается score, но сам кап на исходах никогда
+                    # не проверялся; round_dist_atr — дистанция до круглого
+                    # числа, механизм Osler (2003), которого нет в нашем
+                    # фрактальном поиске уровней.
+                    "ob_ratio REAL", "confidence REAL", "round_dist_atr REAL"]:
             try:
                 await db.execute(f"ALTER TABLE signals ADD COLUMN {col}")
             except Exception as e:
@@ -167,14 +177,16 @@ async def save_signal(sig: Signal) -> None:
                    (symbol, signal_type, direction, score, price,
                     oi_change, vol_ratio, funding, ob_bias, atr_pct, details,
                     entry, sl, tp1, tp2, tp3, rr, sl_pct, headroom,
-                    flow_delta, flow_span_min, flow_absorb, ts)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    flow_delta, flow_span_min, flow_absorb,
+                    ob_ratio, confidence, round_dist_atr, ts)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (sig.symbol, sig.signal_type, sig.direction, sig.score, sig.price,
                  sig.oi_change, sig.vol_ratio, sig.funding, sig.ob_bias, sig.atr_pct,
                  sig.details,
                  sig.entry, sig.sl, sig.tp1, sig.tp2, sig.tp3, sig.rr, sig.sl_pct,
                  sig.headroom,
                  sig.flow_delta, sig.flow_span_min, int(sig.flow_absorb),
+                 sig.ob_ratio, sig.confidence, sig.round_dist_atr,
                  sig.ts.isoformat()),
             )
             await db.commit()
@@ -382,7 +394,8 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
     The go/no-go analysis tool: shows WHERE the strategy wins or loses."""
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
     out: Dict = {"by_score": {}, "by_direction": {}, "by_type": {},
-                 "by_sl_atr": {}, "by_headroom": {}, "by_flow": {}, "recent": []}
+                 "by_sl_atr": {}, "by_headroom": {}, "by_flow": {},
+                 "by_ob": {}, "by_round": {}, "recent": []}
     # Явный порядок корзин. Фронт сортировал ключи лексикографически, а '<'
     # (0x3C) и '>' (0x3E) больше цифр — крайние корзины уезжали в середину и
     # хвост, ось переставала быть монотонной по ширине стопа. Именно её
@@ -393,6 +406,8 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
         "by_score":    ["30-44", "45-59", "60+"],
         "by_sl_atr":   ["<1.0 ATR", "1.0-1.5", "1.5-2.5", ">2.5 ATR"],
         "by_headroom": ["1.5-2.0R (не торгуется)", "2.0-3.0R", ">3.0R"],
+        "by_ob":       ["стакан за", "стакан нейтр.", "стакан против"],
+        "by_round":    ["<0.25 ATR", "0.25-0.75", ">0.75 ATR"],
     }
 
     def _bucket(score: int) -> str:
@@ -437,6 +452,38 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             return "покупатели >+0.2"
         return "нейтрально"
 
+    def _ob_bucket(ob_bias, direction) -> Optional[str]:
+        """Согласен ли перекос стакана с направлением сделки.
+
+        Стакан — один из четырёх голосов в _direction, то есть при равенстве
+        он способен ЗАДАТЬ направление. Литературной опоры под ним нет:
+        Cont/Kukanov/Stoikov (2014) меряют поток событий на лучших котировках,
+        а мы — статический снимок 20 уровней, это разные величины
+        (docs/LITERATURE.md §3).
+
+        Срез отвечает данными: если «стакан за» и «стакан против» дают
+        одинаковое ev_r, голос не несёт информации. Работает и на СТАРЫХ
+        строках — ob_bias пишется с самого начала.
+        """
+        if not ob_bias or ob_bias == "NEUTRAL":
+            return "стакан нейтр."
+        side = "LONG" if ob_bias == "BUY" else "SHORT"
+        return "стакан за" if side == direction else "стакан против"
+
+    def _round_bucket(d) -> Optional[str]:
+        """Дистанция входа до круглого числа в ATR (Osler 2003).
+
+        Единственный механизм работы уровней, подтверждённый на данных
+        реальных ордеров, — и единственный, которого нет в нашем фрактальном
+        поиске. Если срез «<0.25 ATR» даёт заметно другое ev_r, у уровней
+        появляется признак, который стоит считать.
+        """
+        if d is None:
+            return None
+        if d < 0.25: return "<0.25 ATR"
+        if d < 0.75: return "0.25-0.75"
+        return ">0.75 ATR"
+
     def _hr_bucket(hr) -> Optional[str]:
         """Запас до встречной цели. Торгуются только >=2R
         (MIN_TRADE_HEADROOM_R), полоса 1.5-2.0 показывается, но не торгуется —
@@ -453,7 +500,8 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             async with db.execute(
                 """SELECT symbol, score, direction, signal_type, outcome, ts,
                           sl_pct, atr_pct, headroom,
-                          flow_delta, flow_absorb, flow_span_min
+                          flow_delta, flow_absorb, flow_span_min,
+                          ob_bias, round_dist_atr
                    FROM signals WHERE outcome IS NOT NULL AND ts >= ?
                    ORDER BY ts DESC""",
                 (cutoff,),
@@ -490,9 +538,16 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             fb = _flow_bucket(r["flow_delta"], r["flow_absorb"], r["flow_span_min"])
             if fb:
                 _acc(out["by_flow"], fb, r["outcome"], _sl)
+            obb = _ob_bucket(r["ob_bias"], r["direction"])
+            if obb:
+                _acc(out["by_ob"], obb, r["outcome"], _sl)
+            rb = _round_bucket(r["round_dist_atr"])
+            if rb:
+                _acc(out["by_round"], rb, r["outcome"], _sl)
 
         for d in (out["by_score"], out["by_direction"], out["by_type"],
-                  out["by_sl_atr"], out["by_headroom"], out["by_flow"]):
+                  out["by_sl_atr"], out["by_headroom"], out["by_flow"],
+                  out["by_ob"], out["by_round"]):
             for slot in d.values():
                 fee = (slot["_fee_sum"] / slot["_fee_n"]) if slot["_fee_n"] else None
                 slot.update(_ev(slot, fee_r=fee))

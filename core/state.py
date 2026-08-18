@@ -35,6 +35,16 @@ class Signal:
     flow_span_min: float = 0.0   # сколько минут покрывает лента
     flow_absorb:   bool  = False # усилие есть, движения нет = поглощение
     sl_pct:      float    = 0.0
+    # Замеры без влияния на решение (docs/LITERATURE.md §1 и §3).
+    # ob_ratio: числовой перекос стакана. В БД лежала только корзина ob_bias,
+    # поэтому проверить, добавляет ли голос стакана что-то к ev_r, было
+    # нечем. confidence: доля согласных голосов — ею ограничивается score в
+    # _apply_confluence_cap, но на исходах сам кап никогда не проверялся.
+    # round_dist_atr: дистанция до круглого числа в ATR (Osler 2003) —
+    # механизм, эмпирически объясняющий работу уровней, у нас не используется.
+    ob_ratio:       float = 0.0
+    confidence:     float = 0.0
+    round_dist_atr: Optional[float] = None
     # Метка 4h-свечи, по которой построен сигнал. Нужна для дедупа: один
     # сетап = один сигнал. Раньше навешивалась на объект динамически
     # (sig._candle_ts) — работало только потому, что у dataclass нет
@@ -66,6 +76,10 @@ class Signal:
             "flow_span_min": round(self.flow_span_min, 1),
             "flow_absorb":  self.flow_absorb,
             "sl_pct":      round(self.sl_pct, 2),
+            "ob_ratio":    round(self.ob_ratio, 3),
+            "confidence":  round(self.confidence, 2),
+            "round_dist_atr": (round(self.round_dist_atr, 2)
+                               if self.round_dist_atr is not None else None),
             "ts":          self.ts.isoformat() + "Z",
         }
 

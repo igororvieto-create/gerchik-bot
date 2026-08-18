@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -142,6 +143,32 @@ def _ob_imbalance(ob: dict) -> tuple[float, str]:
     if ratio < -cfg.OB_IMBALANCE_THRESHOLD:
         return ratio, "SELL"
     return ratio, "NEUTRAL"
+
+
+def _round_number_dist_atr(price: float, atr: float) -> Optional[float]:
+    """Расстояние от цены до ближайшего «круглого» числа, в ATR.
+
+    Osler (2003, JF; см. docs/LITERATURE.md §1) на данных реальных ордеров
+    показала, что тейк-профиты кластеризуются НА круглых числах, а стопы —
+    чуть ЗА ними. Наш поиск уровней (`_find_swing_levels`) фрактальный и про
+    круглые числа не знает ничего, то есть эмпирически подтверждённый
+    механизм мы сейчас не используем вовсе.
+
+    Сетка масштабно-инвариантная: шаг = decade/10, то есть два значащих
+    разряда — аналог «00-уровней» на FX, о которых и идёт речь в статье.
+    Для BTC≈111 340 шаг 10 000, для альта 0.0234 — 0.001.
+
+    ВАЖНО: это ТОЛЬКО замер. На score, направление и отбор не влияет, пока
+    срез по исходам не покажет разницу в ev_r (docs/LITERATURE.md §6:
+    порог, подобранный на выборке, нельзя обосновывать той же выборкой).
+    """
+    if price <= 0 or atr <= 0:
+        return None
+    step = 10.0 ** (math.floor(math.log10(price)) - 1)
+    if step <= 0 or math.isinf(step):
+        return None
+    nearest = round(price / step) * step
+    return abs(price - nearest) / atr
 
 
 def _trend_direction(klines: list, lookback: Optional[int] = None) -> str:
@@ -899,6 +926,14 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             flow_span_min=flow["span_min"],
             flow_absorb=flow["absorb"],
             sl_pct=levels["sl_pct"],
+            # Замеры без влияния на решение (docs/LITERATURE.md §3 и §1):
+            # ob_ratio — числовая величина перекоса, а не только корзина
+            # BUY/SELL/NEUTRAL: без неё нельзя проверить, добавляет ли голос
+            # стакана что-либо к ev_r. confidence — доля согласных голосов,
+            # нужна чтобы проверить сам confluence-кап на исходах.
+            ob_ratio=ob_ratio,
+            confidence=confidence,
+            round_dist_atr=_round_number_dist_atr(levels["entry"], atr),
         )
         sig.candle_ts = candle_ts   # для дедупа после доставки
         return sig

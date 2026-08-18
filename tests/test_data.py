@@ -252,3 +252,126 @@ def test_expectancy_subtracts_round_trip_fees():
     # без sl_pct поправку применить не к чему — брутто и нетто совпадают
     unknown = db._ev(dict(slot))
     assert unknown["ev_r"] == unknown["ev_gross_r"]
+
+
+# ── Замеры из docs/LITERATURE.md (пишутся, на решения не влияют) ─────────────
+
+@pytest.mark.parametrize("price,expected_step", [
+    (111340.0, 10000.0),   # BTC: круглые — 110000, 120000
+    (2345.6,   100.0),     # ETH
+    (0.02345,  0.001),     # альт
+    (1.0,      0.1),       # ровно степень десятки
+])
+def test_round_number_grid_is_scale_invariant(price, expected_step):
+    """Osler (2003) про «00-уровни»: сетка обязана масштабироваться вместе с
+    ценой. Фиксированный шаг сделал бы метрику для BTC и для альта разными
+    величинами под одним именем — срез мерял бы цену монеты, а не близость
+    к круглому числу."""
+    from strategy.scanner import _round_number_dist_atr
+    # ATR = шаг сетки → расстояние в ATR обязано лежать в [0, 0.5]
+    d = _round_number_dist_atr(price, expected_step)
+    assert d is not None and 0.0 <= d <= 0.5, \
+        f"{price}: сетка не совпала с ожидаемым шагом {expected_step}"
+    # цена ровно НА круглом числе даёт ноль
+    on_round = round(price / expected_step) * expected_step
+    assert _round_number_dist_atr(on_round, expected_step) == pytest.approx(0.0, abs=1e-9)
+    # ровно посередине между круглыми — максимум 0.5
+    mid = on_round + expected_step / 2
+    assert _round_number_dist_atr(mid, expected_step) == pytest.approx(0.5, abs=1e-6)
+
+
+@pytest.mark.parametrize("price,atr", [(0.0, 1.0), (-5.0, 1.0), (100.0, 0.0), (100.0, -1.0)])
+def test_round_number_returns_none_on_degenerate_input(price, atr):
+    """None означает «не измерено» и в срез не попадает. Ноль на его месте
+    означал бы «вплотную к круглому числу» — то есть сбой замера
+    подмешивался бы в самую интересную корзину."""
+    from strategy.scanner import _round_number_dist_atr
+    assert _round_number_dist_atr(price, atr) is None
+
+
+async def test_measurement_columns_are_written_in_the_right_order(legacy_db):
+    """INSERT перечисляет 26 колонок и 26 значений. Перепутанный ПОРЯДОК не
+    падает — он молча пишет confidence в ob_ratio, и срез потом меряет не то,
+    что называется. Поэтому проверяются именно значения, а не факт записи."""
+    db, path = legacy_db
+    await db.init_db()
+    from core.state import Signal
+    sig = Signal(
+        symbol="ZZZUSDT", signal_type="VSA_CLIMAX", direction="LONG", score=61,
+        price=2.5, oi_change=3.3, vol_ratio=2.2, funding=-0.044, ob_bias="BUY",
+        atr_pct=1.75, details="d", entry=2.51, sl=2.4, tp1=2.6, tp2=2.73,
+        tp3=2.9, rr=2.1, headroom=3.4, sl_pct=4.4,
+        # три величины намеренно РАЗНЫЕ и не равны соседям по INSERT,
+        # иначе перестановка осталась бы незамеченной
+        ob_ratio=0.37, confidence=0.66, round_dist_atr=0.19,
+    )
+    await db.save_signal(sig)
+    row = sqlite3.connect(path).execute(
+        "SELECT ob_ratio, confidence, round_dist_atr, headroom, sl_pct, funding "
+        "FROM signals WHERE symbol='ZZZUSDT'").fetchone()
+    assert row == pytest.approx((0.37, 0.66, 0.19, 3.4, 4.4, -0.044), abs=1e-9)
+
+
+async def test_orderbook_slice_splits_agreement_and_survives_legacy_rows(legacy_db):
+    """Голос стакана задаёт направление при равенстве голосов, а литературной
+    опоры под ним нет (docs/LITERATURE.md §3). Срез обязан отделять «стакан
+    за» от «стакан против» — иначе проверить голос нечем.
+
+    Отдельно: старые строки (round_dist_atr = NULL) обязаны считаться в
+    by_ob и НЕ считаться в by_round. Иначе срез по круглым числам молча
+    получит корзину из строк, где замера не было."""
+    db, path = legacy_db
+    await db.init_db()
+    now = datetime.utcnow().isoformat()
+    rows = [
+        # (direction, ob_bias, round_dist_atr, outcome)
+        ("LONG",  "BUY",     0.10, "WIN"),    # стакан за
+        ("SHORT", "SELL",    None, "WIN"),    # стакан за, замера круглых нет
+        ("LONG",  "SELL",    0.50, "LOSS"),   # стакан против
+        ("SHORT", "BUY",     None, "LOSS"),   # стакан против, замера нет
+        ("LONG",  "NEUTRAL", 0.90, "LOSS"),   # стакан молчит
+        ("LONG",  None,      None, "WIN"),    # совсем старая строка
+    ]
+    c = sqlite3.connect(path)
+    for direction, ob, rd, outcome in rows:
+        c.execute(
+            "INSERT INTO signals(symbol,signal_type,direction,score,price,ts,"
+            "outcome,ob_bias,round_dist_atr) VALUES('S','MOMENTUM',?,60,1.0,?,?,?,?)",
+            (direction, now, outcome, ob, rd))
+    c.commit()
+    c.close()
+
+    b = await db.get_outcome_breakdown(days=7)
+    ob_s, rnd = b["by_ob"], b["by_round"]
+    assert ob_s["стакан за"]["win"] == 2 and ob_s["стакан за"]["loss"] == 0
+    assert ob_s["стакан против"]["loss"] == 2 and ob_s["стакан против"]["win"] == 0
+    # и NEUTRAL, и отсутствующий ob_bias — это «стакан молчит», не «против»
+    assert ob_s["стакан нейтр."]["loss"] == 1 and ob_s["стакан нейтр."]["win"] == 1
+    # все шесть строк учтены срезом по стакану
+    assert sum(v["win"] + v["loss"] for v in ob_s.values()) == 6
+    # а срезом по круглым числам — только три, где замер есть
+    assert sum(v["win"] + v["loss"] for v in rnd.values()) == 3
+    assert rnd["<0.25 ATR"]["win"] == 1
+    assert rnd["0.25-0.75"]["loss"] == 1
+    assert rnd[">0.75 ATR"]["loss"] == 1
+    assert b["_order"]["by_ob"][0] == "стакан за"
+
+
+async def test_new_slices_report_expectancy_not_just_counts(legacy_db):
+    """Решение принимается по ev_r (§0-А п.7). Новые срезы обязаны считать
+    его так же, как старые, — с построчной комиссией."""
+    db, path = legacy_db
+    await db.init_db()
+    now = datetime.utcnow().isoformat()
+    c = sqlite3.connect(path)
+    for outcome in ("WIN", "LOSS", "LOSS"):
+        c.execute(
+            "INSERT INTO signals(symbol,signal_type,direction,score,price,ts,"
+            "outcome,ob_bias,sl_pct) VALUES('S','MOMENTUM','LONG',60,1.0,?,?,'BUY',2.0)",
+            (now, outcome))
+    c.commit()
+    c.close()
+    slot = (await db.get_outcome_breakdown(days=7))["by_ob"]["стакан за"]
+    assert slot["ev_gross_r"] == pytest.approx((2.0 - 1.0 - 1.0) / 3, abs=1e-3)
+    assert slot["ev_r"] < slot["ev_gross_r"], "комиссия не вычтена"
+    assert "_fee_sum" not in slot and "_fee_n" not in slot, "служебные поля утекли в API"

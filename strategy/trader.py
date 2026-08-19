@@ -196,6 +196,50 @@ async def fetch_matching_closed_pnl(client: BybitClient, pos: Position,
     return 0.0, 0.0
 
 
+async def _settle_closed_position(client: BybitClient, pos: Position,
+                                  attempts: int = 4) -> bool:
+    """Записать закрытие и учесть PnL в предохранителе. True — учтено.
+
+    Обе охраны ниже уже стояли в блоке реконсиляции простоя, но три
+    остальных пути закрытия (штатный SL/TP, аварийное закрытие, round-trip
+    прерванного входа) их не имели — а именно штатный путь отрабатывает
+    почти каждое закрытие. Поэтому охрана вынесена сюда, а не скопирована
+    в третий раз: одно место — один инвариант.
+
+    False означает «не учтено, повторим на следующем тике». Вызывающий
+    ОБЯЗАН не звать _forget_symbol при False: позиция должна остаться под
+    наблюдением, иначе повторять будет некому.
+    """
+    exit_price, pnl = await fetch_matching_closed_pnl(client, pos, attempts=attempts)
+    if exit_price <= 0 and pnl == 0.0:
+        # Запись closed-pnl не найдена (лаг биржи, 403 через прокси,
+        # гео-блок). Писать (0,0) НЕЛЬЗЯ: строка перестанет быть open,
+        # следующий тик её не увидит, и реальный убыток исчезнет из
+        # дневного предохранителя НАВСЕГДА, оставшись в истории нулём.
+        log.warning(f"{pos.symbol}: закрытие не подтверждено биржей — "
+                    f"повтор на следующем тике")
+        return False
+    # PnL идёт в предохранитель ТОЛЬКО после успешной записи. Иначе при
+    # заблокированной базе строка остаётся open, символ уже забыт, и блок
+    # реконсиляции в ЭТОМ ЖЕ тике учитывает тот же PnL повторно.
+    outcome = await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
+    if outcome == db.CLOSE_ABSENT:
+        # Переводить нечего: строку уже закрыл другой путь. PnL не наш —
+        # его учёл тот, кто закрыл. Повтор не нужен, слот освобождаем.
+        return True
+    # Проверка ПОЛОЖИТЕЛЬНАЯ: любое неожиданное значение обязано означать
+    # «не учтено». Обратная форма (`if outcome == CLOSE_FAILED: return`)
+    # молча проваливалась в учёт PnL — это поймал существующий тест
+    # test_pnl_not_counted_when_db_write_fails, подавая старое False.
+    if outcome != db.CLOSE_OK:
+        log.error(f"{pos.symbol}: закрытие не записано ({outcome!r}) — "
+                  f"PnL не учтён, повтор на следующем тике")
+        return False
+    record_realized_close(pnl)
+    log.info(f"{pos.symbol}: закрытие учтено exit={exit_price:.4f} pnl={pnl:+.2f}")
+    return True
+
+
 async def _record_round_trip(client: BybitClient, pos: Position,
                              attempts: int = 3) -> None:
     """Persist an open+close round trip (used by emergency close) and feed
@@ -205,12 +249,11 @@ async def _record_round_trip(client: BybitClient, pos: Position,
         await db.save_trade_open(pos)
     except Exception as e:
         log.error(f"{pos.symbol}: save_trade_open (round-trip) failed — {e}")
-    exit_price, pnl = await fetch_matching_closed_pnl(client, pos, attempts=attempts)
-    try:
-        await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
-    except Exception as e:
-        log.error(f"{pos.symbol}: save_trade_close (round-trip) failed — {e}")
-    record_realized_close(pnl)
+    # Не подтвердилось — строка остаётся open, и её подберёт блок
+    # реконсиляции простоя на одном из следующих тиков. Издержки
+    # прерванного входа (комиссии + проскальзывание) реальны и терять их
+    # нельзя, но и записывать нулём вместо них — тоже.
+    await _settle_closed_position(client, pos, attempts=attempts)
 
 
 async def enter_trade(client: BybitClient, sig: Signal) -> bool:
@@ -825,22 +868,23 @@ async def monitor_positions(client: BybitClient) -> None:
                 # отстаёт на несколько секунд. Раньше двух быстрых попыток не
                 # хватало, и убыток писался как pnl=0 — дневной лимит его не видел.
                 await asyncio.sleep(1.0)
-                exit_price, pnl = await fetch_matching_closed_pnl(client, pos, attempts=4)
                 if pos.signal_type == "MANUAL":
                     # Чужая сделка: не пишем в историю бота и не учитываем в
                     # дневном лимите — иначе прибыль ручного трейда могла бы
                     # "разморозить" сработавший предохранитель, а убыток —
                     # остановить автоторговлю без причины.
                     _forget_symbol(sym)
-                    log.info(f"{sym}: ручная позиция закрыта (pnl={pnl:+.2f}) — вне учёта бота")
+                    log.info(f"{sym}: ручная позиция закрыта — вне учёта бота")
                 else:
                     if not pos.order_id:
                         # Восстановленная позиция могла не иметь строки в trades
                         await db.save_trade_open(pos)
-                    await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
+                    # _forget_symbol ТОЛЬКО после успешного учёта: иначе
+                    # неподтверждённое закрытие теряет убыток навсегда, а
+                    # неудачная запись даёт двойной счёт через блок простоя.
+                    if not await _settle_closed_position(client, pos, attempts=4):
+                        continue
                     _forget_symbol(sym)
-                    log.info(f"{sym}: closed (SL/TP) exit={exit_price:.4f} pnl={pnl:+.2f}")
-                    record_realized_close(pnl)
             else:
                 lp = live_map[sym]
                 pos.unrealised_pnl = float(lp.get("unrealisedPnl", 0))
@@ -1001,12 +1045,17 @@ async def monitor_positions(client: BybitClient) -> None:
                         closed, remaining = await close_and_verify(
                             client, sym, pos.side, pos.qty)
                         if closed:
-                            exit_price, pnl = await fetch_matching_closed_pnl(
-                                client, pos, attempts=2)
-                            await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
-                            record_realized_close(pnl)
+                            # attempts=4, как в штатном пути: двух попыток
+                            # (~1.5 с) не хватало на лаг closed-pnl у Bybit,
+                            # и аварийное закрытие писалось нулём.
+                            if not await _settle_closed_position(client, pos, attempts=4):
+                                # Позиция на бирже уже закрыта, но учёт не
+                                # прошёл. Символ НЕ забываем: на следующем
+                                # тике её подберёт ветка «отсутствует в
+                                # снимке» и повторит учёт.
+                                continue
                             _forget_symbol(sym)
-                            log.info(f"{sym}: emergency-closed (no SL) pnl={pnl:+.2f}")
+                            log.info(f"{sym}: emergency-closed (no SL)")
                         else:
                             # Учёт НЕ закрываем: позиция (или её остаток) жива
                             # на бирже. Закрыв строку в trades, мы бы на
@@ -1064,9 +1113,16 @@ async def monitor_positions(client: BybitClient) -> None:
                 # save_trade_close глушит свои исключения, и при
                 # заблокированной базе один и тот же убыток капал в
                 # счётчик каждые 30 секунд (три тика — тройной убыток).
-                if not await db.save_trade_close(ghost, exit_price=exit_price, pnl=pnl):
-                    log.error(f"{sym_r}: не удалось записать закрытие — "
-                              f"PnL не учтён, повтор на следующем тике")
+                outcome_r = await db.save_trade_close(ghost, exit_price=exit_price, pnl=pnl)
+                if outcome_r != db.CLOSE_OK:
+                    # CLOSE_ABSENT: строку уже закрыл штатный путь, PnL им и
+                    # учтён — повторный record_realized_close дал бы ровно
+                    # тот двойной счёт, ради которого охрана и стоит.
+                    # Всё остальное — запись не удалась, повторим на след.
+                    # тике. Проверка положительная: неизвестное значение
+                    # обязано означать «не учтено», а не «учтено».
+                    log.error(f"{sym_r}: закрытие не записано ({outcome_r!r}) — "
+                              f"PnL не учтён")
                     continue
                 record_realized_close(pnl)
                 log.warning(

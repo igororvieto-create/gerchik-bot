@@ -623,8 +623,11 @@ async def close_position_route(symbol: str, request: Request):
         await _asyncio.sleep(1.0)
         exit_price, pnl = await fetch_matching_closed_pnl(
             state.client, pos, attempts=4, delay=1.5)
-        await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl)
-        record_realized_close(pnl)
+        # Ручное закрытие с дашборда: PnL в дневной предохранитель идёт
+        # ТОЛЬКО при подтверждённой записи, иначе блок реконсиляции учтёт
+        # его повторно на ближайшем тике монитора.
+        if await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl) == db.CLOSE_OK:
+            record_realized_close(pnl)
         log.info(f"Position {symbol} closed via dashboard exit={exit_price:.4f} pnl={pnl:+.2f}")
         return JSONResponse({"ok": True, "symbol": symbol,
                              "exit_price": exit_price, "pnl": pnl})

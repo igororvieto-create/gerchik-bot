@@ -256,37 +256,74 @@ def test_expectancy_subtracts_round_trip_fees():
 
 # ── Замеры из docs/LITERATURE.md (пишутся, на решения не влияют) ─────────────
 
-@pytest.mark.parametrize("price,expected_step", [
-    (111340.0, 10000.0),   # BTC: круглые — 110000, 120000
-    (2345.6,   100.0),     # ETH
-    (0.02345,  0.001),     # альт
-    (1.0,      0.1),       # ровно степень десятки
-])
-def test_round_number_grid_is_scale_invariant(price, expected_step):
-    """Osler (2003) про «00-уровни»: сетка обязана масштабироваться вместе с
-    ценой. Фиксированный шаг сделал бы метрику для BTC и для альта разными
-    величинами под одним именем — срез мерял бы цену монеты, а не близость
-    к круглому числу."""
-    from strategy.scanner import _round_number_dist_atr
-    # ATR = шаг сетки → расстояние в ATR обязано лежать в [0, 0.5]
-    d = _round_number_dist_atr(price, expected_step)
-    assert d is not None and 0.0 <= d <= 0.5, \
-        f"{price}: сетка не совпала с ожидаемым шагом {expected_step}"
-    # цена ровно НА круглом числе даёт ноль
-    on_round = round(price / expected_step) * expected_step
-    assert _round_number_dist_atr(on_round, expected_step) == pytest.approx(0.0, abs=1e-9)
-    # ровно посередине между круглыми — максимум 0.5
-    mid = on_round + expected_step / 2
-    assert _round_number_dist_atr(mid, expected_step) == pytest.approx(0.5, abs=1e-6)
+@pytest.mark.parametrize("price", [111340.0, 2345.6, 0.02345, 9.87, 1.02])
+def test_round_metric_is_independent_of_leading_digit(price):
+    """Первая версия делила расстояние на ATR, и метрика мерила НЕ близость к
+    круглому числу, а ВЕДУЩУЮ ЦИФРУ цены: максимум равен 5/(d*atr_pct).
+    Монета за 9.x не могла попасть в дальнюю корзину физически, монета за 1.x
+    попадала туда в 55% случаев — срез сравнивал бы монеты по первой цифре.
+
+    Инвариант: диапазон метрики одинаков при любой цене."""
+    import math
+    from strategy.scanner import _round_number_pos
+    step = 10.0 ** (math.floor(math.log10(price)) - 1)
+    on_round = round(price / step) * step
+    assert _round_number_pos(on_round) == pytest.approx(0.0, abs=1e-9)
+    # Точка ровно посередине между круглыми берётся ВВЕРХ: шаг сетки
+    # считается от самой цены, и вниз через границу декады он меняется
+    # в 10 раз (см. отдельный тест ниже).
+    assert abs(_round_number_pos(on_round + step / 2)) == pytest.approx(1.0, abs=1e-6)
 
 
-@pytest.mark.parametrize("price,atr", [(0.0, 1.0), (-5.0, 1.0), (100.0, 0.0), (100.0, -1.0)])
-def test_round_number_returns_none_on_degenerate_input(price, atr):
+def test_round_metric_grid_shrinks_below_a_power_of_ten():
+    """Явная фиксация свойства, а не умолчание о нём: сетка всегда даёт два
+    значащих разряда, поэтому под степенью десятки шаг в 10 раз мельче.
+    Для 1.05 шаг 0.1, для 0.95 — 0.01. Тест стоит здесь, чтобы смена
+    поведения была видна как падение, а не как молчаливый сдвиг среза."""
+    import math
+    from strategy.scanner import _round_number_pos
+    assert math.isclose(10.0 ** (math.floor(math.log10(1.05)) - 1), 0.1)
+    assert math.isclose(10.0 ** (math.floor(math.log10(0.95)) - 1), 0.01)
+    assert _round_number_pos(0.95) == pytest.approx(0.0, abs=1e-9)   # ровно на сетке
+    assert abs(_round_number_pos(1.05)) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_round_metric_distribution_does_not_depend_on_price_scale():
+    """Прямая проверка того, что было сломано: доля попаданий в корзину
+    «на круглом» обязана совпадать для монет с разной ведущей цифрой."""
+    import random
+    from strategy.scanner import _round_number_pos
+    random.seed(11)
+    shares = []
+    for lead in (1, 2, 5, 9):
+        near = 0
+        for _ in range(4000):
+            price = (lead + random.random()) * 1000.0
+            if abs(_round_number_pos(price)) < 0.2:
+                near += 1
+        shares.append(near / 4000)
+    assert max(shares) - min(shares) < 0.05, (
+        f"доля «на круглом» зависит от ведущей цифры: {shares}")
+
+
+def test_round_metric_keeps_the_sign_osler_needs():
+    """У Osler (2003) круглое ВЫШЕ цены — чужие тейки (тормоз), НИЖЕ — чужие
+    стопы (ускорение). Беззнаковая метрика складывала два противоположных
+    эффекта в одну корзину, где они гасили друг друга."""
+    from strategy.scanner import _round_number_pos
+    # шаг сетки при цене ~1000 равен 100, круглые: 1000, 1100
+    assert _round_number_pos(1005.0) < 0, "ближайшее круглое 1000 — НИЖЕ цены"
+    assert _round_number_pos(1090.0) > 0, "ближайшее круглое 1100 — ВЫШЕ цены"
+    assert abs(_round_number_pos(1050.0)) == pytest.approx(1.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("price", [0.0, -5.0])
+def test_round_metric_returns_none_on_degenerate_input(price):
     """None означает «не измерено» и в срез не попадает. Ноль на его месте
-    означал бы «вплотную к круглому числу» — то есть сбой замера
-    подмешивался бы в самую интересную корзину."""
-    from strategy.scanner import _round_number_dist_atr
-    assert _round_number_dist_atr(price, atr) is None
+    означал бы «точно на круглом числе» — сбой замера подмешивался бы в
+    самую интересную корзину."""
+    from strategy.scanner import _round_number_pos
+    assert _round_number_pos(price) is None
 
 
 async def test_measurement_columns_are_written_in_the_right_order(legacy_db):
@@ -303,13 +340,15 @@ async def test_measurement_columns_are_written_in_the_right_order(legacy_db):
         tp3=2.9, rr=2.1, headroom=3.4, sl_pct=4.4,
         # три величины намеренно РАЗНЫЕ и не равны соседям по INSERT,
         # иначе перестановка осталась бы незамеченной
-        ob_ratio=0.37, confidence=0.66, round_dist_atr=0.19,
+        ob_ratio=0.37, confidence=0.66, round_pos=-0.19,
     )
+    sig.candle_ts = 1755600000000
     await db.save_signal(sig)
     row = sqlite3.connect(path).execute(
-        "SELECT ob_ratio, confidence, round_dist_atr, headroom, sl_pct, funding "
+        "SELECT ob_ratio, confidence, round_pos, candle_ts, headroom, sl_pct, funding "
         "FROM signals WHERE symbol='ZZZUSDT'").fetchone()
-    assert row == pytest.approx((0.37, 0.66, 0.19, 3.4, 4.4, -0.044), abs=1e-9)
+    assert row == pytest.approx(
+        (0.37, 0.66, -0.19, 1755600000000, 3.4, 4.4, -0.044), abs=1e-9)
 
 
 async def test_orderbook_slice_splits_agreement_and_survives_legacy_rows(legacy_db):
@@ -324,19 +363,19 @@ async def test_orderbook_slice_splits_agreement_and_survives_legacy_rows(legacy_
     await db.init_db()
     now = datetime.utcnow().isoformat()
     rows = [
-        # (direction, ob_bias, round_dist_atr, outcome)
-        ("LONG",  "BUY",     0.10, "WIN"),    # стакан за
+        # (direction, ob_bias, round_pos, outcome)
+        ("LONG",  "BUY",     0.05, "WIN"),    # стакан за, вход на круглом
         ("SHORT", "SELL",    None, "WIN"),    # стакан за, замера круглых нет
-        ("LONG",  "SELL",    0.50, "LOSS"),   # стакан против
+        ("LONG",  "SELL",    0.80, "LOSS"),   # стакан против, круглое ВЫШЕ
         ("SHORT", "BUY",     None, "LOSS"),   # стакан против, замера нет
-        ("LONG",  "NEUTRAL", 0.90, "LOSS"),   # стакан молчит
+        ("LONG",  "NEUTRAL", -0.80, "LOSS"),  # стакан молчит, круглое НИЖЕ
         ("LONG",  None,      None, "WIN"),    # совсем старая строка
     ]
     c = sqlite3.connect(path)
     for direction, ob, rd, outcome in rows:
         c.execute(
             "INSERT INTO signals(symbol,signal_type,direction,score,price,ts,"
-            "outcome,ob_bias,round_dist_atr) VALUES('S','MOMENTUM',?,60,1.0,?,?,?,?)",
+            "outcome,ob_bias,round_pos) VALUES('S','MOMENTUM',?,60,1.0,?,?,?,?)",
             (direction, now, outcome, ob, rd))
     c.commit()
     c.close()
@@ -351,10 +390,13 @@ async def test_orderbook_slice_splits_agreement_and_survives_legacy_rows(legacy_
     assert sum(v["win"] + v["loss"] for v in ob_s.values()) == 6
     # а срезом по круглым числам — только три, где замер есть
     assert sum(v["win"] + v["loss"] for v in rnd.values()) == 3
-    assert rnd["<0.25 ATR"]["win"] == 1
-    assert rnd["0.25-0.75"]["loss"] == 1
-    assert rnd[">0.75 ATR"]["loss"] == 1
+    assert rnd["на круглом"]["win"] == 1
+    assert rnd["круглое выше"]["loss"] == 1
+    assert rnd["круглое ниже"]["loss"] == 1
     assert b["_order"]["by_ob"][0] == "стакан за"
+    # знак обязан разделять корзины: обе проигравшие строки лежат в РАЗНЫХ
+    # корзинах, хотя по модулю расстояние у них одинаковое
+    assert rnd["круглое выше"] is not rnd["круглое ниже"]
 
 
 async def test_new_slices_report_expectancy_not_just_counts(legacy_db):
@@ -375,3 +417,66 @@ async def test_new_slices_report_expectancy_not_just_counts(legacy_db):
     assert slot["ev_gross_r"] == pytest.approx((2.0 - 1.0 - 1.0) / 3, abs=1e-3)
     assert slot["ev_r"] < slot["ev_gross_r"], "комиссия не вычтена"
     assert "_fee_sum" not in slot and "_fee_n" not in slot, "служебные поля утекли в API"
+
+
+async def test_save_trade_open_reports_failure(legacy_db):
+    """Строка в trades — ЕДИНСТВЕННЫЙ признак «своя позиция» после рестарта.
+    Пока провал записи был не виден вызывающему, живая позиция бота после
+    ближайшего деплоя усыновлялась как MANUAL, а ручным позициям монитор
+    принципиально не досылает стоп — рецидив бага №1 через слой данных."""
+    db, path = legacy_db
+    await db.init_db()
+    from core.state import Position
+    pos = Position(symbol="AAAUSDT", side="Buy", entry=1.0, sl=0.9, tp1=0, tp2=1.2,
+                   tp3=0, qty=1.0, score=60, signal_type="VSA_CLIMAX", order_id="o1")
+    assert await db.save_trade_open(pos) is True
+    # повторный вызов идемпотентен и тоже успех
+    assert await db.save_trade_open(pos) is True
+    # недоступная база обязана вернуть False, а не None
+    db.DB_PATH = "/nonexistent-dir/x.db"
+    assert await db.save_trade_open(pos) is False
+
+
+async def test_close_distinguishes_write_failure_from_nothing_to_close(legacy_db):
+    """Булева мало: «не удалось записать» требует ПОВТОРА, «переводить
+    нечего» — ровно наоборот. Раньше оба случая давали False, а докстрока
+    обещала проверку rowcount, которой не было: True возвращался при любом
+    успешном commit, включая UPDATE на 0 строк."""
+    db, path = legacy_db
+    await db.init_db()
+    from core.state import Position
+    pos = Position(symbol="BBBUSDT", side="Buy", entry=1.0, sl=0.9, tp1=0, tp2=1.2,
+                   tp3=0, qty=1.0, score=60, signal_type="VSA_CLIMAX", order_id="o2")
+    await db.save_trade_open(pos)
+    assert await db.save_trade_close(pos, exit_price=1.1, pnl=5.0) == db.CLOSE_OK
+    # второй раз переводить уже нечего — и это НЕ провал записи
+    assert await db.save_trade_close(pos, exit_price=1.1, pnl=5.0) == db.CLOSE_ABSENT
+    db.DB_PATH = "/nonexistent-dir/x.db"
+    assert await db.save_trade_close(pos, exit_price=1.1, pnl=5.0) == db.CLOSE_FAILED
+
+
+async def test_candle_dedup_survives_a_restart(legacy_db):
+    """Дедуп «один сетап = один сигнал» жил только в памяти сканера, и каждый
+    деплой Railway его обнулял: та же закрытая 4h-свеча сигналила заново.
+    Три деплоя внутри одной свечи — четыре строки на ОДИН сетап, и все
+    четыре считались независимыми исходами (LITERATURE §5)."""
+    db, path = legacy_db
+    await db.init_db()
+    now = datetime.utcnow().isoformat()
+    c = sqlite3.connect(path)
+    for sym, cts in [("AAAUSDT", 1755600000000), ("AAAUSDT", 1755614400000),
+                     ("BBBUSDT", 1755600000000), ("CCCUSDT", None)]:
+        c.execute("INSERT INTO signals(symbol,signal_type,direction,score,price,ts,"
+                  "candle_ts) VALUES(?,'MOMENTUM','LONG',60,1.0,?,?)", (sym, now, cts))
+    c.commit(); c.close()
+
+    marks = await db.get_recent_candle_marks(hours=8)
+    assert marks["AAAUSDT"] == 1755614400000, "нужна САМАЯ СВЕЖАЯ свеча символа"
+    assert marks["BBBUSDT"] == 1755600000000
+    assert "CCCUSDT" not in marks, "строки без метки не создают ложный дедуп"
+
+    # провал чтения обязан БРОСАТЬ: пустой словарь означал бы «дедупа нет»,
+    # то есть тихое возвращение дублей
+    db.DB_PATH = "/nonexistent-dir/x.db"
+    with pytest.raises(Exception):
+        await db.get_recent_candle_marks(hours=8)

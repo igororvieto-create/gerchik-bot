@@ -272,3 +272,47 @@ def test_breakeven_arms_on_close_not_wick():
 def test_unknown_direction_is_refused_not_treated_as_short():
     assert _judge("", 98.0, 104.0, [k(105.0, 97.0)], entry=100.0) is None
     assert _judge("NEUTRAL", 98.0, 104.0, [k(105.0, 97.0)], entry=100.0) is None
+
+
+def test_vsa_contribution_cannot_contradict_direction():
+    """Инвариант вместо мёртвого кода.
+
+    В _analyze_symbol стоял блок «снять вклад VSA, если он противоречит
+    direction». Перебор всех достижимых состояний даёт НОЛЬ срабатываний:
+    vsa_bias != NEUTRAL влечёт sig_type='VSA_*', а тогда _direction ставит
+    primary = vsa_bias. Блок был украшением и дублировал константы 20/15.
+
+    Тест охраняет сам инвариант: если цепочка когда-нибудь разойдётся,
+    он покраснеет — в отличие от удалённого блока, который молчал."""
+    import strategy.scanner as s
+    contradictions = []
+    for vt, vb in [("CLIMAX", "LONG"), ("CLIMAX", "SHORT"),
+                   ("ABSORPTION", "LONG"), ("ABSORPTION", "SHORT"),
+                   ("NO_DEMAND_SUPPLY", "NEUTRAL"), ("NEUTRAL", "NEUTRAL"),
+                   ("CLIMAX", "NEUTRAL")]:
+        for oi in (-10, -3, 0, 3, 10):
+            for pc in (-2, -0.05, 0, 0.05, 2):
+                for f in (-0.2, 0, 0.2):
+                    for ob in ("BUY", "SELL", "NEUTRAL"):
+                        st = s._classify_type(oi, 3.0, f, pc, vt, vb)
+                        d, _ = s._direction(st, pc, ob, f, vsa_bias=vb)
+                        if vb != "NEUTRAL" and vb != d:
+                            contradictions.append((vt, vb, st, d, oi, pc, f, ob))
+    assert not contradictions, (
+        f"VSA даёт очки против направления в {len(contradictions)} состояниях, "
+        f"первое: {contradictions[0]}")
+
+
+def test_confidence_ignores_the_gap_between_vote_and_tie_break():
+    """Голос цены подаётся при |pc| > 0.1, а тай-брейк работает при любом
+    ненулевом движении. В зазоре primary выведен НЕ из голосов, но согласный
+    голос стакана всё равно вычёркивался: confidence падала с 0.5 до 0.0,
+    кап резал score с 62 до 35, и сигнал терял право на сделку из-за
+    движения цены на 0.05%."""
+    import strategy.scanner as s
+    _, conf_gap = s._direction("SQUEEZE", 0.05, "BUY", 0.05)
+    _, conf_vote = s._direction("SQUEEZE", 0.2, "BUY", 0.05)
+    assert conf_gap == conf_vote, (
+        f"одинаковая структура голосов даёт разную уверенность: "
+        f"{conf_gap} против {conf_vote}")
+    assert s._apply_confluence_cap(62, conf_gap) == 62, "кап срезал полноценный сигнал"

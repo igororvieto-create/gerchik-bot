@@ -393,3 +393,129 @@ async def test_monitoring_flag_released_on_exception(db_tmp, monkeypatch):
     await db_tmp.init_db()
     await tr.monitor_positions(Broken([]))
     assert tr._MONITORING is False
+
+
+# ── Основной путь закрытия (штатный SL/TP) ───────────────────────────────────
+# Блок реконсиляции простоя имел обе охраны, а ОСНОВНОЙ путь — ни одной, хотя
+# именно он отрабатывает почти каждое закрытие. Тесты ниже гоняют позицию из
+# state.positions, исчезнувшую из снимка биржи, а не строку в БД.
+
+async def _tracked_position(db, symbol="MAINUSDT", age_min=30):
+    pos = Position(symbol=symbol, side="Buy", entry=100.0, sl=98.0, tp1=0.0,
+                   tp2=104.0, tp3=0.0, qty=1.0, score=60,
+                   signal_type="VSA_CLIMAX", order_id="ord-main")
+    pos.ts = datetime.utcnow() - timedelta(minutes=age_min)
+    await db.save_trade_open(pos)
+    state.positions[symbol] = pos
+    return pos
+
+
+async def test_main_close_path_does_not_seal_unconfirmed_close(db_tmp):
+    """Биржа не отдала запись closed-pnl (лаг, 403 через прокси). Писать
+    (0,0) НЕЛЬЗЯ: строка перестанет быть open, следующий тик её не увидит,
+    и реальный убыток исчезнет из дневного предохранителя НАВСЕГДА."""
+    db = db_tmp
+    await db.init_db()
+    await _tracked_position(db)
+    ex = FakeExchange(positions=[], closed_pnl=[])   # позиции нет, записи нет
+
+    await tr.monitor_positions(ex)
+
+    row = sqlite3.connect(db.DB_PATH).execute(
+        "SELECT status, pnl FROM trades WHERE symbol='MAINUSDT'").fetchone()
+    assert row[0] == "open", "неподтверждённое закрытие запечатало строку"
+    assert state.daily_realized_pnl == 0.0, "нулевой PnL попал в предохранитель"
+    assert "MAINUSDT" in state.positions, "позиция снята с учёта — повторять некому"
+
+
+async def test_main_close_path_counts_pnl_once_and_frees_the_slot(db_tmp):
+    """Штатный путь: запись найдена, PnL учтён ровно один раз, слот
+    освобождён. Три тика подряд не должны учесть один убыток трижды."""
+    db = db_tmp
+    await db.init_db()
+    pos = await _tracked_position(db)
+    ex = FakeExchange(positions=[], closed_pnl=[{
+        "symbol": "MAINUSDT", "closedPnl": "-12.5", "avgExitPrice": "98.0",
+        "updatedTime": _ms(datetime.utcnow()),
+    }])
+
+    for _ in range(3):
+        await tr.monitor_positions(ex)
+
+    assert state.daily_realized_pnl == pytest.approx(-12.5), \
+        f"PnL учтён не один раз: {state.daily_realized_pnl}"
+    row = sqlite3.connect(db.DB_PATH).execute(
+        "SELECT status, pnl FROM trades WHERE symbol='MAINUSDT'").fetchone()
+    assert row == ("closed", -12.5)
+    assert "MAINUSDT" not in state.positions, "слот не освобождён"
+
+
+async def test_main_close_path_defers_pnl_when_db_write_fails(db_tmp, monkeypatch):
+    """save_trade_close вернула отказ (база занята). PnL учитывать нельзя:
+    строка осталась open, символ ещё под наблюдением, и блок реконсиляции
+    в этом же тике учёл бы тот же убыток повторно."""
+    db = db_tmp
+    await db.init_db()
+    await _tracked_position(db)
+    ex = FakeExchange(positions=[], closed_pnl=[{
+        "symbol": "MAINUSDT", "closedPnl": "-12.5", "avgExitPrice": "98.0",
+        "updatedTime": _ms(datetime.utcnow()),
+    }])
+
+    async def _refuse(*a, **kw):
+        return db.CLOSE_FAILED
+    monkeypatch.setattr(db, "save_trade_close", _refuse)
+
+    for _ in range(3):
+        await tr.monitor_positions(ex)
+
+    assert state.daily_realized_pnl == 0.0, \
+        f"PnL учтён без подтверждённой записи: {state.daily_realized_pnl}"
+    assert "MAINUSDT" in state.positions
+
+
+async def test_main_close_path_does_not_count_a_row_someone_else_closed(db_tmp, monkeypatch):
+    """CLOSE_ABSENT: переводить нечего, строку закрыл другой путь и он же
+    учёл PnL. Повторный учёт дал бы двойной счёт, а вечный повтор — вечно
+    занятый слот. Поэтому: не учитываем, но и не повторяем."""
+    db = db_tmp
+    await db.init_db()
+    await _tracked_position(db)
+    ex = FakeExchange(positions=[], closed_pnl=[{
+        "symbol": "MAINUSDT", "closedPnl": "-12.5", "avgExitPrice": "98.0",
+        "updatedTime": _ms(datetime.utcnow()),
+    }])
+
+    async def _absent(*a, **kw):
+        return db.CLOSE_ABSENT
+    monkeypatch.setattr(db, "save_trade_close", _absent)
+
+    await tr.monitor_positions(ex)
+
+    assert state.daily_realized_pnl == 0.0, "учтён чужой PnL"
+    assert "MAINUSDT" not in state.positions, "слот занят навсегда"
+
+
+async def test_main_close_path_treats_unknown_outcome_as_not_counted(db_tmp, monkeypatch):
+    """Контракт строковый, и проверка обязана быть ПОЛОЖИТЕЛЬНОЙ. Обратная
+    форма (`if outcome == CLOSE_FAILED: return`) молча проваливается в учёт
+    PnL при любом неожиданном значении — например при старом булевом False,
+    который возвращала прежняя версия save_trade_close. Именно так и была
+    внесена регрессия при переходе на три состояния."""
+    db = db_tmp
+    await db.init_db()
+    await _tracked_position(db)
+    ex = FakeExchange(positions=[], closed_pnl=[{
+        "symbol": "MAINUSDT", "closedPnl": "-12.5", "avgExitPrice": "98.0",
+        "updatedTime": _ms(datetime.utcnow()),
+    }])
+
+    async def _legacy_false(*a, **kw):
+        return False          # значение вне трёх состояний контракта
+    monkeypatch.setattr(db, "save_trade_close", _legacy_false)
+
+    await tr.monitor_positions(ex)
+
+    assert state.daily_realized_pnl == 0.0, (
+        f"неизвестный исход записи учтён как успех: {state.daily_realized_pnl}")
+    assert "MAINUSDT" in state.positions, "позиция снята с учёта при неясном исходе"

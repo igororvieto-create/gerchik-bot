@@ -31,6 +31,12 @@ _LISTING_AGE_CACHE: dict[str, float] = {}  # symbol -> launchTime (ms since epoc
 # 4 минуты — раньше одна и та же свеча порождала до 4 сигналов подряд по всё
 # более высокой цене (вход вдогонку), и каждый шёл в статистику отдельно.
 _SIGNALLED_CANDLE: dict[str, int] = {}  # symbol -> ts последней отсигналенной свечи
+# Метки восстанавливаются из БД при первом скане после старта: без этого
+# каждый деплой обнулял дедуп, и одна и та же закрытая свеча сигналила
+# заново. Флаг, а не проверка на пустоту: пустой словарь — законное
+# состояние (за 8 часов сигналов не было), и повторять запрос каждый скан
+# из-за него не нужно.
+_CANDLE_MARKS_LOADED = False
 
 
 async def _is_listing_old_enough(client: BybitClient, symbol: str) -> bool:
@@ -145,30 +151,41 @@ def _ob_imbalance(ob: dict) -> tuple[float, str]:
     return ratio, "NEUTRAL"
 
 
-def _round_number_dist_atr(price: float, atr: float) -> Optional[float]:
-    """Расстояние от цены до ближайшего «круглого» числа, в ATR.
+def _round_number_pos(price: float) -> Optional[float]:
+    """Положение цены между соседними круглыми числами: -1..+1.
 
-    Osler (2003, JF; см. docs/LITERATURE.md §1) на данных реальных ордеров
-    показала, что тейк-профиты кластеризуются НА круглых числах, а стопы —
-    чуть ЗА ними. Наш поиск уровней (`_find_swing_levels`) фрактальный и про
-    круглые числа не знает ничего, то есть эмпирически подтверждённый
-    механизм мы сейчас не используем вовсе.
+    Знак = где круглое число ОТНОСИТЕЛЬНО цены: отрицательное — ближайшее
+    круглое ниже, положительное — выше. По Osler (2003) это разные вещи:
+    над ценой копятся чужие тейк-профиты (тормоз), под ценой — чужие стопы
+    (ускорение при пробое). Беззнаковая метрика складывала два
+    противоположных эффекта в одну корзину, где они гасили друг друга.
 
-    Сетка масштабно-инвариантная: шаг = decade/10, то есть два значащих
-    разряда — аналог «00-уровней» на FX, о которых и идёт речь в статье.
-    Для BTC≈111 340 шаг 10 000, для альта 0.0234 — 0.001.
+    Модуль = доля пройденного пути до ближайшего круглого, 0 — точно на
+    круглом числе, 1 — ровно посередине между двумя.
 
-    ВАЖНО: это ТОЛЬКО замер. На score, направление и отбор не влияет, пока
-    срез по исходам не покажет разницу в ev_r (docs/LITERATURE.md §6:
-    порог, подобранный на выборке, нельзя обосновывать той же выборкой).
+    ПОЧЕМУ НЕ В ATR (исправление собственной ошибки). Первая версия делила
+    расстояние на ATR, и метрика измеряла НЕ близость к круглому числу, а
+    ведущую цифру цены: максимум равен 5/(d*atr_pct), где d — первая цифра.
+    Замер на 20 000 прогонов при atr_pct=2%:
+
+        цена 1.xxx -> корзина «>0.75 ATR» в 54.6% случаев
+        цена 9.xxx -> в 0% случаев, зато «<0.25 ATR» в 95%
+
+    То есть срез сравнивал бы монеты по первой цифре цены. Нормировка на
+    сам шаг сетки от волатильности и от цены не зависит по построению.
+
+    ЭТО ТОЛЬКО ЗАМЕР: на score, направление и отбор не влияет, пока срез по
+    исходам не покажет разницу в ev_r (docs/LITERATURE.md §6).
     """
-    if price <= 0 or atr <= 0:
+    if price <= 0:
         return None
     step = 10.0 ** (math.floor(math.log10(price)) - 1)
     if step <= 0 or math.isinf(step):
         return None
     nearest = round(price / step) * step
-    return abs(price - nearest) / atr
+    # step/2 — максимально возможное расстояние, отсюда модуль в [0, 1]
+    pos = (nearest - price) / (step / 2)
+    return max(-1.0, min(1.0, pos))
 
 
 def _trend_direction(klines: list, lookback: Optional[int] = None) -> str:
@@ -469,7 +486,8 @@ def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
     # Для разворотов голос 24h-цены не учитывается: он всегда против сделки
     # (в том и смысл разворота), из-за чего confluence-кап резал score до 55
     # и ни один контртрендовый вход не мог дойти до TRADE_MIN_SCORE.
-    if not is_reversal and abs(price_change) > 0.1:
+    price_voted = not is_reversal and abs(price_change) > 0.1
+    if price_voted:
         votes.append("LONG" if price_change > 0 else "SHORT")
     if ob_bias != "NEUTRAL":
         votes.append("LONG" if ob_bias == "BUY" else "SHORT")
@@ -515,6 +533,12 @@ def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
             # то есть выше торгового порога) — ровно тот же дефект, что и
             # константный голос фандинга. Нет информации — нет направления.
             primary = _tie_break(price_change)
+            # Голос цены подаётся только при |pc| > 0.1, а тай-брейк работает
+            # при любом ненулевом движении. В зазоре 0 < |pc| <= 0.1 primary
+            # выведен НЕ из голосов, и вычёркивать согласный голос стакана
+            # нельзя: confidence падала с 0.5 до 0.0, кап резал score с 62 до
+            # 35, и сигнал терял право на сделку из-за движения цены на 0.05%.
+            derived_from_votes = price_voted
     elif sig_type == "FUNDING_EXTREME":
         # Тип присваивается при |funding| >= FUNDING_EXTREME — ровно при том
         # же пороге, при котором фандинг подаёт голос. Голос тавтологичен.
@@ -527,7 +551,8 @@ def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
         derived_from_votes = True
         primary = "LONG" if ob_bias == "BUY" else "SHORT"
     else:
-        derived_from_votes = True
+        # Тот же зазор, что и в тай-брейке SQUEEZE выше.
+        derived_from_votes = price_voted
         primary = _tie_break(price_change)
 
     # Голос VSA у разворота тавтологически совпадает с primary — он задаёт
@@ -804,13 +829,16 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             direction=direction,
         )
 
-        # Рецидивирующий баг №2 (CLAUDE.md): VSA начислял до +20 очков ВСЕГДА,
-        # но на направление влиял только если sig_type начинался с "VSA_".
-        # Сетап мог набрать 70 очков, где +20 кричат SHORT, и войти в LONG.
-        # Снимаем вклад VSA, когда он противоречит выбранному направлению.
-        if vsa_bias != "NEUTRAL" and vsa_bias != direction:
-            # Снимаем ровно тот вклад, который был начислен выше
-            score -= 20 if vsa_type == "CLIMAX" else (15 if vsa_type == "ABSORPTION" else 0)
+        # Здесь стояло снятие вклада VSA при расхождении с direction. Блок
+        # был НЕДОСТИЖИМ: перебор всех 1575 достижимых сочетаний
+        # (_vsa_classify × oi × price_change × funding × ob_bias) даёт ноль
+        # срабатываний — цепочка жёсткая: vsa_bias != NEUTRAL влечёт
+        # sig_type = "VSA_*", а тогда _direction ставит primary = vsa_bias.
+        # Реальную защиту от рецидива №2 даёт _score_signal: при
+        # vsa_bias == NEUTRAL очки за VSA не начисляются вовсе. Мёртвый блок
+        # дублировал константы 20/15 из _score_signal — смена веса в одном
+        # месте и не в другом молча разошлась бы. Инвариант проверяется
+        # тестом test_vsa_contribution_cannot_contradict_direction.
 
         # Confluence cap ПОСЛЕ определения направления, ДО порога MIN_SCORE —
         # противоречащий сигнал не должен проходить фильтр на сырой магнитуде
@@ -933,7 +961,7 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             # нужна чтобы проверить сам confluence-кап на исходах.
             ob_ratio=ob_ratio,
             confidence=confidence,
-            round_dist_atr=_round_number_dist_atr(levels["entry"], atr),
+            round_pos=_round_number_pos(levels["entry"]),
         )
         sig.candle_ts = candle_ts   # для дедупа после доставки
         return sig
@@ -951,6 +979,20 @@ async def scan_all(client: BybitClient) -> List[Signal]:
     signals: List[Signal] = []
 
     try:
+        global _CANDLE_MARKS_LOADED
+        if not _CANDLE_MARKS_LOADED:
+            try:
+                marks = await db.get_recent_candle_marks()
+                for _sym, _ts in marks.items():
+                    _SIGNALLED_CANDLE.setdefault(_sym, _ts)
+                _CANDLE_MARKS_LOADED = True
+                log.info(f"scan_all: восстановлено меток свечей из БД — {len(marks)}")
+            except Exception as e:
+                # Не взводим флаг: повторим на следующем скане. Продолжать
+                # без меток можно (дубли хуже пропуска, но не фатальны),
+                # молчать — нельзя.
+                log.error(f"scan_all: не удалось восстановить дедуп свечей — {e}")
+
         tickers = await client.get_tickers()
         tickers = [
             t for t in tickers

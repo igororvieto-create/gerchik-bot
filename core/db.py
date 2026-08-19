@@ -89,7 +89,18 @@ async def init_db() -> None:
                     # не проверялся; round_dist_atr — дистанция до круглого
                     # числа, механизм Osler (2003), которого нет в нашем
                     # фрактальном поиске уровней.
-                    "ob_ratio REAL", "confidence REAL", "round_dist_atr REAL"]:
+                    "ob_ratio REAL", "confidence REAL",
+                    # round_dist_atr остаётся в старых базах как мёртвая
+                    # колонка: она хранит заведомо испорченный замер (мерила
+                    # ведущую цифру цены, разбор в scanner._round_number_pos).
+                    # Новый замер пишется в round_pos, старую не читаем.
+                    "round_dist_atr REAL", "round_pos REAL",
+                    # candle_ts — метка 4h-свечи сетапа. Дедуп «один сетап =
+                    # один сигнал» жил ТОЛЬКО в памяти (_SIGNALLED_CANDLE), и
+                    # каждый деплой обнулял его: та же свеча сигналила заново.
+                    # Три деплоя внутри одной свечи — четыре строки на один
+                    # сетап, и все четыре считались независимыми исходами.
+                    "candle_ts INTEGER"]:
             try:
                 await db.execute(f"ALTER TABLE signals ADD COLUMN {col}")
             except Exception as e:
@@ -178,15 +189,15 @@ async def save_signal(sig: Signal) -> None:
                     oi_change, vol_ratio, funding, ob_bias, atr_pct, details,
                     entry, sl, tp1, tp2, tp3, rr, sl_pct, headroom,
                     flow_delta, flow_span_min, flow_absorb,
-                    ob_ratio, confidence, round_dist_atr, ts)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    ob_ratio, confidence, round_pos, candle_ts, ts)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (sig.symbol, sig.signal_type, sig.direction, sig.score, sig.price,
                  sig.oi_change, sig.vol_ratio, sig.funding, sig.ob_bias, sig.atr_pct,
                  sig.details,
                  sig.entry, sig.sl, sig.tp1, sig.tp2, sig.tp3, sig.rr, sig.sl_pct,
                  sig.headroom,
                  sig.flow_delta, sig.flow_span_min, int(sig.flow_absorb),
-                 sig.ob_ratio, sig.confidence, sig.round_dist_atr,
+                 sig.ob_ratio, sig.confidence, sig.round_pos, sig.candle_ts,
                  sig.ts.isoformat()),
             )
             await db.commit()
@@ -194,7 +205,15 @@ async def save_signal(sig: Signal) -> None:
         log.error(f"save_signal error: {e}")
 
 
-async def save_trade_open(pos: Position) -> None:
+async def save_trade_open(pos: Position) -> bool:
+    """True — строка «позиция бота» существует в trades после этого вызова.
+
+    Возврат обязателен: строка в trades — ЕДИНСТВЕННЫЙ признак «своя
+    позиция» после рестарта. Когда провал записи был не виден вызывающему,
+    живая позиция бота после ближайшего деплоя усыновлялась как MANUAL, а
+    ручным позициям монитор принципиально не досылает стоп — то есть
+    рецидивирующий баг №1 возвращался через слой данных.
+    """
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             # Частичный уникальный индекс покрывает только непустой order_id.
@@ -208,7 +227,7 @@ async def save_trade_open(pos: Position) -> None:
                     (pos.symbol,),
                 ) as cur:
                     if await cur.fetchone():
-                        return
+                        return True   # строка уже есть — идемпотентный успех
             await db.execute(
                 """INSERT OR IGNORE INTO trades
                    (symbol, side, entry, sl, tp1, tp2, tp3, qty,
@@ -220,23 +239,35 @@ async def save_trade_open(pos: Position) -> None:
                  pos.ts.isoformat()),
             )
             await db.commit()
+        return True
     except Exception as e:
         log.error(f"save_trade_open error: {e}")
+        return False
+
+
+# Три исхода записи закрытия. Булева мало: «не удалось записать» требует
+# ПОВТОРА, а «переводить нечего» повтора требует ровно наоборот — иначе
+# позиция навсегда остаётся под наблюдением и держит слот. Раньше оба
+# случая сливались в False, а докстрока обещала проверку, которой не было:
+# True возвращался при любом успешном commit, включая UPDATE на 0 строк.
+CLOSE_OK = "closed"       # строка переведена — PnL учитывать
+CLOSE_FAILED = "failed"   # запись не удалась — повторить на следующем тике
+CLOSE_ABSENT = "absent"   # открытой строки нет — PnL НЕ учитывать, НЕ повторять
 
 
 async def save_trade_close(pos: Position, exit_price: float = 0.0,
-                           pnl: float = 0.0) -> bool:
-    """True — строка ДЕЙСТВИТЕЛЬНО переведена в closed.
+                           pnl: float = 0.0) -> str:
+    """CLOSE_OK — строка ДЕЙСТВИТЕЛЬНО переведена в closed (rowcount >= 1).
 
     Возврат нужен для идемпотентности: вызывающий обязан учитывать PnL в
-    дневном предохранителе ТОЛЬКО после успешной записи. Иначе при
-    заблокированной базе (WAL + параллельная чистка) один и тот же убыток
-    капал в счётчик каждые 30 секунд — три тика давали тройной убыток."""
+    дневном предохранителе ТОЛЬКО после CLOSE_OK. Иначе при заблокированной
+    базе (WAL + параллельная чистка) один и тот же убыток капал в счётчик
+    каждые 30 секунд — три тика давали тройной убыток."""
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             # Filter by order_id to avoid closing the wrong row on re-entry
             if pos.order_id:
-                await db.execute(
+                cur = await db.execute(
                     """UPDATE trades SET status='closed', exit_price=?, pnl=?, closed_at=?
                        WHERE symbol=? AND order_id=? AND status='open'""",
                     (exit_price, pnl, datetime.utcnow().isoformat(), pos.symbol, pos.order_id),
@@ -245,18 +276,50 @@ async def save_trade_close(pos: Position, exit_price: float = 0.0,
                 # No order_id: close only the MOST RECENT open row — a blanket
                 # WHERE symbol+status would stamp every stale open row (e.g.
                 # left over from a crash) with this trade's exit/pnl
-                await db.execute(
+                cur = await db.execute(
                     """UPDATE trades SET status='closed', exit_price=?, pnl=?, closed_at=?
                        WHERE id = (SELECT id FROM trades
                                    WHERE symbol=? AND status='open'
                                    ORDER BY opened_at DESC LIMIT 1)""",
                     (exit_price, pnl, datetime.utcnow().isoformat(), pos.symbol),
                 )
+            moved = cur.rowcount
             await db.commit()
-        return True
+        if moved < 1:
+            # Открытой строки не нашлось: её уже закрыл другой путь, либо
+            # save_trade_open в своё время провалилась. PnL тут учитывать
+            # НЕЛЬЗЯ (двойной счёт), и повторять бессмысленно.
+            log.warning(f"{pos.symbol}: открытой строки для закрытия нет "
+                        f"(order_id={pos.order_id or '-'}) — PnL не учтён")
+            return CLOSE_ABSENT
+        return CLOSE_OK
     except Exception as e:
         log.error(f"save_trade_close error: {e}")
-        return False
+        return CLOSE_FAILED
+
+
+async def get_recent_candle_marks(hours: int = 8) -> Dict[str, int]:
+    """symbol -> метка последней отсигналенной 4h-свечи.
+
+    Дедуп «один сетап = один сигнал» жил только в памяти сканера, поэтому
+    каждый деплой Railway (то есть каждый пуш) обнулял его: та же закрытая
+    свеча сигналила заново и писалась ещё одной строкой. Соседние деплои
+    внутри одной 4-часовой свечи давали несколько строк на ОДИН сетап, и
+    get_outcome_breakdown считал их независимыми наблюдениями — прямо
+    против LITERATURE §5 и §0-А п.6, где n означает независимые исходы.
+
+    Окно 8 часов: свеча 4h плюс запас. БРОСАЕТ при ошибке — пустой словарь
+    здесь означал бы «дедупа нет», то есть тихое возвращение дублей.
+    """
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT symbol, MAX(candle_ts) FROM signals
+               WHERE ts >= ? AND candle_ts IS NOT NULL AND candle_ts > 0
+               GROUP BY symbol""",
+            (cutoff,),
+        ) as cur:
+            return {row[0]: int(row[1]) for row in await cur.fetchall()}
 
 
 async def get_recent_signals(hours: int = 24, limit: int = 200) -> List[Dict]:
@@ -407,7 +470,7 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
         "by_sl_atr":   ["<1.0 ATR", "1.0-1.5", "1.5-2.5", ">2.5 ATR"],
         "by_headroom": ["1.5-2.0R (не торгуется)", "2.0-3.0R", ">3.0R"],
         "by_ob":       ["стакан за", "стакан нейтр.", "стакан против"],
-        "by_round":    ["<0.25 ATR", "0.25-0.75", ">0.75 ATR"],
+        "by_round":    ["круглое ниже", "на круглом", "круглое выше"],
     }
 
     def _bucket(score: int) -> str:
@@ -470,19 +533,23 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
         side = "LONG" if ob_bias == "BUY" else "SHORT"
         return "стакан за" if side == direction else "стакан против"
 
-    def _round_bucket(d) -> Optional[str]:
-        """Дистанция входа до круглого числа в ATR (Osler 2003).
+    def _round_bucket(p) -> Optional[str]:
+        """Положение входа относительно круглого числа (Osler 2003).
 
-        Единственный механизм работы уровней, подтверждённый на данных
-        реальных ордеров, — и единственный, которого нет в нашем фрактальном
-        поиске. Если срез «<0.25 ATR» даёт заметно другое ev_r, у уровней
-        появляется признак, который стоит считать.
+        Знак существенен: круглое ВЫШЕ цены — это чужие тейк-профиты
+        (тормоз), круглое НИЖЕ — чужие стопы (ускорение при пробое).
+        Беззнаковая корзина складывала два противоположных эффекта и
+        гасила их друг о друга.
+
+        Величина нормирована на шаг сетки, а не на ATR: деление на ATR
+        превращало метрику в измеритель ведущей цифры цены (разбор в
+        scanner._round_number_pos).
         """
-        if d is None:
+        if p is None:
             return None
-        if d < 0.25: return "<0.25 ATR"
-        if d < 0.75: return "0.25-0.75"
-        return ">0.75 ATR"
+        if abs(p) < 0.2:
+            return "на круглом"
+        return "круглое выше" if p > 0 else "круглое ниже"
 
     def _hr_bucket(hr) -> Optional[str]:
         """Запас до встречной цели. Торгуются только >=2R
@@ -501,7 +568,7 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
                 """SELECT symbol, score, direction, signal_type, outcome, ts,
                           sl_pct, atr_pct, headroom,
                           flow_delta, flow_absorb, flow_span_min,
-                          ob_bias, round_dist_atr
+                          ob_bias, round_pos
                    FROM signals WHERE outcome IS NOT NULL AND ts >= ?
                    ORDER BY ts DESC""",
                 (cutoff,),
@@ -541,7 +608,7 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             obb = _ob_bucket(r["ob_bias"], r["direction"])
             if obb:
                 _acc(out["by_ob"], obb, r["outcome"], _sl)
-            rb = _round_bucket(r["round_dist_atr"])
+            rb = _round_bucket(r["round_pos"])
             if rb:
                 _acc(out["by_round"], rb, r["outcome"], _sl)
 

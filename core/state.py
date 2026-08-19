@@ -40,11 +40,14 @@ class Signal:
     # поэтому проверить, добавляет ли голос стакана что-то к ev_r, было
     # нечем. confidence: доля согласных голосов — ею ограничивается score в
     # _apply_confluence_cap, но на исходах сам кап никогда не проверялся.
-    # round_dist_atr: дистанция до круглого числа в ATR (Osler 2003) —
-    # механизм, эмпирически объясняющий работу уровней, у нас не используется.
+    # round_pos — ниже, отдельным комментарием.
     ob_ratio:       float = 0.0
     confidence:     float = 0.0
-    round_dist_atr: Optional[float] = None
+    # round_pos: положение между круглыми числами, -1..+1 (знак = круглое
+    # число ниже/выше цены). Заменил round_dist_atr, который мерил не
+    # близость к круглому, а ведущую цифру цены — разбор в
+    # scanner._round_number_pos.
+    round_pos:      Optional[float] = None
     # Метка 4h-свечи, по которой построен сигнал. Нужна для дедупа: один
     # сетап = один сигнал. Раньше навешивалась на объект динамически
     # (sig._candle_ts) — работало только потому, что у dataclass нет
@@ -78,8 +81,8 @@ class Signal:
             "sl_pct":      round(self.sl_pct, 2),
             "ob_ratio":    round(self.ob_ratio, 3),
             "confidence":  round(self.confidence, 2),
-            "round_dist_atr": (round(self.round_dist_atr, 2)
-                               if self.round_dist_atr is not None else None),
+            "round_pos":   (round(self.round_pos, 3)
+                            if self.round_pos is not None else None),
             "ts":          self.ts.isoformat() + "Z",
         }
 

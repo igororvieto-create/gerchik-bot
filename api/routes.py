@@ -436,6 +436,7 @@ async def get_stats(request: Request):
         "by_direction": by_dir,
         "outcomes_7d":  outcomes,
         "scan_count":   state.scan_count,
+        "last_scan_found": state.last_scan_found,
         "last_scan_at": state.last_scan_at.isoformat() + "Z" if state.last_scan_at else None,
         # Сканер намеренно двигает счётчик и время даже при провале, поэтому
         # без этого поля HTTP-фолбэк рисовал растущий «Скан #43» и зелёный

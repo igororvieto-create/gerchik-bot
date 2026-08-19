@@ -967,7 +967,16 @@ async def scan_all(client: BybitClient) -> List[Signal]:
         log.info(f"scan_all: {len(tickers)} symbols to scan "
                  f"(batch={cfg.SCAN_BATCH_SIZE} delay={cfg.SCAN_BATCH_DELAY}s)")
         if not tickers:
+            # Ветка «0 символов» обходила учёт: счётчик скана замирал, ошибка
+            # не выставлялась, и дашборд продолжал показывать номер и число
+            # находок ПРЕДЫДУЩЕГО удачного скана. Снаружи недоступный Bybit
+            # выглядел как работающий бот. Ровно тот случай, ради которого
+            # ветка except ниже намеренно двигает счётчик.
             log.warning("scan_all: 0 symbols after filter — Bybit API may be unreachable")
+            state.last_scan_at = datetime.utcnow()
+            state.scan_count += 1
+            state.last_scan_found = 0
+            state.last_scan_error = "0 символов после фильтра — Bybit недоступен?"
             return []
 
         # Из-за добавленного 1h-запроса нагрузка на API выросла ~на треть (3->4 вызова
@@ -1002,6 +1011,7 @@ async def scan_all(client: BybitClient) -> List[Signal]:
         state.last_scan_at = datetime.utcnow()
         state.scan_count += 1
         state.total_signals += len(signals)
+        state.last_scan_found = len(signals)
         state.last_scan_error = ""
 
         log.info(f"scan_all: found {len(signals)} signals (scan #{state.scan_count})")
@@ -1019,6 +1029,10 @@ async def scan_all(client: BybitClient) -> List[Signal]:
         # вечно показывает старый номер скана и сбой снаружи не виден
         state.last_scan_at = datetime.utcnow()
         state.scan_count += 1
+        # Обнулять обязательно: иначе провалившийся скан наследует число
+        # предыдущего удачного и в строке «Скан #N · найдено: 35» стоит
+        # результат чужого скана.
+        state.last_scan_found = 0
         state.last_scan_error = str(e)
         log.error(f"scan_all error (scan #{state.scan_count}): {e}")
         return []

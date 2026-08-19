@@ -140,7 +140,95 @@ async def test_stats_carries_every_field_dashboard_reads(no_token):
 async def test_outcomes_carries_slices_and_order(no_token):
     body = _body(await R.get_outcomes(FakeRequest()))
     for field in ("summary", "by_score", "by_direction", "by_type",
-                  "by_sl_atr", "by_headroom", "by_flow", "_order"):
+                  "by_sl_atr", "by_headroom", "by_flow", "by_ob", "by_round",
+                  "_order"):
         assert field in body, f"модалка читает {field}"
-    for key in ("by_score", "by_sl_atr", "by_headroom", "by_flow"):
+    for key in ("by_score", "by_sl_atr", "by_headroom", "by_flow",
+                "by_ob", "by_round"):
         assert key in body["_order"], f"порядок корзин {key} не задан бэкендом"
+
+
+async def test_scan_line_shows_this_scan_not_the_daily_total(no_token):
+    """Строка «Скан #N · найдено: X» имела ДВА источника: heartbeat по WS слал
+    результат этого скана, HTTP-фолбэк подставлял total_24h. Пустой скан при
+    живом фолбэке выглядел продуктивным — под подписью про конкретный скан
+    стояло суточное число."""
+    from core.state import state
+    state.last_scan_found = 0          # последний скан не нашёл ничего
+    body = _body(await R.get_stats(FakeRequest()))
+    assert "last_scan_found" in body, \
+        "фолбэку нечем показать результат скана отдельно от суточного итога"
+    assert body["last_scan_found"] == 0
+    # суточный счётчик существует отдельно и результатом скана не подменяется
+    assert "total_24h" in body and body["total_24h"] != "unset"
+
+
+async def test_failed_scan_does_not_inherit_previous_find_count():
+    """Провалившийся скан наследовал число предыдущего удачного, и в строке
+    стоял результат чужого скана."""
+    from core.state import state
+    import strategy.scanner as scanner
+
+    class Boom:
+        api_key = "k"; secret = "s"
+        async def get_tickers(self, *a, **k):
+            raise RuntimeError("Bybit недоступен")
+
+    state.last_scan_found = 35
+    scanner._SCANNING = False
+    out = await scanner.scan_all(Boom())
+    assert out == []
+    assert state.last_scan_found == 0, "число прошлого скана пережило сбой"
+    assert state.last_scan_error, "ошибка скана не записана"
+
+
+async def test_successful_scan_publishes_its_find_count(monkeypatch):
+    """Обратная сторона той же строки: если удачный скан НЕ выставляет
+    счётчик, поле навсегда остаётся нулём и дашборд врёт «найдено: 0» при
+    полном списке сигналов. Мутация «убрать присваивание» обязана падать."""
+    from core.state import state, Signal
+    import strategy.scanner as scanner
+
+    class Client:
+        api_key = "k"; secret = "s"
+        async def get_tickers(self):
+            return [{"symbol": f"A{i}USDT", "volume24h": "9e9"} for i in range(3)]
+
+    async def fake_analyze(client, t):
+        # Сигнал строится здесь, а не импортом из соседнего теста: кросс-импорт
+        # между тестовыми модулями без tests/__init__.py заставляет mypy
+        # видеть один файл под двумя именами модуля и обрывает проверку.
+        return Signal(symbol=t["symbol"], signal_type="VSA_CLIMAX",
+                      direction="LONG", score=60, price=100.0, oi_change=5,
+                      vol_ratio=3, funding=-0.04, ob_bias="BUY", atr_pct=1.5,
+                      details="", entry=100.0, sl=98.5, tp2=103.0)
+
+    monkeypatch.setattr(scanner, "_analyze_symbol", fake_analyze)
+    state.last_scan_found = 0
+    scanner._SCANNING = False
+    out = await scanner.scan_all(Client())
+    assert len(out) == 3
+    assert state.last_scan_found == 3, "результат удачного скана не опубликован"
+    assert not state.last_scan_error
+
+
+async def test_empty_symbol_list_is_counted_as_a_failed_scan():
+    """Ветка «0 символов после фильтра» обходила учёт: счётчик замирал,
+    ошибка не выставлялась, и на экране оставались номер и число находок
+    ПРЕДЫДУЩЕГО удачного скана. Недоступный Bybit выглядел рабочим ботом."""
+    from core.state import state
+    import strategy.scanner as scanner
+
+    class Empty:
+        api_key = "k"; secret = "s"
+        async def get_tickers(self):
+            return []
+
+    state.last_scan_found = 35
+    state.last_scan_error = ""
+    before = state.scan_count
+    scanner._SCANNING = False
+    assert await scanner.scan_all(Empty()) == []
+    assert state.last_scan_found == 0, "показания прошлого скана пережили сбой"
+    assert state.scan_count == before + 1, "счётчик сканов замер — сбой не виден"
+    assert state.last_scan_error, "ошибка не выставлена, пульс остался зелёным"

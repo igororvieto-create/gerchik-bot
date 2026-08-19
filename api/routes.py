@@ -406,7 +406,13 @@ async def get_trades(request: Request, limit: int = 50):
 
 
 @router.get("/api/signals")
-async def get_signals(hours: int = 24, limit: int = 100):
+async def get_signals(request: Request, hours: int = 24, limit: int = 100):
+    # Лента сигналов отдаёт entry/sl/tp1..tp3 — ровно те данные, ради
+    # которых закрыт /api/positions («точный уровень стопа и объём публичны
+    # для любого, кто знает адрес»). Оставлять её открытой значило иметь
+    # политику защиты, противоречащую самой себе.
+    if (deny := _require_token(request)) is not None:
+        return deny
     rows = await db.get_recent_signals(hours=hours, limit=limit)
     for r in rows:
         if r.get("ts") and not r["ts"].endswith("Z"):
@@ -461,7 +467,11 @@ async def get_stats(request: Request):
 
 
 @router.get("/api/settings")
-async def get_settings():
+async def get_settings(request: Request):
+    # POST закрыт токеном, GET был открыт: он раскрывает риск на сделку,
+    # плечо, лимиты и пороги — разведданные для того, кто знает адрес.
+    if (deny := _require_token(request)) is not None:
+        return deny
     from core.config import cfg
     return JSONResponse({
         "auto_trade":          cfg.AUTO_TRADE,
@@ -638,6 +648,18 @@ async def close_position_route(symbol: str, request: Request):
 
 @router.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    # WS шлёт историю сигналов и все heartbeat'ы — то же содержимое, что и
+    # закрытый токеном /api/signals. Браузер не умеет задавать заголовки
+    # при апгрейде, поэтому токен принимается ТОЛЬКО query-параметром.
+    # Проверка ДО accept(): иначе соединение уже установлено и история
+    # успевает уйти.
+    token = os.getenv("DASHBOARD_TOKEN", "").strip()
+    if token:
+        got = ws.query_params.get("token") or ""
+        if not hmac.compare_digest(got.encode("utf-8"), token.encode("utf-8")):
+            await ws.close(code=1008)   # policy violation
+            log.warning("WS: отклонено подключение без валидного токена")
+            return
     await ws.accept()
     state.add_ws(ws)
     log.info(f"WS connected (total: {len(state.ws_clients)})")

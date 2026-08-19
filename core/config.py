@@ -223,6 +223,20 @@ if cfg.MIN_SCORE > cfg.TRADE_MIN_SCORE:
     )
     cfg.TRADE_MIN_SCORE = cfg.MIN_SCORE
 
+# Параметры, охраняющие инвариант «не торговать листинги/новостные спайки»
+# и геометрию сделки. Клампов у них не было вовсе: одна env-переменная молча
+# отключала инвариант целиком, без единой строки в логе. Проверено:
+# MIN_LISTING_AGE_DAYS=0 -> age_days >= 0 истинно всегда, листинг первого дня
+# торгуется; MAX_LAST_CANDLE_ATR=1e9 -> анти-спайк не срабатывает никогда;
+# MIN_RR=0 -> гейт R:R отключён, и через связь ниже обнуляется торговый порог
+# запаса. RISK_PER_TRADE=10 этот же путь ловит и логирует, а эти — нет.
+cfg.MIN_LISTING_AGE_DAYS = int(_clamp(cfg.MIN_LISTING_AGE_DAYS, 1, 365,
+                                      "MIN_LISTING_AGE_DAYS"))
+cfg.MAX_LAST_CANDLE_ATR  = _clamp(cfg.MAX_LAST_CANDLE_ATR, 1.0, 10.0,
+                                  "MAX_LAST_CANDLE_ATR")
+cfg.MIN_RR               = _clamp(cfg.MIN_RR, 1.0, 10.0, "MIN_RR")
+cfg.MAX_SL_ATR           = _clamp(cfg.MAX_SL_ATR, 1.0, 10.0, "MAX_SL_ATR")
+
 # Безубыток должен наступать РАНЬШЕ цели, иначе механизм недостижим
 cfg.BREAKEVEN_AT_R    = _clamp(cfg.BREAKEVEN_AT_R,    0.0, 1.9, "BREAKEVEN_AT_R")
 cfg.BREAKEVEN_FEE_PCT = _clamp(cfg.BREAKEVEN_FEE_PCT, 0.0, 1.0, "BREAKEVEN_FEE_PCT")

@@ -232,3 +232,69 @@ async def test_empty_symbol_list_is_counted_as_a_failed_scan():
     assert state.last_scan_found == 0, "показания прошлого скана пережили сбой"
     assert state.scan_count == before + 1, "счётчик сканов замер — сбой не виден"
     assert state.last_scan_error, "ошибка не выставлена, пульс остался зелёным"
+
+
+# ── Согласованность политики защиты ──────────────────────────────────────────
+
+async def test_signal_feed_and_settings_are_token_protected(monkeypatch):
+    """Политика защиты противоречила сама себе: /api/positions закрыт с
+    мотивировкой «точный уровень стопа и объём публичны для любого, кто знает
+    адрес», а /api/signals отдавал entry/sl/tp1..tp3 из той же базы без
+    токена. GET /api/settings раскрывал риск, плечо и лимиты."""
+    monkeypatch.setenv("DASHBOARD_TOKEN", "s3cret")
+    for fn in (R.get_signals, R.get_settings):
+        assert _code(await fn(FakeRequest())) == 401, \
+            f"{fn.__name__} отдаёт данные без токена"
+        assert _code(await fn(FakeRequest("неверный"))) == 401
+        assert _code(await fn(FakeRequest("s3cret"))) == 200
+
+
+async def test_every_data_endpoint_requires_a_request_object():
+    """Структурная охрана: эндпоинт БЕЗ параметра request физически не может
+    вызвать _require_token — забыть защиту можно молча, и именно так и было
+    с /api/signals и /api/settings. Тест ловит это на сигнатуре."""
+    import inspect
+    exempt = {"ping", "health", "index", "manifest", "sw", "websocket_endpoint"}
+    unprotected = []
+    for name, fn in vars(R).items():
+        if not (inspect.iscoroutinefunction(fn) and name.startswith(("get_", "update_",
+                "trigger_", "debug", "diagnostic", "close_position_route"))):
+            continue
+        if name in exempt:
+            continue
+        if "request" not in inspect.signature(fn).parameters:
+            unprotected.append(name)
+    assert not unprotected, f"эндпоинты без request (и значит без токена): {unprotected}"
+
+
+async def test_websocket_rejects_connection_without_token(monkeypatch):
+    """WS шлёт историю сигналов и все heartbeat'ы — то же содержимое, что и
+    закрытый /api/signals. Браузер не умеет слать заголовки при апгрейде,
+    поэтому токен принимается query-параметром, а проверка обязана стоять ДО
+    accept(): иначе соединение установлено и история уже ушла."""
+    monkeypatch.setenv("DASHBOARD_TOKEN", "s3cret")
+
+    class FakeWS:
+        def __init__(self, token=None):
+            self.query_params = {"token": token} if token else {}
+            self.accepted = False
+            self.closed_code = None
+            self.sent = []
+        async def accept(self):
+            self.accepted = True
+        async def close(self, code=1000):
+            self.closed_code = code
+        async def send_text(self, t):
+            self.sent.append(t)
+        async def receive(self):
+            return {"type": "websocket.disconnect", "code": 1000}
+
+    bad = FakeWS()
+    await R.websocket_endpoint(bad)
+    assert bad.accepted is False, "соединение принято до проверки токена"
+    assert bad.closed_code == 1008
+    assert not bad.sent, "история сигналов ушла без токена"
+
+    wrong = FakeWS("неверный")
+    await R.websocket_endpoint(wrong)
+    assert wrong.accepted is False and not wrong.sent

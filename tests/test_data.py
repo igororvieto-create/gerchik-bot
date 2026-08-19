@@ -480,3 +480,31 @@ async def test_candle_dedup_survives_a_restart(legacy_db):
     db.DB_PATH = "/nonexistent-dir/x.db"
     with pytest.raises(Exception):
         await db.get_recent_candle_marks(hours=8)
+
+
+@pytest.mark.parametrize("env,expr,floor", [
+    # Инвариант «не торговать листинги/новостные спайки» держится ровно на
+    # этих параметрах, а клампов у них не было: одна env-переменная молча
+    # отключала его целиком. MIN_LISTING_AGE_DAYS=0 делает age_days >= 0
+    # истиной всегда; MAX_LAST_CANDLE_ATR=1e9 отключает анти-спайк;
+    # MIN_RR=0 отключает гейт R:R и через связь обнуляет торговый порог запаса.
+    ({"MIN_LISTING_AGE_DAYS": "0"}, "cfg.MIN_LISTING_AGE_DAYS", 1),
+    ({"MAX_LAST_CANDLE_ATR": "1e9"}, "cfg.MAX_LAST_CANDLE_ATR", None),
+    ({"MIN_RR": "0"}, "cfg.MIN_RR", 1.0),
+    ({"MAX_SL_ATR": "999"}, "cfg.MAX_SL_ATR", None),
+])
+def test_invariant_guards_cannot_be_switched_off_by_env(env, expr, floor):
+    got = _cfg_value(env, expr)
+    if floor is not None:
+        assert got >= floor, f"{expr} = {got}: инвариант отключается через env"
+    else:
+        assert got <= 10.0, f"{expr} = {got}: гейт фактически отключён"
+
+
+def test_zero_min_rr_no_longer_drags_trade_headroom_to_zero():
+    """MIN_TRADE_HEADROOM_R клампится СНИЗУ по MIN_RR, поэтому обнулённый
+    MIN_RR обнулял и торговый порог запаса — два инварианта падали от одной
+    переменной."""
+    hr = _cfg_value({"MIN_RR": "0", "MIN_TRADE_HEADROOM_R": "0"},
+                    "cfg.MIN_TRADE_HEADROOM_R")
+    assert hr >= 1.0, f"торговый порог запаса обнулён через MIN_RR: {hr}"

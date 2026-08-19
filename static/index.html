@@ -792,13 +792,25 @@ async function refreshStats(){
 async function refreshBalance(){
   try{
     const d=await fetch('/api/balance').then(r=>r.json());
-    $('s-bal').textContent=d.balance>0?d.balance.toFixed(2):'—';
-    // Бэкенд специально формирует причину нулевого баланса (IP-whitelist,
-    // нет прав у ключа, пустой счёт), а фронт её выбрасывал — карточка
-    // вечно показывала «—» без единой подсказки.
-    if(d.error||d.warn) showAlert('⚠ Баланс: '+(d.error||d.warn), 'balance');
-    else clearAlert('balance');
-  }catch{}
+    // Три РАЗНЫХ состояния, которые схлопывались в один прочерк:
+    //   счёт пуст            -> «0.00», факт, торговать нечем;
+    //   прочитать не удалось -> «—», бот ослеп, плюс баннер с причиной;
+    //   ответ не разобран    -> «—», а НЕ прежнее число (устаревший баланс
+    //                           подавался как текущий, см. catch ниже).
+    if(d.error){
+      $('s-bal').textContent='—';
+      showAlert('⚠ Баланс: '+d.error, 'balance');
+    } else {
+      $('s-bal').textContent=(typeof d.balance==='number')?d.balance.toFixed(2):'—';
+      if(d.warn) showAlert('⚠ Баланс: '+d.warn, 'balance');
+      else clearAlert('balance');
+    }
+  }catch{
+    // Сетевой сбой/502 HTML'ем: раньше здесь оставалось прежнее число, и
+    // «всё в порядке» показывалось поверх недоступного бэкенда.
+    $('s-bal').textContent='—';
+    showAlert('⚠ Баланс: ответ не получен', 'balance');
+  }
 }
 
 /* ── Positions refresh ── */
@@ -808,7 +820,15 @@ async function refreshPositions(){
   _posRefreshInFlight=true;
   try{
     const d=await fetch('/api/positions').then(r=>r.json());
-    const pos=(d.positions||[]).filter(Boolean);
+    // 401 отдаёт ВАЛИДНЫЙ JSON {"error":"unauthorized"} — r.json() не бросает,
+    // catch не срабатывает, d.positions undefined -> «Позиции 0» и кнопки
+    // «Закрыть» исчезают, хотя позиции живые. Ровно этот класс ошибки уже
+    // лечили в refreshStats; здесь проверки не было.
+    if(d.error||!Array.isArray(d.positions)){
+      $('s-pos').textContent='—';
+      return;   // панель не трогаем: пусть остаётся то, что было видно
+    }
+    const pos=d.positions.filter(Boolean);
     $('s-pos').textContent=pos.length;
     const panel=$('pos-panel');
     if(pos.length){
@@ -1061,12 +1081,24 @@ function authHeaders(){
 // вкладке или после очистки ITP дашборд молча превращался в набор «—» и
 // «unauthorized», и закрыть позицию с телефона становилось невозможно.
 let _tokenPrompted=false;
+// Отказ пользователя запоминается до перезагрузки. Раньше отмена сбрасывала
+// _tokenPrompted, а refreshPositions крутится каждые 5 секунд и на каждом
+// 401 звала prompt заново — модалка возвращалась бесконечно, страницу нельзя
+// было ни читать, ни закрыть. Явный способ передумать остаётся: тап по
+// баннеру (обработчик ниже) сбрасывает флаг и открывает ввод.
+let _tokenDeclined=false;
 function promptToken(){
   const t=prompt('Токен доступа (DASHBOARD_TOKEN из Railway):');
   if(!t){
-    _tokenPrompted=false;   // отказался — предложим при следующем 401
+    _tokenDeclined=true;
+    _tokenPrompted=false;
+    showAlert('🔑 Ввод отменён. Нажми на эту строку, чтобы ввести токен','auth');
+    const b0=$('alert');
+    if(b0){ b0.style.cursor='pointer';
+            b0.onclick=()=>{ _tokenDeclined=false; _tokenPrompted=true; promptToken(); }; }
     return;
   }
+  _tokenDeclined=false;
   let saved=false;
   _memToken=t.trim();          // работает и без хранилища, в пределах сессии
   try{ localStorage.setItem('dash_token', t.trim()); saved=true; }catch{}
@@ -1084,13 +1116,22 @@ function promptToken(){
 }
 function askForToken(){
   if(_tokenPrompted) return;
+  // После отказа баннер остаётся, но модалка сама не всплывает.
+  if(_tokenDeclined){
+    showAlert('🔑 Нужен токен доступа — нажми, чтобы ввести','auth');
+    const b1=$('alert');
+    if(b1){ b1.style.cursor='pointer';
+            b1.onclick=()=>{ _tokenDeclined=false; _tokenPrompted=true; promptToken(); }; }
+    return;
+  }
   _tokenPrompted=true;
   showAlert('🔑 Нужен токен доступа — нажми, чтобы ввести','auth');
   const b=$('alert');
   // Обработчик реально вешаем: раньше баннер предлагал нажать, но слушателя
   // не было, и после отмены prompt'а тап по нему ничего не делал — а на
   // телефоне это единственный видимый способ действия.
-  if(b){ b.style.cursor='pointer'; b.onclick=()=>{ _tokenPrompted=true; promptToken(); }; }
+  if(b){ b.style.cursor='pointer';
+         b.onclick=()=>{ _tokenDeclined=false; _tokenPrompted=true; promptToken(); }; }
   setTimeout(promptToken, 100);
 }
 
@@ -1111,7 +1152,12 @@ window.fetch = function(url, opts){
 function connect(){
   const proto=location.protocol==='https:'?'wss':'ws';
   let ws;
-  try{ ws=new WebSocket(`${proto}://${location.host}/ws`); }
+  // Токен в query, а не в заголовке: браузерный WebSocket не даёт задавать
+  // заголовки при апгрейде. Патч window.fetch ниже на WS не распространяется,
+  // поэтому подставляем явно — иначе дашборд отключил бы сам себя.
+  const _t=(authHeaders()['X-Dashboard-Token']||'');
+  const _q=_t?`?token=${encodeURIComponent(_t)}`:'';
+  try{ ws=new WebSocket(`${proto}://${location.host}/ws${_q}`); }
   catch(e){ fallback(); return; }
 
   const timer=setTimeout(()=>{ if(!wsOk){ ws.close(); fallback(); } }, 8000);

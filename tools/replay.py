@@ -308,6 +308,7 @@ def report(rows: List[Dict], meta: Dict) -> str:
     head = (
         "=" * 72 +
         "\nПРОГОН СТРАТЕГИИ ПО ИСТОРИИ\n" + "=" * 72 +
+        f"\nИсточник данных: {meta.get('source', 'не указан')}"
         f"\nСимволов: {len(meta.get('symbols', []))}   окно: {meta.get('days')} дн."
         f"\nСигналов с исходом: {len(rows)}"
         f"\nПороги: MIN_SCORE={cfg.MIN_SCORE} TRADE_MIN_SCORE={cfg.TRADE_MIN_SCORE} "

@@ -587,7 +587,7 @@ async def close_position_route(symbol: str, request: Request):
     if state.client is None:
         return JSONResponse({"error": "client not initialized"}, status_code=503)
     from core.state import Position
-    from strategy.trader import (fetch_matching_closed_pnl, record_realized_close,
+    from strategy.trader import (_settle_closed_position, record_realized_close,
                                  close_and_verify, _forget_symbol)
     import asyncio as _asyncio
     pos = state.positions.get(symbol)
@@ -631,16 +631,16 @@ async def close_position_route(symbol: str, request: Request):
         # a single attempt would permanently record pnl=0 and the loss
         # would bypass the daily circuit breaker
         await _asyncio.sleep(1.0)
-        exit_price, pnl = await fetch_matching_closed_pnl(
-            state.client, pos, attempts=4, delay=1.5)
-        # Ручное закрытие с дашборда: PnL в дневной предохранитель идёт
-        # ТОЛЬКО при подтверждённой записи, иначе блок реконсиляции учтёт
-        # его повторно на ближайшем тике монитора.
-        if await db.save_trade_close(pos, exit_price=exit_price, pnl=pnl) == db.CLOSE_OK:
-            record_realized_close(pnl)
-        log.info(f"Position {symbol} closed via dashboard exit={exit_price:.4f} pnl={pnl:+.2f}")
-        return JSONResponse({"ok": True, "symbol": symbol,
-                             "exit_price": exit_price, "pnl": pnl})
+        # ЧЕТВЁРТЫЙ путь закрытия — через ту же охраняемую точку, что и три
+        # остальных. Своя копия учёта здесь запечатывала строку нулями при
+        # неподтверждённом закрытии (lookup не нашёл запись -> (0,0) ->
+        # rowcount=1 -> «успех»), а символ уже был забыт выше, и блок
+        # реконсиляции такую сделку не увидел бы НИКОГДА.
+        settled = await _settle_closed_position(state.client, pos, attempts=4)
+        if not settled:
+            log.warning(f"{symbol}: позиция закрыта на бирже, но PnL не подтверждён "
+                        f"— учёт отложен до тика монитора")
+        return JSONResponse({"ok": True, "symbol": symbol, "settled": settled})
     except Exception as e:
         log.error(f"close_position {symbol}: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)

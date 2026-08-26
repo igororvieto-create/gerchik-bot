@@ -257,41 +257,78 @@ CLOSE_ABSENT = "absent"   # открытой строки нет — PnL НЕ у
 
 async def save_trade_close(pos: Position, exit_price: float = 0.0,
                            pnl: float = 0.0) -> str:
-    """CLOSE_OK — строка ДЕЙСТВИТЕЛЬНО переведена в closed (rowcount >= 1).
+    """CLOSE_OK — PnL этой сделки ЗАПИСАН и его обязан учесть вызывающий.
 
-    Возврат нужен для идемпотентности: вызывающий обязан учитывать PnL в
-    дневном предохранителе ТОЛЬКО после CLOSE_OK. Иначе при заблокированной
-    базе (WAL + параллельная чистка) один и тот же убыток капал в счётчик
-    каждые 30 секунд — три тика давали тройной убыток."""
+    CLOSE_ABSENT возвращается ТОЛЬКО когда PnL уже учтён кем-то другим, то
+    есть существует терминальная строка с непустым pnl. Раньше сюда же
+    попадали «строки вообще нет» и «строка запечатана как stale с pnl
+    IS NULL» — в обоих случаях не учёл НИКТО, и убыток исчезал из дневного
+    предохранителя навсегда. Оба случая теперь самоисцеляются: строка
+    дописывается, и функция возвращает CLOSE_OK.
+
+    Цель — убрать класс целиком, а не отдельные его проявления:
+      * запись при входе провалилась (строки нет);
+      * close_stale_open_trades запечатал строку, пока учёт был отложен;
+      * позиция восстановлена и своей строки не имела.
+    """
     try:
         async with aiosqlite.connect(DB_PATH) as db:
-            # Filter by order_id to avoid closing the wrong row on re-entry
+            now = datetime.utcnow().isoformat()
+            # status IN ('open','stale') И pnl IS NULL: stale-строка ещё не
+            # учтена (её запечатал сторож зависших), и терять её нельзя.
+            # Порядок «stale ПОСЛЕ закрытий» в мониторе перестал спасать,
+            # когда учёт научился откладываться на следующий тик.
             if pos.order_id:
                 cur = await db.execute(
                     """UPDATE trades SET status='closed', exit_price=?, pnl=?, closed_at=?
-                       WHERE symbol=? AND order_id=? AND status='open'""",
-                    (exit_price, pnl, datetime.utcnow().isoformat(), pos.symbol, pos.order_id),
+                       WHERE symbol=? AND order_id=?
+                         AND status IN ('open','stale') AND pnl IS NULL""",
+                    (exit_price, pnl, now, pos.symbol, pos.order_id),
                 )
             else:
-                # No order_id: close only the MOST RECENT open row — a blanket
-                # WHERE symbol+status would stamp every stale open row (e.g.
-                # left over from a crash) with this trade's exit/pnl
+                # Без order_id закрываем только САМУЮ СВЕЖУЮ подходящую
+                # строку: общий WHERE проштамповал бы этим pnl все зависшие.
                 cur = await db.execute(
                     """UPDATE trades SET status='closed', exit_price=?, pnl=?, closed_at=?
                        WHERE id = (SELECT id FROM trades
-                                   WHERE symbol=? AND status='open'
+                                   WHERE symbol=? AND status IN ('open','stale')
+                                     AND pnl IS NULL
                                    ORDER BY opened_at DESC LIMIT 1)""",
-                    (exit_price, pnl, datetime.utcnow().isoformat(), pos.symbol),
+                    (exit_price, pnl, now, pos.symbol),
                 )
             moved = cur.rowcount
+            if moved < 1:
+                # Обновлять нечего. Различаем два РАЗНЫХ случая.
+                if pos.order_id:
+                    q = ("SELECT 1 FROM trades WHERE symbol=? AND order_id=? "
+                         "AND pnl IS NOT NULL LIMIT 1")
+                    args: tuple = (pos.symbol, pos.order_id)
+                else:
+                    q = ("SELECT 1 FROM trades WHERE symbol=? AND pnl IS NOT NULL "
+                         "AND closed_at >= ? LIMIT 1")
+                    args = (pos.symbol, pos.ts.isoformat())
+                async with db.execute(q, args) as c2:
+                    already = await c2.fetchone()
+                if already:
+                    await db.commit()
+                    log.info(f"{pos.symbol}: закрытие уже учтено другим путём")
+                    return CLOSE_ABSENT
+                # Строки нет вовсе — дописываем терминальную. Иначе PnL
+                # исчезал молча: вызывающий трактовал ABSENT как «учтено».
+                await db.execute(
+                    """INSERT INTO trades
+                       (symbol, side, entry, exit_price, sl, tp1, tp2, tp3, qty,
+                        pnl, score, signal_type, order_id, status, opened_at, closed_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'closed',?,?)""",
+                    (pos.symbol, pos.side, pos.entry, exit_price, pos.sl,
+                     pos.tp1, pos.tp2, pos.tp3, pos.qty, pnl, pos.score,
+                     pos.signal_type, pos.order_id, pos.ts.isoformat(), now),
+                )
+                await db.commit()
+                log.warning(f"{pos.symbol}: строки сделки не было — записана "
+                            f"терминальной, pnl={pnl:+.2f} учтён")
+                return CLOSE_OK
             await db.commit()
-        if moved < 1:
-            # Открытой строки не нашлось: её уже закрыл другой путь, либо
-            # save_trade_open в своё время провалилась. PnL тут учитывать
-            # НЕЛЬЗЯ (двойной счёт), и повторять бессмысленно.
-            log.warning(f"{pos.symbol}: открытой строки для закрытия нет "
-                        f"(order_id={pos.order_id or '-'}) — PnL не учтён")
-            return CLOSE_ABSENT
         return CLOSE_OK
     except Exception as e:
         log.error(f"save_trade_close error: {e}")
@@ -353,12 +390,23 @@ async def get_pending_signals(max_age_hours: int = 48) -> List[Dict]:
                 rows = await cur.fetchall()
         return [dict(r) for r in rows]
     except Exception as e:
+        # БРОСАЕМ, а не возвращаем []: пустой список читается вызывающим как
+        # «оценивать нечего», и форвард-тест — единственное основание
+        # включать реальные деньги — вставал бы полностью и БЕСШУМНО, пока
+        # дашборд показывает старую статистику. get_open_trades и
+        # get_realized_pnl_since этот урок уже усвоили (рецидив №5 в
+        # docs/REVIEW.md), get_pending_signals — нет.
         log.error(f"get_pending_signals error: {e}")
-        return []
+        raise
 
 
 async def set_signal_outcome(signal_id: int, outcome: str, price: float,
-                             mfe_r: float = 0.0) -> None:
+                             mfe_r: float = 0.0) -> bool:
+    """True — вердикт ДЕЙСТВИТЕЛЬНО записан.
+
+    Возврат обязателен: оценщик считал `decided += 1` безусловно, и при
+    полном диске в лог уходило «5 outcome(s) recorded» при нуле строк в
+    базе. Оператор принимает решение о реальных деньгах по этой цифре."""
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
@@ -367,8 +415,10 @@ async def set_signal_outcome(signal_id: int, outcome: str, price: float,
                 (outcome, price, datetime.utcnow().isoformat(), mfe_r, signal_id),
             )
             await db.commit()
+        return True
     except Exception as e:
         log.error(f"set_signal_outcome error: {e}")
+        return False
 
 
 # Круговые издержки: тейкер 0.055% × 2 + типичное проскальзывание.
@@ -642,7 +692,7 @@ async def update_trade_entry(order_id: str, symbol: str, entry: float) -> None:
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             if order_id:
-                await db.execute(
+                cur = await db.execute(
                     "UPDATE trades SET entry=? WHERE order_id=? AND status='open'",
                     (entry, order_id))
             else:
@@ -651,13 +701,22 @@ async def update_trade_entry(order_id: str, symbol: str, entry: float) -> None:
                 # проставлял цену чужого залива всем открытым строкам
                 # символа. save_trade_close рядом делает так же и объясняет
                 # почему — новая функция этот урок не переняла.
-                await db.execute(
+                cur = await db.execute(
                     """UPDATE trades SET entry=?
                        WHERE id = (SELECT id FROM trades
                                    WHERE symbol=? AND status='open'
                                    ORDER BY opened_at DESC LIMIT 1)""",
                     (entry, symbol))
+            touched = cur.rowcount
             await db.commit()
+        if touched < 1:
+            # Молчаливый no-op: в trades.entry навсегда остаётся цена
+            # СИГНАЛА вместо цены залива, и весь последующий разбор в R
+            # систематически смещён на величину проскальзывания — ровно то,
+            # ради чего эта функция и написана.
+            log.warning(f"{symbol}: фактическая цена входа не записана "
+                        f"(нет открытой строки, order_id={order_id or '-'}) — "
+                        f"разбор в R будет смещён на проскальзывание")
     except Exception as e:
         log.error(f"update_trade_entry error: {e}")
 

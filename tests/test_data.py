@@ -508,3 +508,76 @@ def test_zero_min_rr_no_longer_drags_trade_headroom_to_zero():
     hr = _cfg_value({"MIN_RR": "0", "MIN_TRADE_HEADROOM_R": "0"},
                     "cfg.MIN_TRADE_HEADROOM_R")
     assert hr >= 1.0, f"торговый порог запаса обнулён через MIN_RR: {hr}"
+
+
+# ── Класс «молчаливый отказ»: функция глотает провал, система врёт ───────────
+
+async def test_pending_signals_raises_instead_of_reporting_nothing_to_do(legacy_db):
+    """[] читается вызывающим как «оценивать нечего», и форвард-тест —
+    единственное основание включать реальные деньги — вставал бы полностью и
+    БЕСШУМНО, пока дашборд показывает старую статистику за 7 дней.
+    get_open_trades и get_realized_pnl_since этот урок уже усвоили."""
+    db, path = legacy_db
+    await db.init_db()
+    db.DB_PATH = "/nonexistent-dir/x.db"
+    with pytest.raises(Exception):
+        await db.get_pending_signals()
+
+
+async def test_outcome_write_reports_failure(legacy_db):
+    """Оценщик считал decided += 1 безусловно: при полном диске в лог уходило
+    «5 outcome(s) recorded» при нуле строк в базе, и решение о реальных
+    деньгах принималось по этой цифре."""
+    db, path = legacy_db
+    await db.init_db()
+    now = datetime.utcnow().isoformat()
+    c = sqlite3.connect(path)
+    c.execute("INSERT INTO signals(symbol,signal_type,direction,score,price,ts,"
+              "entry,sl,tp2) VALUES('S','MOMENTUM','LONG',60,1.0,?,1.0,0.9,1.2)", (now,))
+    c.commit()
+    sid = c.execute("SELECT id FROM signals WHERE symbol='S'").fetchone()[0]
+    c.close()
+    assert await db.set_signal_outcome(sid, "WIN", 1.2, mfe_r=2.0) is True
+    db.DB_PATH = "/nonexistent-dir/x.db"
+    assert await db.set_signal_outcome(sid, "WIN", 1.2, mfe_r=2.0) is False
+
+
+async def test_close_writes_a_row_when_none_exists(legacy_db):
+    """Самый дорогой из класса. Если строки в trades нет (запись при входе
+    провалилась) или её запечатал сторож зависших, save_trade_close раньше
+    возвращала CLOSE_ABSENT — а он означает «PnL учёл кто-то другой».
+    Не учёл НИКТО: убыток исчезал из дневного предохранителя навсегда."""
+    db, path = legacy_db
+    await db.init_db()
+    from core.state import Position
+    pos = Position(symbol="NOROWUSDT", side="Buy", entry=100.0, sl=98.0, tp1=0.0,
+                   tp2=104.0, tp3=0.0, qty=1.0, score=60,
+                   signal_type="VSA_CLIMAX", order_id="orphan-1")
+    # строки нет вовсе -> функция обязана дописать её и вернуть CLOSE_OK
+    assert await db.save_trade_close(pos, exit_price=98.0, pnl=-9.0) == db.CLOSE_OK
+    row = sqlite3.connect(path).execute(
+        "SELECT status, pnl FROM trades WHERE symbol='NOROWUSDT'").fetchone()
+    assert row == ("closed", -9.0), "терминальная строка не дописана"
+    # повторный вызов уже НЕ учитывается: PnL зафиксирован
+    assert await db.save_trade_close(pos, exit_price=98.0, pnl=-9.0) == db.CLOSE_ABSENT
+
+
+async def test_stale_sealed_row_still_gets_its_pnl(legacy_db):
+    """Учёт научился откладываться на следующий тик, а сторож зависших
+    строк — нет. Строка успевала стать stale между попытками, и следующий
+    save_trade_close её не находил. Порядок «stale ПОСЛЕ закрытий» в
+    мониторе этот случай больше не покрывает."""
+    db, path = legacy_db
+    await db.init_db()
+    from core.state import Position
+    pos = Position(symbol="STALEUSDT", side="Buy", entry=100.0, sl=98.0, tp1=0.0,
+                   tp2=104.0, tp3=0.0, qty=1.0, score=60,
+                   signal_type="VSA_CLIMAX", order_id="st-1")
+    await db.save_trade_open(pos)
+    c = sqlite3.connect(path)
+    c.execute("UPDATE trades SET status='stale' WHERE order_id='st-1'")
+    c.commit(); c.close()
+    assert await db.save_trade_close(pos, exit_price=98.0, pnl=-9.0) == db.CLOSE_OK
+    row = sqlite3.connect(path).execute(
+        "SELECT status, pnl FROM trades WHERE order_id='st-1'").fetchone()
+    assert row == ("closed", -9.0), "stale-строка осталась без PnL"

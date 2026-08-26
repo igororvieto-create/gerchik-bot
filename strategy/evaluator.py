@@ -116,6 +116,7 @@ async def evaluate_signal_outcomes(client: BybitClient) -> None:
             return
         now = datetime.now(timezone.utc)
         decided = 0
+        failed = 0
         for row in pending:
             try:
                 ts_raw = row["ts"].rstrip("Z")
@@ -166,21 +167,32 @@ async def evaluate_signal_outcomes(client: BybitClient) -> None:
                 verdict = _judge(row["direction"], row["sl"], row["tp2"], relevant,
                                  entry=row["entry"] or 0.0)
                 if verdict:
-                    await db.set_signal_outcome(row["id"], verdict[0], verdict[1],
-                                                mfe_r=verdict[2])
-                    decided += 1
+                    # decided растёт ТОЛЬКО при подтверждённой записи: иначе
+                    # лог рапортует о вердиктах, которых в базе нет, а
+                    # решение о деньгах принимается по этой цифре.
+                    if await db.set_signal_outcome(row["id"], verdict[0], verdict[1],
+                                                   mfe_r=verdict[2]):
+                        decided += 1
+                    else:
+                        failed += 1
                 elif age_h >= _MAX_AGE_HOURS:
                     last_close = relevant[-1]["close"]
                     # MFE у просроченного тоже полезен: показывает, насколько
                     # близко сетап подходил к цели, прежде чем застрять.
                     mfe = _mfe(row["direction"], row["entry"] or 0.0,
                                row["sl"], relevant)
-                    await db.set_signal_outcome(row["id"], "EXPIRED", last_close, mfe_r=mfe)
-                    decided += 1
+                    if await db.set_signal_outcome(row["id"], "EXPIRED",
+                                                   last_close, mfe_r=mfe):
+                        decided += 1
+                    else:
+                        failed += 1
             except Exception as e:
                 log.warning(f"evaluate {row.get('symbol')}: {e}")
             await asyncio.sleep(0.3)  # щадим rate-limit
 
+        if failed:
+            log.error(f"evaluator: {failed} вердикт(ов) НЕ записаны — "
+                      f"строки будут пересужены на следующем проходе")
         if decided:
             stats = await db.get_outcome_stats(days=7)
             log.info(

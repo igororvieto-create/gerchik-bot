@@ -43,14 +43,32 @@ async def _fetch_webshare_proxies() -> List[str]:
                 headers={"Authorization": f"Token {token}"},
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as r:
+                # HTTP-статус проверяется ОБЯЗАТЕЛЬНО. Без него 401 (токен
+                # протух) и 402 (квота выжжена) давали пустой results, а в
+                # логе стояло безмятежное «loaded 0 proxies». Отличить
+                # «прокси не нужны» от «доступ к ним потерян» было нельзя, а
+                # цепочка дальше жёсткая: нет прокси -> прямое соединение с
+                # IP Railway -> гео-блок Bybit 403 -> get_positions() = None
+                # -> монитор перестаёт проверять наличие стопа, то есть
+                # рецидивирующий баг №1.
+                if r.status != 200:
+                    body = (await r.text())[:200]
+                    log.error(f"Webshare API вернул {r.status}: {body} — "
+                              f"прокси НЕ получены, соединение будет прямым")
+                    return []
                 data = await r.json()
+        results = data.get("results", [])
         proxies = []
-        for p in data.get("results", []):
+        for p in results:
             if p.get("valid"):
                 url = (f"http://{p['username']}:{p['password']}"
                        f"@{p['proxy_address']}:{p['port']}")
                 proxies.append(url)
-        log.info(f"Webshare: loaded {len(proxies)} proxies")
+        if not proxies:
+            log.error(f"Webshare: получено {len(results)} записей, валидных 0 — "
+                      f"соединение будет прямым, вероятен гео-блок Bybit")
+        else:
+            log.info(f"Webshare: loaded {len(proxies)} proxies")
         return proxies
     except Exception as e:
         log.warning(f"Webshare API fetch failed: {e}")
@@ -61,11 +79,18 @@ async def _fetch_webshare_proxies() -> List[str]:
 async def lifespan(app: FastAPI):
     global _client, _scheduler
 
+    # Провал init_db больше не «continuing anyway» без последствий: без
+    # миграции save_signal падает на «no such column» и ГЛУШИТ ошибку, то
+    # есть бот торгует, не записывая ни одного сигнала, а форвард-тест —
+    # единственное основание включать реальные деньги — молча пуст.
+    # Торговлю в этом случае держим остановленной до успешной инициализации.
     try:
         await db.init_db()
         log.info("DB ready")
     except Exception as e:
-        log.error(f"DB init failed (continuing anyway): {e}")
+        state.trading_halted = True
+        log.critical(f"init_db провалилась ({e}) — торговля остановлена: без "
+                     f"миграции сигналы не пишутся и форвард-тест пуст")
 
     webshare_proxies: List[str] = []
     try:

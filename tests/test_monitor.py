@@ -519,3 +519,35 @@ async def test_main_close_path_treats_unknown_outcome_as_not_counted(db_tmp, mon
     assert state.daily_realized_pnl == 0.0, (
         f"неизвестный исход записи учтён как успех: {state.daily_realized_pnl}")
     assert "MAINUSDT" in state.positions, "позиция снята с учёта при неясном исходе"
+
+
+async def test_close_without_a_trades_row_does_not_swallow_the_pnl(db_tmp, monkeypatch):
+    """Регрессия, внесённая переходом на три состояния save_trade_close.
+
+    У восстановленной позиции нет order_id, и строку в trades пишут прямо
+    перед учётом закрытия. Если эта запись провалилась, save_trade_close не
+    находит открытой строки и возвращает CLOSE_ABSENT — а он означает «PnL
+    учёл тот, кто закрыл». Здесь не учёл НИКТО: убыток исчезал молча, слот
+    освобождался. Возврат save_trade_open обязан проверяться."""
+    db = db_tmp
+    await db.init_db()
+    pos = Position(symbol="NOROWUSDT", side="Buy", entry=100.0, sl=98.0, tp1=0.0,
+                   tp2=104.0, tp3=0.0, qty=1.0, score=60,
+                   signal_type="RECOVERED", order_id="")   # без order_id
+    pos.ts = datetime.utcnow() - timedelta(minutes=30)
+    state.positions["NOROWUSDT"] = pos
+
+    async def _fail_open(*a, **kw):
+        return False                      # база недоступна на запись
+    monkeypatch.setattr(db, "save_trade_open", _fail_open)
+
+    ex = FakeExchange(positions=[], closed_pnl=[{
+        "symbol": "NOROWUSDT", "closedPnl": "-9.0", "avgExitPrice": "98.0",
+        "updatedTime": _ms(datetime.utcnow()),
+    }])
+    await tr.monitor_positions(ex)
+
+    assert state.daily_realized_pnl == 0.0, \
+        f"PnL учтён без строки в trades: {state.daily_realized_pnl}"
+    assert "NOROWUSDT" in state.positions, \
+        "позиция снята с учёта — убыток потерян навсегда, повторять некому"

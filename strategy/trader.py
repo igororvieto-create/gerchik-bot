@@ -515,10 +515,25 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
         # Запись в trades СРАЗУ, до верификации SL: усыновление после
         # рестарта опознаёт свою позицию только по этой строке. Без неё
         # позиция бота получала ярлык MANUAL и навсегда лишалась защиты.
-        try:
-            await db.save_trade_open(pos)
-        except Exception as dbe:
-            log.error(f"{sig.symbol}: save_trade_open failed — {dbe}")
+        # Возврат проверяется и повторяется: строка в trades — ЕДИНСТВЕННЫЙ
+        # признак «своя позиция» после рестарта, а деплой Railway случается на
+        # каждый пуш. Без строки живая позиция бота усыновляется как MANUAL, а
+        # ручным монитор принципиально не досылает стоп — рецидив бага №1.
+        _row_written = False
+        for _attempt in range(3):
+            try:
+                if await db.save_trade_open(pos):
+                    _row_written = True
+                    break
+            except Exception as dbe:
+                log.error(f"{sig.symbol}: save_trade_open failed — {dbe}")
+            await asyncio.sleep(0.5)
+        if not _row_written:
+            log.critical(
+                f"{sig.symbol}: позиция ОТКРЫТА, но строка в trades не записана. "
+                f"После рестарта она будет опознана как ручная и останется без "
+                f"досылки стопа — закрой её вручную или почини запись в БД."
+            )
 
         # IMPORTANT — recurring historical bug: SL/TP have previously been
         # placed as chart markers only, without actually reaching the
@@ -848,9 +863,15 @@ async def monitor_positions(client: BybitClient) -> None:
                         qty=abs(float(lp.get("size") or 0)), score=0,
                         signal_type="RECOVERED",
                     )
+                    if not await db.save_trade_open(pos):
+                        # Без строки в trades следующий рестарт опознает её как
+                        # чужую. Под учёт не берём — повторим на след. тике,
+                        # позиция остаётся видимой на бирже и в логе.
+                        log.error(f"{sym}: восстановленную позицию не удалось "
+                                  f"записать в trades — повтор на следующем тике")
+                        continue
                     state.positions[sym] = pos
                     state.pending_entries.pop(sym, None)
-                    await db.save_trade_open(pos)
                     log.warning(f"{sym}: позиция найдена на бирже после потери ответа — взята под учёт")
                 except Exception as re_:
                     log.error(f"{sym}: не удалось оформить восстановленную позицию — {re_}")
@@ -877,8 +898,15 @@ async def monitor_positions(client: BybitClient) -> None:
                     log.info(f"{sym}: ручная позиция закрыта — вне учёта бота")
                 else:
                     if not pos.order_id:
-                        # Восстановленная позиция могла не иметь строки в trades
-                        await db.save_trade_open(pos)
+                        # Восстановленная позиция могла не иметь строки в trades.
+                        # Возврат проверяем обязательно: без строки
+                        # save_trade_close вернёт CLOSE_ABSENT, а он означает
+                        # «PnL учёл тот, кто закрыл» — здесь не учёл НИКТО, и
+                        # убыток исчез бы молча. Повторим на следующем тике.
+                        if not await db.save_trade_open(pos):
+                            log.error(f"{sym}: строка сделки не записана — "
+                                      f"учёт закрытия отложен")
+                            continue
                     # _forget_symbol ТОЛЬКО после успешного учёта: иначе
                     # неподтверждённое закрытие теряет убыток навсегда, а
                     # неудачная запись даёт двойной счёт через блок простоя.

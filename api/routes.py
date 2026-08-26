@@ -444,6 +444,11 @@ async def get_stats(request: Request):
         "outcomes_7d":  outcomes,
         "scan_count":   state.scan_count,
         "last_scan_found": state.last_scan_found,
+        # Эфемерная база = вся статистика форвард-теста стирается при
+        # каждом деплое. Отдаём признак наружу: одной строки в логе при
+        # старте оказалось недостаточно, чтобы это заметили.
+        "db_ephemeral": db.is_ephemeral(),
+        "db_path": db.DB_PATH,
         "last_scan_at": state.last_scan_at.isoformat() + "Z" if state.last_scan_at else None,
         # Сканер намеренно двигает счётчик и время даже при провале, поэтому
         # без этого поля HTTP-фолбэк рисовал растущий «Скан #43» и зелёный

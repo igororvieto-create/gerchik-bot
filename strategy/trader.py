@@ -28,6 +28,9 @@ _TP_RETRIES: dict[str, int] = {}
 # 30 секунд «чинил» его заново, а позиция жила без защиты (рецидив бага №1).
 _SL_RETRIES: dict[str, int] = {}
 _MAX_SL_RETRIES = 3
+# Символы, по которым уже кричали о превышении потолка риска: без этого
+# CRITICAL печатался бы каждые 30 секунд и утопил остальной лог.
+_RISK_WARNED: set = set()
 
 
 def _forget_symbol(symbol: str) -> None:
@@ -38,6 +41,7 @@ def _forget_symbol(symbol: str) -> None:
     state.pending_entries.pop(symbol, None)
     _TP_RETRIES.pop(symbol, None)
     _SL_RETRIES.pop(symbol, None)
+    _RISK_WARNED.discard(symbol)
 
 
 async def close_and_verify(client: BybitClient, symbol: str, side: str,
@@ -177,18 +181,33 @@ async def fetch_matching_closed_pnl(client: BybitClient, pos: Position,
         if i:
             await asyncio.sleep(delay)
         try:
-            closed = await client.get_closed_pnl(pos.symbol, limit=5)
-            # Самая РАННЯЯ подходящая запись: она соответствует закрытию
-            # именно этой позиции, а не последующей сделке по символу.
-            best = None
+            closed = await client.get_closed_pnl(pos.symbol, limit=10)
+            # СУММА всех записей окна, а не одна выбранная.
+            #
+            # Раньше бралась самая ранняя подходящая. У позиции бывают СВОИ
+            # более ранние записи: риск-гард сокращает размер сразу после
+            # входа (close_position на излишек), и частичный залив
+            # close_and_verify тоже оставляет запись. Тогда «самая ранняя»
+            # оказывалась сокращением на -0.12, а реальный выход по стопу
+            # на -15.0 не учитывался вовсе — и в trades писалась цена
+            # выхода, равная цене входа.
+            #
+            # Позиция может закрываться несколькими событиями, поэтому её
+            # PnL — это сумма. Цена выхода берётся у ПОСЛЕДНЕЙ записи: она
+            # и есть фактический выход.
+            hits = []
             for rec in closed:
                 rec_ms = float(rec.get("updatedTime") or rec.get("createdTime") or 0)
                 if opened_ms - 60_000 <= rec_ms <= upper_ms:
-                    if best is None or rec_ms < best[0]:
-                        best = (rec_ms, rec)
-            if best is not None:
-                rec = best[1]
-                return float(rec.get("avgExitPrice", 0)), float(rec.get("closedPnl", 0))
+                    hits.append((rec_ms, rec))
+            if hits:
+                hits.sort(key=lambda x: x[0])
+                total = sum(float(r.get("closedPnl", 0)) for _, r in hits)
+                exit_px = float(hits[-1][1].get("avgExitPrice", 0))
+                if len(hits) > 1:
+                    log.info(f"{pos.symbol}: закрытие из {len(hits)} записей, "
+                             f"суммарный pnl={total:+.2f}")
+                return exit_px, total
         except Exception as ce:
             log.warning(f"{pos.symbol}: could not fetch closed PnL (attempt {i+1}) — {ce}")
     # (0.0, 0.0) означает «не нашли», а НЕ «PnL равен нулю» — вызывающий
@@ -246,7 +265,12 @@ async def _record_round_trip(client: BybitClient, pos: Position,
     the realized PnL into the circuit breaker — fees/slippage of an aborted
     entry are real losses and must not vanish from the books."""
     try:
-        await db.save_trade_open(pos)
+        if not await db.save_trade_open(pos):
+            # Возврат проверяется здесь так же, как в остальных путях:
+            # без строки save_trade_close вернёт CLOSE_ABSENT, а он значит
+            # «PnL учёл кто-то другой» — здесь не учёл никто.
+            log.error(f"{pos.symbol}: строка round-trip не записана — "
+                      f"издержки прерванного входа могут потеряться")
     except Exception as e:
         log.error(f"{pos.symbol}: save_trade_open (round-trip) failed — {e}")
     # Не подтвердилось — строка остаётся open, и её подберёт блок
@@ -925,6 +949,29 @@ async def monitor_positions(client: BybitClient) -> None:
                 if live_size > 0 and abs(live_size - pos.qty) / max(pos.qty, 1e-9) > 0.01:
                     log.warning(f"{sym}: размер позиции {pos.qty} → {live_size} (сверка с биржей)")
                     pos.qty = live_size
+
+                # Потолок риска 3% проверялся ТОЛЬКО в enter_trade, и только
+                # при удачной верификации. Дальше позиция жила без надзора:
+                # если верификация не прошла (гео-блок, 403), сокращение
+                # пропускалось, а строкой выше монитор ещё и принимает
+                # увеличенный размер с биржи — например после ручной доливки.
+                # Инвариант «риск 1-3%» при этом молча нарушался.
+                #
+                # Здесь только ОБНАРУЖЕНИЕ и громкий лог: автоматическое
+                # сокращение позиции по возможно устаревшему балансу может
+                # навредить сильнее самой проблемы, это решение владельца.
+                if (state.balance > 0 and pos.entry > 0 and pos.sl > 0
+                        and pos.signal_type != "MANUAL"):
+                    real_risk = pos.qty * abs(pos.entry - pos.sl)
+                    risk_pct = real_risk / state.balance * 100
+                    if risk_pct > 3.0 and sym not in _RISK_WARNED:
+                        _RISK_WARNED.add(sym)
+                        log.critical(
+                            f"{sym}: риск позиции {risk_pct:.2f}% превышает потолок 3% "
+                            f"(qty={pos.qty}, стоп {abs(pos.entry - pos.sl):.6f}, "
+                            f"баланс {state.balance:.2f}). Сократи вручную — "
+                            f"автоматически не трогаю."
+                        )
 
                 # Continuous SL verification — the "monitor re-checks" that
                 # enter_trade's unverified path relies on. A live position

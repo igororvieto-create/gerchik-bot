@@ -321,3 +321,29 @@ async def test_ws_ticket_expires(monkeypatch):
     ticket = _body(await R.ws_ticket(FakeRequest("s3cret")))["ticket"]
     R._WS_TICKETS[ticket] = 0.0        # просрочен
     assert R._burn_ws_ticket(ticket) is False
+
+
+async def test_stats_reports_whether_the_database_survives_deploys(no_token):
+    """О том, что база эфемерная, сообщала ОДНА строка в логе при старте.
+    Её никто не видит: на дашборде статистика просто обнулялась после
+    пуша, и это выглядело как «стратегия стала хуже», а не как потеря
+    данных. Признак обязан быть в API."""
+    body = _body(await R.get_stats(FakeRequest()))
+    assert "db_ephemeral" in body, "дашборду нечем показать потерю базы"
+    assert isinstance(body["db_ephemeral"], bool)
+    assert "db_path" in body
+
+
+def test_ephemeral_flag_follows_the_actual_path(monkeypatch):
+    """Признак обязан считаться по фактическому пути, а не по константе:
+    том может быть смонтирован не в /data, а путь задан через DB_PATH."""
+    import importlib, sys
+    for mod in [m for m in sys.modules if m.startswith("core.db")]:
+        del sys.modules[mod]
+    monkeypatch.delenv("DB_PATH", raising=False)
+    import core.db as db
+    importlib.reload(db)
+    db.DB_PATH = "/app/data/signals.db"
+    assert db.is_ephemeral() is True
+    db.DB_PATH = "/data/signals.db"
+    assert db.is_ephemeral() is False

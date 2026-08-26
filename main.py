@@ -140,14 +140,26 @@ async def lifespan(app: FastAPI):
 
     import strategy.scanner as _sc
     import strategy.trader as _tr
+    import strategy.evaluator as _ev
     deadline = 25.0
     # _ENTERING обязателен: enter_trade выполняется ПОСЛЕ того, как scan_all
     # отпустил _SCANNING, поэтому раньше цикл завершался на первой итерации,
     # и сессия закрывалась прямо между place_order и установкой стопа.
-    while deadline > 0 and (_sc._SCANNING or _tr._MONITORING or _tr._ENTERING > 0):
+    # _EVALUATING в условии обязателен. Без него оценщик не ждали вовсе:
+    # pause() уже запущенную задачу не трогает, флаги остальных нулевые,
+    # цикл выходил мгновенно, и _client.close() срабатывал у оценщика под
+    # руками. Сам он от этого не падает (CancelledError проходит мимо его
+    # except Exception), но если отмена застаёт его внутри get_klines, то
+    # bybit._get уходит в повтор и ПЕРЕСОЗДАЁТ закрытую сессию — ровно тот
+    # осиротевший объект, от которого стартовый скан защитили отдельно.
+    def _busy() -> bool:
+        return bool(_sc._SCANNING or _tr._MONITORING or _tr._ENTERING > 0
+                    or _ev._EVALUATING)
+
+    while deadline > 0 and _busy():
         await asyncio.sleep(0.5)
         deadline -= 0.5
-    if _sc._SCANNING or _tr._MONITORING or _tr._ENTERING > 0:
+    if _busy():
         log.warning("shutdown: задачи не завершились за 25с — закрываю принудительно")
 
     # Отмена стартового скана — ПОСЛЕ ожидания, а не до него. Планировщику

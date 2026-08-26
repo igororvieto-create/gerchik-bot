@@ -551,3 +551,101 @@ async def test_close_without_a_trades_row_does_not_swallow_the_pnl(db_tmp, monke
         f"PnL учтён без строки в trades: {state.daily_realized_pnl}"
     assert "NOROWUSDT" in state.positions, \
         "позиция снята с учёта — убыток потерян навсегда, повторять некому"
+
+
+async def test_partial_reduction_does_not_replace_the_real_exit(db_tmp):
+    """У позиции бывают СВОИ ранние записи closed-pnl: риск-гард сокращает
+    размер сразу после входа, частичный залив close_and_verify тоже
+    оставляет запись. Прежний выбор «самой ранней» брал сокращение на -0.12
+    и терял реальный выход по стопу на -15.0 — предохранитель видел 2%
+    убытка вместо полного, а в trades писалась цена выхода, равная входу."""
+    db = db_tmp
+    await db.init_db()
+    pos = await _tracked_position(db, symbol="PARTUSDT", age_min=240)
+    now = datetime.utcnow()
+    ex = FakeExchange(positions=[], closed_pnl=[
+        {"symbol": "PARTUSDT", "closedPnl": "-0.12", "avgExitPrice": "100.0",
+         "updatedTime": _ms(now - timedelta(hours=4))},     # сокращение риск-гардом
+        {"symbol": "PARTUSDT", "closedPnl": "-15.0", "avgExitPrice": "98.0",
+         "updatedTime": _ms(now)},                          # реальный выход
+    ])
+    await tr.monitor_positions(ex)
+
+    assert state.daily_realized_pnl == pytest.approx(-15.12), (
+        f"учтена не сумма записей позиции: {state.daily_realized_pnl}")
+    row = sqlite3.connect(db.DB_PATH).execute(
+        "SELECT exit_price, pnl FROM trades WHERE symbol='PARTUSDT'").fetchone()
+    assert row[0] == pytest.approx(98.0), "цена выхода взята у сокращения, а не у выхода"
+    assert row[1] == pytest.approx(-15.12)
+
+
+async def test_single_record_close_is_unchanged(db_tmp):
+    """Обычный случай (одна запись) не должен пострадать от суммирования."""
+    db = db_tmp
+    await db.init_db()
+    await _tracked_position(db, symbol="ONEUSDT")
+    ex = FakeExchange(positions=[], closed_pnl=[{
+        "symbol": "ONEUSDT", "closedPnl": "-7.5", "avgExitPrice": "98.0",
+        "updatedTime": _ms(datetime.utcnow()),
+    }])
+    await tr.monitor_positions(ex)
+    assert state.daily_realized_pnl == pytest.approx(-7.5)
+
+
+async def test_foreign_record_outside_the_window_is_still_excluded(db_tmp):
+    """Суммирование не должно вернуть старый дефект: запись ДО открытия
+    позиции (чужая сделка пользователя) в сумму не входит."""
+    db = db_tmp
+    await db.init_db()
+    pos = await _tracked_position(db, symbol="FOREIGNUSDT", age_min=30)
+    now = datetime.utcnow()
+    ex = FakeExchange(positions=[], closed_pnl=[
+        {"symbol": "FOREIGNUSDT", "closedPnl": "+500.0", "avgExitPrice": "150.0",
+         "updatedTime": _ms(now - timedelta(hours=8))},     # задолго до открытия
+        {"symbol": "FOREIGNUSDT", "closedPnl": "-9.0", "avgExitPrice": "98.0",
+         "updatedTime": _ms(now)},
+    ])
+    await tr.monitor_positions(ex)
+    assert state.daily_realized_pnl == pytest.approx(-9.0), (
+        f"чужой PnL попал в предохранитель: {state.daily_realized_pnl}")
+
+
+async def test_monitor_detects_risk_above_the_ceiling(db_tmp, caplog):
+    """Потолок 3% проверялся ТОЛЬКО в enter_trade и только при удачной
+    верификации. Дальше позиция жила без надзора: монитор принимает
+    увеличенный размер с биржи (ручная доливка), и инвариант «риск 1-3%»
+    нарушался молча."""
+    import logging
+    db = db_tmp
+    await db.init_db()
+    pos = Position(symbol="BIGUSDT", side="Buy", entry=100.0, sl=95.0, tp1=0.0,
+                   tp2=110.0, tp3=0.0, qty=1.0, score=60,
+                   signal_type="VSA_CLIMAX", order_id="big-1")
+    pos.ts = datetime.utcnow() - timedelta(minutes=30)
+    await db.save_trade_open(pos)
+    state.positions["BIGUSDT"] = pos
+    state.balance = 1000.0          # риск 1*5 = 5 USDT = 0.5% — норма
+    tr._RISK_WARNED.clear()
+
+    live = [{"symbol": "BIGUSDT", "side": "Buy", "size": "1.0", "avgPrice": "100.0",
+             "stopLoss": "95.0", "takeProfit": "110.0", "unrealisedPnl": "0"}]
+    with caplog.at_level(logging.CRITICAL):
+        await tr.monitor_positions(FakeExchange(positions=live))
+    assert not [r for r in caplog.records if r.levelno >= logging.CRITICAL], \
+        "предупреждение при нормальном риске"
+
+    # доливка вручную: размер вырос в 10 раз -> риск 5% при потолке 3%
+    live[0]["size"] = "10.0"
+    caplog.clear()
+    with caplog.at_level(logging.CRITICAL):
+        await tr.monitor_positions(FakeExchange(positions=live))
+    crit = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+    assert crit, "превышение потолка риска не обнаружено"
+    assert "3%" in crit[0].getMessage()
+
+    # и не повторяется каждые 30 секунд
+    caplog.clear()
+    with caplog.at_level(logging.CRITICAL):
+        await tr.monitor_positions(FakeExchange(positions=live))
+    assert not [r for r in caplog.records if r.levelno >= logging.CRITICAL], \
+        "CRITICAL печатается на каждом тике — лог утонет"

@@ -20,6 +20,17 @@ else:
 DB_PATH = os.getenv("DB_PATH", _DEFAULT_DB)
 
 
+def is_ephemeral() -> bool:
+    """True — база не переживёт деплой.
+
+    Раньше об этом сообщала ОДНА строка в логе при старте. Её никто не
+    видит: на дашборде статистика просто обнулялась после пуша, и это
+    выглядело как «стратегия стала хуже», а не как потеря данных.
+    Признак отдаётся в API, чтобы предупреждение висело на экране.
+    """
+    return not os.getenv("DB_PATH") and not DB_PATH.startswith("/data")
+
+
 async def init_db() -> None:
     # Предупреждение здесь, а не на уровне модуля: на импорте оно (а) уходило
     # в stderr мимо настроенного в main.py формата, потому что basicConfig
@@ -830,14 +841,25 @@ async def cleanup_old_signals(keep_hours: int = 48) -> int:
             removed += cur2.rowcount
             # Нерешённые старше окна оценки уже никогда не будут досуждены
             cur3 = await db.execute(
+                # 144 часа, а не 72: оценщик запрашивает нерешённые за
+                # _MAX_AGE_HOURS * 3 = 144 ч, и при более короткой чистке
+                # половина запрошенного окна физически не существовала.
+                # После простоя оценщика дольше 72 ч строки исчезали БЕЗ
+                # вердикта — молча уменьшая n, по которому принимается
+                # решение о реальных деньгах.
                 "DELETE FROM signals WHERE outcome IS NULL AND ts < ?",
-                ((datetime.utcnow() - timedelta(hours=72)).isoformat(),),
+                ((datetime.utcnow() - timedelta(hours=144)).isoformat(),),
             )
             removed += cur3.rowcount
             # Also purge closed trades older than 90 days
             old_trades = (datetime.utcnow() - timedelta(days=90)).isoformat()
             await db.execute(
-                "DELETE FROM trades WHERE status='closed' AND closed_at < ?", (old_trades,)
+                # status IN ('closed','stale'): сторож зависших ставит
+                # 'stale', и такие строки не удалялись НИКОГДА — таблица
+                # росла без предела. Функционально безвредно (get_open_trades
+                # фильтрует по 'open'), но это утечка на годы работы.
+                "DELETE FROM trades WHERE status IN ('closed','stale') "
+                "AND closed_at < ?", (old_trades,)
             )
             await db.commit()
 

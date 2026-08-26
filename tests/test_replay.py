@@ -341,7 +341,13 @@ def test_variants_do_not_change_live_defaults():
     assert (cfg.FUNDING_VOTE, cfg.VSA_SPIKE_EXEMPT) == (False, False)
     # возвращаем, чтобы не протекло в соседние тесты
     cfg.FUNDING_VOTE, cfg.VSA_SPIKE_EXEMPT = before
-    assert set(VARIANTS) >= {"baseline", "nofunding", "nospike", "both"}
+    assert set(VARIANTS) >= {"baseline", "nofunding", "nospike", "both",
+                            "strict", "strict_nf"}
+    # baseline обязан оставлять ВСЕ три освобождения включёнными
+    apply_variant("strict")
+    assert (cfg.VSA_SPIKE_EXEMPT, cfg.VSA_MTF_EXEMPT,
+            cfg.VSA_LEVEL_EXEMPT) == (False, False, False)
+    cfg.VSA_SPIKE_EXEMPT = cfg.VSA_MTF_EXEMPT = cfg.VSA_LEVEL_EXEMPT = True
 
 
 async def test_half_split_covers_the_window_without_overlap():

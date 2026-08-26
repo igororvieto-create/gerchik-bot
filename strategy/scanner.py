@@ -870,7 +870,8 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         # торгуются ПРОТИВ предшествующего движения, и прежний безусловный
         # фильтр вырезал их все до единого — оставляя только входы по тренду,
         # то есть вдогонку (это и давало 1W/14L в форвард-тесте).
-        if cfg.REQUIRE_MTF_ALIGN and not is_vsa_reversal:
+        mtf_exempt = is_vsa_reversal and cfg.VSA_MTF_EXEMPT
+        if cfg.REQUIRE_MTF_ALIGN and not mtf_exempt:
             trend_4h = _trend_direction(klines)
             trend_1h = _trend_direction(klines_1h)
             opposite = "DOWN" if direction == "LONG" else "UP"
@@ -890,7 +891,8 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         # неправильной стороны (лонг сразу под свежепробитой поддержкой),
         # при этом _calc_levels молча падал бы на generic 1.5×ATR стоп без
         # реального уровня за спиной.
-        if not is_vsa_reversal:
+        level_exempt = is_vsa_reversal and cfg.VSA_LEVEL_EXEMPT
+        if not level_exempt:
             # Для трендовых входов цена обязана стоять У уровня, который станет
             # опорой стопа. Развороты освобождены: их опора — экстремум самой
             # сигнальной свечи, и расстояние до неё равно ширине этой свечи
@@ -907,6 +909,7 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         elif atr <= 0:
             return None
         else:
+            # Сюда попадает только освобождённый разворот.
             # Разворот входит ОТ сетапа, а не догоняет его: цена обязана
             # оставаться рядом с закрытием сигнальной свечи. Иначе сигнал,
             # отклонённый сразу после закрытия свечи, мог "дозреть" через

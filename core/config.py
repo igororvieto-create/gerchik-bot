@@ -168,6 +168,11 @@ class Config:
     # среднего и OI +37% за 4 часа, то есть ровно в новостной спайк,
     # который запрещает инвариант в CLAUDE.md.
     VSA_SPIKE_EXEMPT:     bool  = _env_bool("VSA_SPIKE_EXEMPT", True)
+    # Освобождений у VSA-разворотов ТРИ, и вводились они вместе: анти-спайк,
+    # MTF-фильтр и требование близости к уровню. Проверять их поодиночке
+    # бессмысленно — гипотеза «освобождения и есть проблема» цельная.
+    VSA_MTF_EXEMPT:       bool  = _env_bool("VSA_MTF_EXEMPT", True)
+    VSA_LEVEL_EXEMPT:     bool  = _env_bool("VSA_LEVEL_EXEMPT", True)
 
     # Signal history
     # 5000 ≈ 8 суток потока сигналов: лимит не должен обрезать семидневную

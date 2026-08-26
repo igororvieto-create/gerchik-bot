@@ -233,6 +233,15 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
     "nospike":    {"VSA_SPIKE_EXEMPT": False},
     # обе сразу
     "both":       {"FUNDING_VOTE": False, "VSA_SPIKE_EXEMPT": False},
+    # ВСЕ три освобождения VSA сняты: разворот проходит те же гейты, что и
+    # трендовый вход — анти-спайк, MTF и близость к уровню. Гипотеза
+    # цельная: освобождения вводились вместе и защищают инварианты,
+    # которые бот сейчас обходит (CLAUDE.md: не торговать спайки).
+    "strict":     {"VSA_SPIKE_EXEMPT": False, "VSA_MTF_EXEMPT": False,
+                   "VSA_LEVEL_EXEMPT": False},
+    # то же плюс снятый голос фандинга
+    "strict_nf":  {"VSA_SPIKE_EXEMPT": False, "VSA_MTF_EXEMPT": False,
+                   "VSA_LEVEL_EXEMPT": False, "FUNDING_VOTE": False},
 }
 
 

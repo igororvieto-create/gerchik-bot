@@ -1,4 +1,5 @@
 import hmac
+import secrets
 import json
 import logging
 from typing import Optional
@@ -646,6 +647,44 @@ async def close_position_route(symbol: str, request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+# Одноразовые тикеты для апгрейда WebSocket.
+# Токен в query-строке уезжал в access-log uvicorn ОТКРЫТЫМ ТЕКСТОМ: он
+# печатает путь вместе с query и на принятом, и на отклонённом соединении
+# (uvicorn/protocols/websockets/websockets_impl.py). Строка вида
+# «"WebSocket /ws?token=…" [accepted]» писалась в логи Railway тысячи раз в
+# сутки — любой, кому видны логи, получал полный доступ, включая закрытие
+# позиций. Заголовки браузер при апгрейде задавать не умеет, поэтому:
+# тикет берётся обычным HTTP-запросом (токен идёт заголовком и в лог не
+# попадает), живёт секунды и сгорает при первом использовании.
+_WS_TICKETS: dict[str, float] = {}
+_WS_TICKET_TTL = 30.0
+
+
+def _new_ws_ticket() -> str:
+    now = time.time()
+    for t, exp in list(_WS_TICKETS.items()):
+        if exp < now:
+            _WS_TICKETS.pop(t, None)
+    ticket = secrets.token_urlsafe(24)
+    _WS_TICKETS[ticket] = now + _WS_TICKET_TTL
+    return ticket
+
+
+def _burn_ws_ticket(ticket: str) -> bool:
+    """Тикет одноразовый: даже утёкший в лог второй раз не сработает."""
+    exp = _WS_TICKETS.pop(ticket, None)
+    return exp is not None and exp >= time.time()
+
+
+@router.get("/api/ws-ticket")
+async def ws_ticket(request: Request):
+    if (deny := _require_token(request)) is not None:
+        return deny
+    if not os.getenv("DASHBOARD_TOKEN", "").strip():
+        return JSONResponse({"ticket": ""})   # открытый режим, тикет не нужен
+    return JSONResponse({"ticket": _new_ws_ticket()})
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     # WS шлёт историю сигналов и все heartbeat'ы — то же содержимое, что и
@@ -655,10 +694,13 @@ async def websocket_endpoint(ws: WebSocket):
     # успевает уйти.
     token = os.getenv("DASHBOARD_TOKEN", "").strip()
     if token:
-        got = ws.query_params.get("token") or ""
-        if not hmac.compare_digest(got.encode("utf-8"), token.encode("utf-8")):
-            await ws.close(code=1008)   # policy violation
-            log.warning("WS: отклонено подключение без валидного токена")
+        # Принимается ТОЛЬКО одноразовый тикет. Сам токен в URL не попадает
+        # никогда — см. комментарий к _WS_TICKETS выше.
+        if not _burn_ws_ticket(ws.query_params.get("ticket") or ""):
+            # close() до accept() uvicorn превращает в HTTP 403 — код 1008 на
+            # провод не уходит. Для клиента разницы нет (onerror/onclose).
+            await ws.close(code=1008)
+            log.warning("WS: отклонено подключение без валидного тикета")
             return
     await ws.accept()
     state.add_ws(ws)

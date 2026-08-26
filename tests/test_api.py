@@ -267,16 +267,20 @@ async def test_every_data_endpoint_requires_a_request_object():
     assert not unprotected, f"эндпоинты без request (и значит без токена): {unprotected}"
 
 
-async def test_websocket_rejects_connection_without_token(monkeypatch):
+async def test_websocket_accepts_only_a_valid_one_time_ticket(monkeypatch):
     """WS шлёт историю сигналов и все heartbeat'ы — то же содержимое, что и
-    закрытый /api/signals. Браузер не умеет слать заголовки при апгрейде,
-    поэтому токен принимается query-параметром, а проверка обязана стоять ДО
-    accept(): иначе соединение установлено и история уже ушла."""
+    закрытый /api/signals. Токен в query-строке уезжал в access-log uvicorn
+    открытым текстом, поэтому апгрейд идёт по ОДНОРАЗОВОМУ тикету.
+
+    Проверяется и положительный путь: без него мутация «отвергать всех»
+    проходила весь набор, а дашборд молча садился бы в HTTP-режим навсегда
+    при зелёном CI (§0-Б п.10, зеркальный случай — проверка, которая всегда
+    говорит «нет»)."""
     monkeypatch.setenv("DASHBOARD_TOKEN", "s3cret")
 
     class FakeWS:
-        def __init__(self, token=None):
-            self.query_params = {"token": token} if token else {}
+        def __init__(self, ticket=None):
+            self.query_params = {"ticket": ticket} if ticket else {}
             self.accepted = False
             self.closed_code = None
             self.sent = []
@@ -289,12 +293,31 @@ async def test_websocket_rejects_connection_without_token(monkeypatch):
         async def receive(self):
             return {"type": "websocket.disconnect", "code": 1000}
 
-    bad = FakeWS()
-    await R.websocket_endpoint(bad)
-    assert bad.accepted is False, "соединение принято до проверки токена"
-    assert bad.closed_code == 1008
-    assert not bad.sent, "история сигналов ушла без токена"
+    # без тикета и с чужим тикетом — отказ ДО accept(), история не уходит
+    for ws in (FakeWS(), FakeWS("подделка")):
+        await R.websocket_endpoint(ws)
+        assert ws.accepted is False, "соединение принято до проверки"
+        assert not ws.sent, "история сигналов ушла без тикета"
 
-    wrong = FakeWS("неверный")
-    await R.websocket_endpoint(wrong)
-    assert wrong.accepted is False and not wrong.sent
+    # тикет выдаётся только по валидному токену
+    assert _code(await R.ws_ticket(FakeRequest())) == 401
+    ticket = _body(await R.ws_ticket(FakeRequest("s3cret")))["ticket"]
+    assert ticket
+
+    # ПОЛОЖИТЕЛЬНЫЙ путь: валидный тикет обязан пускать
+    ok = FakeWS(ticket)
+    await R.websocket_endpoint(ok)
+    assert ok.accepted is True, "валидный тикет отвергнут — дашборд ослеп бы"
+
+    # и сгорать: повторное использование того же тикета не проходит
+    reused = FakeWS(ticket)
+    await R.websocket_endpoint(reused)
+    assert reused.accepted is False, "тикет одноразовый — повтор обязан падать"
+
+
+async def test_ws_ticket_expires(monkeypatch):
+    """Утёкший в лог тикет обязан быть бесполезным и по времени тоже."""
+    monkeypatch.setenv("DASHBOARD_TOKEN", "s3cret")
+    ticket = _body(await R.ws_ticket(FakeRequest("s3cret")))["ticket"]
+    R._WS_TICKETS[ticket] = 0.0        # просрочен
+    assert R._burn_ws_ticket(ticket) is False

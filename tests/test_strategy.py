@@ -303,16 +303,59 @@ def test_vsa_contribution_cannot_contradict_direction():
         f"первое: {contradictions[0]}")
 
 
-def test_confidence_ignores_the_gap_between_vote_and_tie_break():
-    """Голос цены подаётся при |pc| > 0.1, а тай-брейк работает при любом
-    ненулевом движении. В зазоре primary выведен НЕ из голосов, но согласный
-    голос стакана всё равно вычёркивался: confidence падала с 0.5 до 0.0,
-    кап резал score с 62 до 35, и сигнал терял право на сделку из-за
-    движения цены на 0.05%."""
+# Здесь стоял test_confidence_ignores_the_gap_between_vote_and_tie_break —
+# он закреплял НЕВЕРНЫЙ инвариант «в зазоре confidence обязана совпадать с
+# confidence при полноценном голосе цены». Тест охранял неполную правку: он
+# был написан на примере, где стакан и фандинг ПРОТИВОРЕЧАТ друг другу, то
+# есть на ничьей, и требовал для неё той же уверенности, что для честного
+# большинства. Настоящий инвариант — ниже, в двух тестах: согласие голосов
+# наказывать нельзя, а ничью нельзя выдавать за согласие.
+# Урок в docs/REVIEW.md §0-Б: тест, написанный вместе с правкой, наследует
+# её ошибку, если пример подобран под правку, а не под инвариант.
+
+
+def test_tie_of_contradicting_votes_keeps_the_confluence_cap():
+    """Ничья голосов в SQUEEZE достижима ТОЛЬКО когда стакан и фандинг
+    смотрят в разные стороны — то есть это максимально противоречивый сетап,
+    ровно тот, ради которого написан _apply_confluence_cap.
+
+    Правка зазора |pc| <= 0.1 закрыла реальную ошибку (вычёркивался не тот
+    голос), но подняла кап с 35 до 75 у такой популяции и сделала её
+    торгуемой: сторону реальной сделки со score 70 выбирало суточное
+    движение в 0.0001%. Кап снимать нельзя (CLAUDE.md, LITERATURE §4)."""
     import strategy.scanner as s
-    _, conf_gap = s._direction("SQUEEZE", 0.05, "BUY", 0.05)
-    _, conf_vote = s._direction("SQUEEZE", 0.2, "BUY", 0.05)
-    assert conf_gap == conf_vote, (
-        f"одинаковая структура голосов даёт разную уверенность: "
-        f"{conf_gap} против {conf_vote}")
-    assert s._apply_confluence_cap(62, conf_gap) == 62, "кап срезал полноценный сигнал"
+    # стакан SELL против фандинга LONG, цена в зазоре ниже порога голоса
+    for pc in (-0.0001, 0.0001, 0.05, -0.09):
+        direction, conf = s._direction("SQUEEZE", pc, "SELL", -0.08)
+        assert direction == "NEUTRAL", (
+            f"pc={pc}: сторону решает движение ниже порога голоса ({direction})")
+        assert s._apply_confluence_cap(70, conf) <= 35, (
+            f"pc={pc}: кап снят с противоречивого сетапа")
+    # честное движение цены тай-брейк по-прежнему решает
+    direction, conf = s._direction("SQUEEZE", -0.2, "SELL", -0.08)
+    assert direction == "SHORT" and conf == pytest.approx(0.5)
+
+
+def test_agreeing_votes_are_not_punished_by_the_tie_rule():
+    """Обратная сторона: когда стакан и фандинг СОГЛАСНЫ, ничьей нет, и
+    правило не должно ничего отбрасывать или занижать."""
+    import strategy.scanner as s
+    for pc in (0.05, 0.2):
+        direction, conf = s._direction("SQUEEZE", pc, "BUY", -0.08)
+        assert direction == "LONG"
+        assert conf == pytest.approx(1.0), f"pc={pc}: согласие наказано ({conf})"
+        assert s._apply_confluence_cap(62, conf) == 62
+
+
+def test_weak_price_move_never_decides_direction_anywhere():
+    """Принцип применён в ОБОИХ тай-брейках, а не в одном: движение слабее
+    порога голоса (|pc| <= 0.1) сторону не выбирает нигде. Половинчатое
+    правило вернулось бы находкой следующего ревью, а в фолбэке одинокий
+    голос фандинга — фактор без литературной опоры — единолично снимал кап."""
+    import strategy.scanner as s
+    # фолбэк: стакан нейтрален, голосует только фандинг
+    for sig_type in ("VOLUME_SPIKE", "MOMENTUM"):
+        weak, _ = s._direction(sig_type, 0.05, "NEUTRAL", -0.08)
+        assert weak == "NEUTRAL", f"{sig_type}: сторону решило движение 0.05%"
+        strong, _ = s._direction(sig_type, 0.5, "NEUTRAL", -0.08)
+        assert strong == "LONG", f"{sig_type}: честное движение перестало решать"

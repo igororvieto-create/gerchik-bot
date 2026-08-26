@@ -1087,6 +1087,7 @@ let _tokenPrompted=false;
 // было ни читать, ни закрыть. Явный способ передумать остаётся: тап по
 // баннеру (обработчик ниже) сбрасывает флаг и открывает ввод.
 let _tokenDeclined=false;
+let _tokenTimer=0;
 function promptToken(){
   const t=prompt('Токен доступа (DASHBOARD_TOKEN из Railway):');
   if(!t){
@@ -1095,7 +1096,8 @@ function promptToken(){
     showAlert('🔑 Ввод отменён. Нажми на эту строку, чтобы ввести токен','auth');
     const b0=$('alert');
     if(b0){ b0.style.cursor='pointer';
-            b0.onclick=()=>{ _tokenDeclined=false; _tokenPrompted=true; promptToken(); }; }
+            b0.onclick=()=>{ clearTimeout(_tokenTimer); _tokenDeclined=false;
+                             _tokenPrompted=true; promptToken(); }; }
     return;
   }
   _tokenDeclined=false;
@@ -1121,7 +1123,8 @@ function askForToken(){
     showAlert('🔑 Нужен токен доступа — нажми, чтобы ввести','auth');
     const b1=$('alert');
     if(b1){ b1.style.cursor='pointer';
-            b1.onclick=()=>{ _tokenDeclined=false; _tokenPrompted=true; promptToken(); }; }
+            b1.onclick=()=>{ clearTimeout(_tokenTimer); _tokenDeclined=false;
+                             _tokenPrompted=true; promptToken(); }; }
     return;
   }
   _tokenPrompted=true;
@@ -1130,9 +1133,14 @@ function askForToken(){
   // Обработчик реально вешаем: раньше баннер предлагал нажать, но слушателя
   // не было, и после отмены prompt'а тап по нему ничего не делал — а на
   // телефоне это единственный видимый способ действия.
+  // clearTimeout обязателен: тап по баннеру внутри окна 100 мс вызывал
+  // promptToken немедленно, а prompt() модален и блокирует поток — таймер
+  // срабатывал сразу после закрытия первой модалки, и пользователь получал
+  // ДВА окна подряд на один тап.
   if(b){ b.style.cursor='pointer';
-         b.onclick=()=>{ _tokenDeclined=false; _tokenPrompted=true; promptToken(); }; }
-  setTimeout(promptToken, 100);
+         b.onclick=()=>{ clearTimeout(_tokenTimer); _tokenDeclined=false;
+                         _tokenPrompted=true; promptToken(); }; }
+  _tokenTimer=setTimeout(promptToken, 100);
 }
 
 const _origFetch = window.fetch;
@@ -1149,14 +1157,18 @@ window.fetch = function(url, opts){
 };
 
 /* ── WebSocket ── */
-function connect(){
+async function connect(){
   const proto=location.protocol==='https:'?'wss':'ws';
   let ws;
-  // Токен в query, а не в заголовке: браузерный WebSocket не даёт задавать
-  // заголовки при апгрейде. Патч window.fetch ниже на WS не распространяется,
-  // поэтому подставляем явно — иначе дашборд отключил бы сам себя.
-  const _t=(authHeaders()['X-Dashboard-Token']||'');
-  const _q=_t?`?token=${encodeURIComponent(_t)}`:'';
+  // В URL уходит ОДНОРАЗОВЫЙ тикет, а не токен: uvicorn печатает query в
+  // access-log, и токен оказывался в логах Railway открытым текстом. Тикет
+  // берётся обычным fetch (там токен идёт заголовком и не логируется),
+  // живёт 30 секунд и сгорает при первом использовании.
+  let _q='';
+  try{
+    const tr=await fetch('/api/ws-ticket').then(r=>r.ok?r.json():{});
+    if(tr && tr.ticket) _q=`?ticket=${encodeURIComponent(tr.ticket)}`;
+  }catch{}
   try{ ws=new WebSocket(`${proto}://${location.host}/ws${_q}`); }
   catch(e){ fallback(); return; }
 

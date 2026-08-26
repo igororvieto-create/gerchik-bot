@@ -497,7 +497,7 @@ def _direction(sig_type: str, price_change: float, ob_bias: str, funding: float,
     # голос почти по каждому символу. Поскольку фандинг чаще положителен, это
     # был постоянный голос SHORT — им и задавалось направление 2/3 сделок
     # (наблюдалось 24 шорта на 13 лонгов за сутки).
-    if abs(funding) >= cfg.FUNDING_EXTREME:
+    if cfg.FUNDING_VOTE and abs(funding) >= cfg.FUNDING_EXTREME:
         votes.append("LONG" if funding < 0 else "SHORT")
     if vsa_bias != "NEUTRAL":
         votes.append(vsa_bias)
@@ -801,7 +801,8 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         # выдавался на пике ещё не закрытой свечи).
         # Исключение — VSA-развороты: климакс по определению широкая свеча,
         # и торгуется он ПРОТИВ неё, а не вдогонку.
-        if atr > 0 and not is_vsa_reversal:
+        spike_exempt = is_vsa_reversal and cfg.VSA_SPIKE_EXEMPT
+        if atr > 0 and not spike_exempt:
             for k in klines[-2:]:
                 if (k["high"] - k["low"]) / atr > cfg.MAX_LAST_CANDLE_ATR:
                     return None

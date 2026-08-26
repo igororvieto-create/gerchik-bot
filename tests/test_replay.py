@@ -325,3 +325,63 @@ def test_report_renders_without_crashing():
     assert "стакан" in text and "ОДИН РАЗ" in text
     # пустой вход не роняет отчёт
     assert "Сигналов не найдено" in report([], {"symbols": [], "days": 1})
+
+
+def test_variants_do_not_change_live_defaults():
+    """Переключатели существуют ради ИЗМЕРЕНИЯ. Вариант baseline обязан
+    оставлять боевое поведение нетронутым, иначе прогон меряет не то, что
+    работает в бою."""
+    from tools.replay import apply_variant, VARIANTS
+    from core.config import cfg
+    before = (cfg.FUNDING_VOTE, cfg.VSA_SPIKE_EXEMPT)
+    assert before == (True, True), "боевые дефолты изменены"
+    apply_variant("baseline")
+    assert (cfg.FUNDING_VOTE, cfg.VSA_SPIKE_EXEMPT) == before
+    apply_variant("both")
+    assert (cfg.FUNDING_VOTE, cfg.VSA_SPIKE_EXEMPT) == (False, False)
+    # возвращаем, чтобы не протекло в соседние тесты
+    cfg.FUNDING_VOTE, cfg.VSA_SPIKE_EXEMPT = before
+    assert set(VARIANTS) >= {"baseline", "nofunding", "nospike", "both"}
+
+
+async def test_half_split_covers_the_window_without_overlap():
+    """Закрытая половина обязана НЕ пересекаться с половиной для поиска:
+    иначе гипотеза проверяется на тех же данных, где найдена."""
+    hist = make_hist(n=120)
+    a = hist["k4"][0]["ts"]
+    b = hist["k4"][-1]["ts"] + _H4_MS
+    cut = a + int((b - a) * 2 / 3)
+    scanner._LISTING_AGE_CACHE.clear()
+    explore = await replay_symbol(hist, lo_ms=a, hi_ms=cut)
+    scanner._LISTING_AGE_CACHE.clear()
+    holdout = await replay_symbol(hist, lo_ms=cut, hi_ms=b)
+    ts_e = {r["ts"] for r in explore}
+    ts_h = {r["ts"] for r in holdout}
+    assert not (ts_e & ts_h), "половины пересекаются — проверка недействительна"
+    assert all(t < cut for t in ts_e) and all(t >= cut for t in ts_h)
+
+
+async def test_long_only_drops_shorts():
+    from tools.replay import replay_symbol as rs
+    hist = make_hist(n=120)
+    scanner._LISTING_AGE_CACHE.clear()
+    rows = await rs(hist, long_only=True)
+    assert all(r["direction"] == "LONG" for r in rows)
+
+
+def test_missing_funding_or_oi_skips_the_moment():
+    """Пропуск данных НЕ должен подставляться нулём.
+
+    Так и случилось на первом сборе: истории фандинга не хватало, каждый
+    сигнал получал ровно 0.0000%, голос фандинга не срабатывал НИ РАЗУ, и
+    прогон мерил обрубок стратегии. По отчёту это было не видно —
+    единственным следом была confidence 0.4 у 100% сделок."""
+    hist = make_hist()
+    now = _signal_moment(hist)
+    assert build_ticker(hist, now) is not None
+
+    no_fund = {**hist, "funding": [f for f in hist["funding"] if f["ts"] >= now]}
+    assert build_ticker(no_fund, now) is None, "фандинг подставлен нулём"
+
+    no_oi = {**hist, "oi": [r for r in hist["oi"] if r["ts"] >= now]}
+    assert build_ticker(no_oi, now) is None, "open interest подставлен нулём"

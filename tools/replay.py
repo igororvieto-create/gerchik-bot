@@ -142,10 +142,24 @@ def build_ticker(hist: Dict[str, Any], now_ms: int) -> Optional[Dict]:
     ref = closed[-7]["close"]
     chg = (price - ref) / ref if ref > 0 else 0.0
     vol24 = sum(k["volume"] for k in closed[-6:])
+    # Отсутствие данных НЕ подставляется нулём.
+    #
+    # Раньше здесь стояло `rate = ... if fund else 0.0`, и когда истории
+    # фандинга не хватало, каждый сигнал получал ровно 0.0000%. Это тихо
+    # выключало и голос фандинга, и очки за него: замер показал confidence
+    # 0.4 у 100% сделок, то есть НИ ОДИН фактор ни разу не подтверждал
+    # направление. Прогон мерил не стратегию, а её обрубок — и заметить
+    # это по отчёту было нельзя.
+    #
+    # Теперь момент без данных просто не моделируется.
     fund = [f for f in hist["funding"] if f["ts"] < now_ms]
-    rate = fund[-1]["rate"] if fund else 0.0
+    if not fund:
+        return None
+    rate = fund[-1]["rate"]
     oi_rows = [r for r in hist["oi"] if r["ts"] < now_ms]
-    oi_val = (oi_rows[-1]["oi"] * price) if oi_rows else 0.0
+    if not oi_rows:
+        return None
+    oi_val = oi_rows[-1]["oi"] * price
     return {
         "symbol": hist["symbol"],
         "lastPrice": str(price),
@@ -208,7 +222,31 @@ def _finish(d: Dict) -> None:
         slot.pop("_fee_n", None)
 
 
-async def replay_symbol(hist: Dict[str, Any], step: int = 1) -> List[Dict]:
+# Варианты структуры стратегии. Каждый — гипотеза, сформулированная ДО
+# просмотра результата, а не порог, подобранный под него.
+VARIANTS: Dict[str, Dict[str, Any]] = {
+    # как сейчас в бою
+    "baseline":   {},
+    # фандинг задаёт сторону ~2/3 сделок, литературной опоры нет (§4)
+    "nofunding":  {"FUNDING_VOTE": False},
+    # без освобождения VSA бот перестаёт входить против вертикальных свечей
+    "nospike":    {"VSA_SPIKE_EXEMPT": False},
+    # обе сразу
+    "both":       {"FUNDING_VOTE": False, "VSA_SPIKE_EXEMPT": False},
+}
+
+
+def apply_variant(name: str) -> None:
+    """Переключатели ставятся ДО прогона и не трогают боевые дефолты."""
+    if name not in VARIANTS:
+        raise SystemExit(f"неизвестный вариант {name}; есть: {list(VARIANTS)}")
+    for k, v in VARIANTS[name].items():
+        setattr(cfg, k, v)
+
+
+async def replay_symbol(hist: Dict[str, Any], step: int = 1,
+                        lo_ms: int = 0, hi_ms: int = 0,
+                        long_only: bool = False) -> List[Dict]:
     """Прогон одного символа: сигналы + их исходы."""
     out: List[Dict] = []
     k4 = hist["k4"]
@@ -216,6 +254,13 @@ async def replay_symbol(hist: Dict[str, Any], step: int = 1) -> List[Dict]:
     warm = max(26, cfg.KEY_LEVEL_LOOKBACK + 2, cfg.MTF_TREND_LOOKBACK + 3) + 2
     for i in range(warm, len(k4), step):
         now_ms = k4[i]["ts"] + _H4_MS       # момент закрытия свечи i
+        # Раздел выборки: половина для поиска гипотез, половина закрытая.
+        # Проверять идею на тех же данных, где она найдена, значит мерить
+        # собственную подгонку (docs/LITERATURE.md §6).
+        if lo_ms and now_ms < lo_ms:
+            continue
+        if hi_ms and now_ms >= hi_ms:
+            break
         ticker = build_ticker(hist, now_ms)
         if ticker is None:
             continue
@@ -231,6 +276,8 @@ async def replay_symbol(hist: Dict[str, Any], step: int = 1) -> List[Dict]:
         # а не молча мерить старую.
         sig = await scanner._analyze_symbol(cast(BybitClient, client), ticker)
         if sig is None:
+            continue
+        if long_only and sig.direction != "LONG":
             continue
         verdict = judge_signal(hist, sig, now_ms)
         if verdict is None:
@@ -308,6 +355,9 @@ def report(rows: List[Dict], meta: Dict) -> str:
     head = (
         "=" * 72 +
         "\nПРОГОН СТРАТЕГИИ ПО ИСТОРИИ\n" + "=" * 72 +
+        f"\nВариант: {meta.get('_variant', 'baseline')}"
+        f"{'  ТОЛЬКО ЛОНГИ' if meta.get('_long_only') else ''}"
+        f"{'  половина: ' + meta['_half'] if meta.get('_half') else ''}"
         f"\nИсточник данных: {meta.get('source', 'не указан')}"
         f"\nСимволов: {len(meta.get('symbols', []))}   окно: {meta.get('days')} дн."
         f"\nСигналов с исходом: {len(rows)}"
@@ -339,6 +389,12 @@ async def main() -> int:
     ap.add_argument("--step", type=int, default=1,
                     help="шаг по 4h-свечам (1 = каждая)")
     ap.add_argument("--json-out", default="")
+    ap.add_argument("--variant", default="baseline",
+                    help=f"структура стратегии: {list(VARIANTS)}")
+    ap.add_argument("--long-only", action="store_true",
+                    help="отбрасывать шорты (шорты теряют втрое больше)")
+    ap.add_argument("--half", default="", choices=["", "explore", "holdout"],
+                    help="explore = первые 2/3 окна, holdout = последняя треть")
     args = ap.parse_args()
 
     meta_path = os.path.join(args.hist, "_meta.json")
@@ -349,6 +405,13 @@ async def main() -> int:
     with open(meta_path, encoding="utf-8") as f:
         meta = json.load(f)
 
+    apply_variant(args.variant)
+    lo_ms = hi_ms = 0
+    if args.half:
+        a, b = int(meta["start_ms"]), int(meta["end_ms"])
+        cut = a + int((b - a) * 2 / 3)
+        lo_ms, hi_ms = (a, cut) if args.half == "explore" else (cut, b)
+
     rows: List[Dict] = []
     for sym in meta["symbols"]:
         p = os.path.join(args.hist, f"{sym}.json")
@@ -356,10 +419,14 @@ async def main() -> int:
             continue
         with open(p, encoding="utf-8") as f:
             hist = json.load(f)
-        got = await replay_symbol(hist, step=args.step)
+        got = await replay_symbol(hist, step=args.step, lo_ms=lo_ms,
+                                  hi_ms=hi_ms, long_only=args.long_only)
         rows.extend(got)
         print(f"{sym}: {len(got)} исходов", file=sys.stderr)
 
+    meta["_variant"] = args.variant
+    meta["_long_only"] = args.long_only
+    meta["_half"] = args.half
     print(report(rows, meta))
     if args.json_out:
         with open(args.json_out, "w", encoding="utf-8") as f:

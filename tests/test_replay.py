@@ -391,3 +391,72 @@ def test_missing_funding_or_oi_skips_the_moment():
 
     no_oi = {**hist, "oi": [r for r in hist["oi"] if r["ts"] >= now]}
     assert build_ticker(no_oi, now) is None, "open interest подставлен нулём"
+
+
+async def test_round_entry_is_free_of_lookahead():
+    """Новый вход обязан пройти тот же тест, что и боевой: отравленное
+    будущее не должно менять сигнал. Отдельная стратегия — отдельная
+    возможность заглянуть вперёд."""
+    from tools.round_strategy import analyze_round
+    hist = make_hist(n=200)
+    scanner._LISTING_AGE_CACHE.clear()
+    found = None
+    for i in range(30, 199):
+        now = hist["k4"][i]["ts"] + _H4_MS
+        t = build_ticker(hist, now)
+        if t is None:
+            continue
+        scanner._LISTING_AGE_CACHE.pop(hist["symbol"], None)
+        for mode in ("fade", "break"):
+            s = await analyze_round(ReplayClient(hist, now), t, mode)
+            if s:
+                found = (now, mode, s)
+                break
+        if found:
+            break
+    assert found, "на этом ряду вход по круглым числам обязан сработать"
+    now, mode, clean = found
+    ph = poison_future(hist, now)
+    scanner._LISTING_AGE_CACHE.pop(hist["symbol"], None)
+    poisoned = await analyze_round(ReplayClient(ph, now), build_ticker(ph, now), mode)
+    assert poisoned is not None
+    for f in ("direction", "entry", "sl", "tp2", "sl_pct", "atr_pct"):
+        assert getattr(clean, f) == pytest.approx(getattr(poisoned, f)), \
+            f"{f} изменилось от будущих данных — заглядывание вперёд"
+
+
+def test_round_grid_is_scale_invariant():
+    from tools.round_strategy import round_grid
+    for price, want_step in ((111340.0, 10000.0), (2345.6, 100.0), (0.02345, 0.001)):
+        step, nearest = round_grid(price)
+        assert step == pytest.approx(want_step)
+        assert abs(nearest - price) <= step / 2 + 1e-12
+    assert round_grid(0.0) is None
+    assert round_grid(-1.0) is None
+
+
+async def test_round_stop_sits_beyond_the_round_number():
+    """Стоп обязан стоять ЗА круглым числом, а не вплотную: вплотную — это
+    зона чужих стоп-кластеров (LITERATURE §1), там нас и выбьет каскадом."""
+    from tools.round_strategy import analyze_round, round_grid
+    hist = make_hist(n=200)
+    scanner._LISTING_AGE_CACHE.clear()
+    checked = 0
+    for i in range(30, 199):
+        now = hist["k4"][i]["ts"] + _H4_MS
+        t = build_ticker(hist, now)
+        if t is None:
+            continue
+        scanner._LISTING_AGE_CACHE.pop(hist["symbol"], None)
+        s = await analyze_round(ReplayClient(hist, now), t, "fade")
+        if not s:
+            continue
+        step, nearest = round_grid(s.entry)
+        if s.direction == "SHORT":
+            assert s.sl > nearest, "стоп не за круглым числом"
+        else:
+            assert s.sl < nearest, "стоп не за круглым числом"
+        checked += 1
+        if checked >= 3:
+            break
+    assert checked, "не нашлось ни одного сигнала fade для проверки стопа"

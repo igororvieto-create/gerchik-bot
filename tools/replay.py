@@ -253,9 +253,22 @@ def apply_variant(name: str) -> None:
         setattr(cfg, k, v)
 
 
+async def _make_signal(client, ticker, strategy: str):
+    """Боевой отбор или экспериментальный вход по круглым числам.
+
+    Боевой путь вызывается КАК ЕСТЬ. Круглые числа — отдельный модуль в
+    tools/, боевого кода он не касается вовсе.
+    """
+    if strategy == "live":
+        return await scanner._analyze_symbol(cast(BybitClient, client), ticker)
+    from tools.round_strategy import analyze_round
+    return await analyze_round(client, ticker, strategy.split("_", 1)[1])
+
+
 async def replay_symbol(hist: Dict[str, Any], step: int = 1,
                         lo_ms: int = 0, hi_ms: int = 0,
-                        long_only: bool = False) -> List[Dict]:
+                        long_only: bool = False,
+                        strategy: str = "live") -> List[Dict]:
     """Прогон одного символа: сигналы + их исходы."""
     out: List[Dict] = []
     k4 = hist["k4"]
@@ -280,10 +293,8 @@ async def replay_symbol(hist: Dict[str, Any], step: int = 1,
         # cast, а не подавление проверки: ReplayClient намеренно реализует
         # ровно тот срез интерфейса BybitClient, который читает
         # _analyze_symbol. Если боевой анализ начнёт звать новый метод,
-        # прогон упадёт с AttributeError — и это правильно: значит харнесс
-        # перестал соответствовать измеряемой стратегии и его надо чинить,
-        # а не молча мерить старую.
-        sig = await scanner._analyze_symbol(cast(BybitClient, client), ticker)
+        # прогон упадёт с AttributeError — и это правильно.
+        sig = await _make_signal(client, ticker, strategy)
         if sig is None:
             continue
         if long_only and sig.direction != "LONG":
@@ -364,7 +375,8 @@ def report(rows: List[Dict], meta: Dict) -> str:
     head = (
         "=" * 72 +
         "\nПРОГОН СТРАТЕГИИ ПО ИСТОРИИ\n" + "=" * 72 +
-        f"\nВариант: {meta.get('_variant', 'baseline')}"
+        f"\nСтратегия: {meta.get('_strategy', 'live')}"
+        f"   вариант: {meta.get('_variant', 'baseline')}"
         f"{'  ТОЛЬКО ЛОНГИ' if meta.get('_long_only') else ''}"
         f"{'  половина: ' + meta['_half'] if meta.get('_half') else ''}"
         f"\nИсточник данных: {meta.get('source', 'не указан')}"
@@ -402,6 +414,9 @@ async def main() -> int:
                     help=f"структура стратегии: {list(VARIANTS)}")
     ap.add_argument("--long-only", action="store_true",
                     help="отбрасывать шорты (шорты теряют втрое больше)")
+    ap.add_argument("--strategy", default="live",
+                    choices=["live", "round_fade", "round_break"],
+                    help="live = боевой отбор; round_* = вход по круглым числам")
     ap.add_argument("--half", default="", choices=["", "explore", "holdout"],
                     help="explore = первые 2/3 окна, holdout = последняя треть")
     args = ap.parse_args()
@@ -429,10 +444,12 @@ async def main() -> int:
         with open(p, encoding="utf-8") as f:
             hist = json.load(f)
         got = await replay_symbol(hist, step=args.step, lo_ms=lo_ms,
-                                  hi_ms=hi_ms, long_only=args.long_only)
+                                  hi_ms=hi_ms, long_only=args.long_only,
+                                  strategy=args.strategy)
         rows.extend(got)
         print(f"{sym}: {len(got)} исходов", file=sys.stderr)
 
+    meta["_strategy"] = args.strategy
     meta["_variant"] = args.variant
     meta["_long_only"] = args.long_only
     meta["_half"] = args.half

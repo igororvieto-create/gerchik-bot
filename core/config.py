@@ -229,6 +229,13 @@ cfg.TOP_N_PAIRS         = int(_clamp(cfg.TOP_N_PAIRS,         5,   500, "TOP_N_P
 cfg.SCAN_BATCH_SIZE     = int(_clamp(cfg.SCAN_BATCH_SIZE,     1,    50, "SCAN_BATCH_SIZE"))
 cfg.SCAN_BATCH_DELAY    = _clamp(cfg.SCAN_BATCH_DELAY,      0.0,  10.0, "SCAN_BATCH_DELAY")
 cfg.SIGNAL_COOLDOWN_MIN = int(_clamp(cfg.SIGNAL_COOLDOWN_MIN, 0,  1440, "SIGNAL_COOLDOWN_MIN"))
+# MAX_SIGNALS_DB — единственный параметр, который НАПРЯМУЮ УДАЛЯЕТ данные:
+# cleanup_old_signals режет решённые сигналы до этого числа, не глядя на
+# возраст, и ходит по крону каждые 6 часов. Клампа у него не было, и
+# опечатка вроде MAX_SIGNALS_DB=3 уничтожает всю статистику форвард-теста
+# за один прогон, оставляя в логе только «Cleanup: removed 10 old signals».
+# Нижняя граница 1000 — это больше 7-суточной витрины при любом потоке.
+cfg.MAX_SIGNALS_DB      = int(_clamp(cfg.MAX_SIGNALS_DB, 1000, 200_000, "MAX_SIGNALS_DB"))
 cfg.TRADE_FLOW_LIMIT    = int(_clamp(cfg.TRADE_FLOW_LIMIT,    0,  1000, "TRADE_FLOW_LIMIT"))
 
 # Связь из docs/REVIEW.md §2, которую поштучные клампы не ловят: порог показа

@@ -610,3 +610,21 @@ async def test_history_span_reports_facts_not_guesses(legacy_db):
     db.DB_PATH = "/nonexistent-dir/x.db"
     bad = await db.history_span()
     assert bad["rows"] == -1, "сбой чтения выдан за пустую базу"
+
+
+@pytest.mark.parametrize("value", ["0", "3", "10"])
+def test_signal_limit_cannot_be_set_low_enough_to_destroy_history(value):
+    """MAX_SIGNALS_DB — единственный параметр, который НАПРЯМУЮ УДАЛЯЕТ
+    данные: cleanup_old_signals режет решённые сигналы до этого числа, не
+    глядя на возраст, и ходит по крону каждые 6 часов.
+
+    Клампа у него не было. Опечатка MAX_SIGNALS_DB=3 уничтожает всю
+    статистику форвард-теста за один прогон, оставляя в логе только
+    «Cleanup: removed N old signals» — и это неотличимо от стёртой базы."""
+    got = _cfg_value({"MAX_SIGNALS_DB": value}, "cfg.MAX_SIGNALS_DB")
+    assert got >= 1000, f"MAX_SIGNALS_DB={value} прошёл без кламп — история под угрозой"
+
+
+def test_signal_limit_keeps_a_sane_value_untouched():
+    """Кламп не должен ломать рабочую настройку."""
+    assert _cfg_value({"MAX_SIGNALS_DB": "5000"}, "cfg.MAX_SIGNALS_DB") == 5000

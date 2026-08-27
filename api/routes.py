@@ -1,4 +1,5 @@
 import hmac
+from datetime import datetime
 import secrets
 import json
 import logging
@@ -452,6 +453,9 @@ async def get_stats(request: Request):
         # Факт вместо догадки о пути: сколько истории реально в базе.
         # Признак по пути может ошибаться, а эти два числа — нет.
         "db_history": await db.history_span(),
+        # Возраст процесса. Если история СТАРШЕ процесса — база пережила
+        # рестарт, и это доказательство сохранности, а не догадка по пути.
+        "uptime_hours": (datetime.utcnow() - state.started_at).total_seconds() / 3600,
         "last_scan_at": state.last_scan_at.isoformat() + "Z" if state.last_scan_at else None,
         # Сканер намеренно двигает счётчик и время даже при провале, поэтому
         # без этого поля HTTP-фолбэк рисовал растущий «Скан #43» и зелёный
@@ -596,7 +600,7 @@ async def close_position_route(symbol: str, request: Request):
     if state.client is None:
         return JSONResponse({"error": "client not initialized"}, status_code=503)
     from core.state import Position
-    from strategy.trader import (_settle_closed_position, record_realized_close,
+    from strategy.trader import (_settle_closed_position,
                                  close_and_verify, _forget_symbol)
     import asyncio as _asyncio
     pos = state.positions.get(symbol)

@@ -366,6 +366,7 @@ input[type=range]::-moz-range-thumb{
 <div class="scan-bar">
   <div class="scan-pulse" id="scan-pulse"></div>
   <span id="scan-info">Ожидание первого скана…</span>
+  <span id="db-info" style="opacity:.75;margin-left:8px"></span>
 </div>
 
 <div class="pos-panel" id="pos-panel">
@@ -746,6 +747,13 @@ async function refreshStats(){
       $('s-wr-sub').textContent=`${oc.win}W · ${oc.loss}L · ${oc.be??0}БУ · `
         +`${oc.winrate!=null?oc.winrate+'%':'—'} · ${oc.open} ждут`;
     }
+    // Состояние базы — НЕЗАВИСИМО от того, был ли скан и не упал ли он.
+    // Раньше весь блок был вложен в if(last_scan_at) и в else от
+    // scan_error, то есть молчал ровно тогда, когда нужен: сразу после
+    // деплоя (скана ещё не было) и при падающих сканах — а это и есть
+    // моменты, когда данные теряются.
+    renderDbState(d);
+
     if(d.last_scan_at){
       const t=new Date(d.last_scan_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
       $('s-lastscan').textContent=t;
@@ -757,22 +765,6 @@ async function refreshStats(){
       } else {
         gScanErr=false;
         $('scan-info').textContent=`Скан #${d.scan_count} · ${t} · найдено: ${d.last_scan_found??0}`;
-        // Эфемерная база: статистика форвард-теста стирается при каждом
-        // деплое, и это выглядит как «стратегия испортилась», а не как
-        // потеря данных. Баннер висит, пока том не подключён.
-        // Факт о базе показываем ВСЕГДА, рядом со строкой скана: потеря
-        // истории иначе выглядит как «стратегия испортилась».
-        if(d.db_history && d.db_history.rows>=0){
-          const h=d.db_history, a=h.age_hours;
-          $('scan-info').textContent+=`  ·  история: ${h.rows} сигн.`
-            +(a!=null?`, старейший ${a<48?Math.round(a)+' ч':Math.round(a/24)+' сут'} назад`:'');
-        }
-        if(d.db_ephemeral===true){
-          showAlert('⚠ База ЭФЕМЕРНАЯ ('+(d.db_path||'?')+') — вся статистика '
-                   +'стирается при каждом деплое. Подключи Volume в /data','dbvol');
-        } else if(d.db_ephemeral===false){
-          clearAlert('dbvol');
-        }
         // Баннер диагностики гасился ТОЛЬКО внутри самой модалки, поэтому
         // «⚠ Bybit API недоступен» висел сутками рядом со строкой об
         // успешном скане — два противоположных утверждения на одном экране.
@@ -826,6 +818,42 @@ async function refreshBalance(){
     // «всё в порядке» показывалось поверх недоступного бэкенда.
     $('s-bal').textContent='—';
     showAlert('⚠ Баланс: ответ не получен', 'balance');
+  }
+}
+
+function renderDbState(d){
+  // Факты, а не догадка по пути. is_ephemeral() отвечает на вопрос «задан
+  // ли DB_PATH и был ли писабельный /data при импорте», и ошибается в
+  // большинстве конфигураций: DB_PATH=/app/... без тома даёт False при
+  // эфемерной базе. Поэтому решение принимается по ДВУМ числам.
+  const h=d.db_history, up=d.uptime_hours;
+  if(h && h.rows>=0){
+    const a=h.age_hours;
+    $('db-info').textContent=`история: ${h.rows} сигн.`
+      +(a!=null?`, старейший ${a<48?Math.round(a)+' ч':Math.round(a/24)+' сут'} назад`:'');
+  } else if(h && h.rows===-1){
+    // rows=-1 — база НЕ ЧИТАЕТСЯ. Это не «данных нет», и путать нельзя.
+    $('db-info').textContent='база не читается';
+    showAlert('⚠ База не читается — статистика и защита позиций под вопросом','dbvol');
+    return;
+  } else {
+    $('db-info').textContent='';
+  }
+
+  // База МОЛОЖЕ процесса = она не пережила последний рестарт. Это факт, а
+  // не предположение: если бы том был подключён, история была бы старше.
+  const wiped = h && h.age_hours!=null && up!=null && up>2 && h.age_hours < up;
+  if(wiped){
+    showAlert(`⚠ База моложе процесса (история ${Math.round(h.age_hours)} ч, `
+             +`бот работает ${Math.round(up)} ч) — данные стёрлись при рестарте. `
+             +`Путь: ${d.db_path||'?'}`,'dbvol');
+  } else if(d.db_ephemeral===true){
+    showAlert('⚠ База ЭФЕМЕРНАЯ ('+(d.db_path||'?')+') — статистика стирается '
+             +'при каждом деплое. Подключи Volume в /data','dbvol');
+  } else if(h && h.age_hours!=null && up!=null && h.age_hours > up){
+    // История СТАРШЕ процесса — база пережила рестарт. Единственное
+    // положительное доказательство сохранности, какое у нас есть.
+    clearAlert('dbvol');
   }
 }
 

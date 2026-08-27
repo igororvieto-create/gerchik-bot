@@ -202,11 +202,46 @@ async def fetch_matching_closed_pnl(client: BybitClient, pos: Position,
                     hits.append((rec_ms, rec))
             if hits:
                 hits.sort(key=lambda x: x[0])
-                total = sum(float(r.get("closedPnl", 0)) for _, r in hits)
-                exit_px = float(hits[-1][1].get("avgExitPrice", 0))
-                if len(hits) > 1:
-                    log.info(f"{pos.symbol}: закрытие из {len(hits)} записей, "
+                # ОГРАНИЧЕНИЕ ПО ОБЪЁМУ. Одного окна по времени мало.
+                #
+                # Верхняя граница окна — «сейчас», а у восстановленной
+                # строки pos.ts это время ОТКРЫТИЯ, то есть окно растянуто
+                # на всё время, пока строка висела open. Ручная сделка
+                # пользователя по тому же символу за этот период попадала
+                # в сумму: реальный убыток -15 превращался в фиктивную
+                # победу +185, и чужие деньги уходили в дневной
+                # предохранитель. Тот самый класс, от которого защищает
+                # ветка signal_type == "MANUAL".
+                #
+                # Позицию размера Q могут закрыть только записи, суммарный
+                # closedSize которых равен Q. Берём записи по порядку и
+                # останавливаемся, как только позиция закрыта полностью;
+                # всё, что дальше, — чужое.
+                qty = abs(pos.qty)
+                taken, acc = [], 0.0
+                for rec_ms, rec in hits:
+                    taken.append((rec_ms, rec))
+                    try:
+                        acc += abs(float(rec.get("closedSize") or 0))
+                    except (TypeError, ValueError):
+                        acc = 0.0
+                    # 1% допуск на округление лота биржей
+                    if qty > 0 and acc >= qty * 0.99:
+                        break
+                # closedSize не пришёл ни в одной записи — объём проверить
+                # нечем. Берём ТОЛЬКО первую: занизить учёт безопаснее, чем
+                # приписать себе чужую сделку.
+                if acc <= 0:
+                    taken = hits[:1]
+                total = sum(float(r.get("closedPnl", 0)) for _, r in taken)
+                exit_px = float(taken[-1][1].get("avgExitPrice", 0))
+                if len(taken) > 1:
+                    log.info(f"{pos.symbol}: закрытие из {len(taken)} записей, "
                              f"суммарный pnl={total:+.2f}")
+                if len(hits) > len(taken):
+                    log.warning(f"{pos.symbol}: в окне {len(hits)} записей, "
+                                f"учтено {len(taken)} по объёму позиции "
+                                f"({qty}) — остальные не наши")
                 return exit_px, total
         except Exception as ce:
             log.warning(f"{pos.symbol}: could not fetch closed PnL (attempt {i+1}) — {ce}")
@@ -949,6 +984,33 @@ async def monitor_positions(client: BybitClient) -> None:
                 if live_size > 0 and abs(live_size - pos.qty) / max(pos.qty, 1e-9) > 0.01:
                     log.warning(f"{sym}: размер позиции {pos.qty} → {live_size} (сверка с биржей)")
                     pos.qty = live_size
+
+                # Сверка ЦЕНЫ ВХОДА с биржей. Раньше pos.entry обновлялся
+                # только в ветке `verified and live_pos` внутри enter_trade,
+                # а ветка «верифицировать не удалось» (гео-блок, 403)
+                # штатная — и позиция жила с ценой СИГНАЛА вместо цены
+                # залива. Последствия задевали две защиты сразу:
+                #   * детектор потолка риска считал risk по цене сигнала и
+                #     был слеп ровно в том случае, ради которого написан:
+                #     при проскальзывании 1.5% реальные 4.5% риска
+                #     выглядели как ровно 3.00% и CRITICAL не печатался;
+                #   * перенос в безубыток брал fee и уровень от цены
+                #     сигнала и ставил «безубыток» НИЖЕ фактического входа,
+                #     то есть фиксировал гарантированный минус.
+                # avgPrice с биржи — это факт, синхронизируем всегда.
+                live_entry = float(lp.get("avgPrice") or 0)
+                if (live_entry > 0 and pos.entry > 0
+                        and abs(live_entry - pos.entry) / pos.entry > 0.0005):
+                    log.warning(f"{sym}: цена входа {pos.entry} → {live_entry} "
+                                f"(сверка с биржей, проскальзывание "
+                                f"{(live_entry - pos.entry) / pos.entry * 100:+.2f}%)")
+                    pos.entry = live_entry
+                    # Строка в trades тоже обязана нести цену залива: иначе
+                    # весь разбор в R по этой сделке смещён на проскальзывание.
+                    try:
+                        await db.update_trade_entry(pos.order_id, sym, live_entry)
+                    except Exception as ue:
+                        log.error(f"{sym}: не удалось записать цену входа — {ue}")
 
                 # Потолок риска 3% проверялся ТОЛЬКО в enter_trade, и только
                 # при удачной верификации. Дальше позиция жила без надзора:

@@ -846,7 +846,7 @@ async def get_trades(limit: int = 50) -> List[Dict]:
         return []
 
 
-async def cleanup_old_signals(keep_hours: int = 48) -> int:
+async def cleanup_old_signals(keep_hours: int = 192) -> int:
     from core.config import cfg
     cutoff = (datetime.utcnow() - timedelta(hours=keep_hours)).isoformat()
     try:

@@ -563,11 +563,14 @@ async def test_partial_reduction_does_not_replace_the_real_exit(db_tmp):
     await db.init_db()
     pos = await _tracked_position(db, symbol="PARTUSDT", age_min=240)
     now = datetime.utcnow()
+    # closedSize присутствует, как в настоящем ответе Bybit: сокращение
+    # закрыло 0.2 от позиции, выход — оставшиеся 0.8. Сумма = размер
+    # позиции, и алгоритм останавливается ровно на ней.
     ex = FakeExchange(positions=[], closed_pnl=[
         {"symbol": "PARTUSDT", "closedPnl": "-0.12", "avgExitPrice": "100.0",
-         "updatedTime": _ms(now - timedelta(hours=4))},     # сокращение риск-гардом
+         "closedSize": "0.2", "updatedTime": _ms(now - timedelta(hours=4))},
         {"symbol": "PARTUSDT", "closedPnl": "-15.0", "avgExitPrice": "98.0",
-         "updatedTime": _ms(now)},                          # реальный выход
+         "closedSize": "0.8", "updatedTime": _ms(now)},
     ])
     await tr.monitor_positions(ex)
 
@@ -649,3 +652,85 @@ async def test_monitor_detects_risk_above_the_ceiling(db_tmp, caplog):
         await tr.monitor_positions(FakeExchange(positions=live))
     assert not [r for r in caplog.records if r.levelno >= logging.CRITICAL], \
         "CRITICAL печатается на каждом тике — лог утонет"
+
+
+async def test_foreign_trade_after_open_is_not_summed_into_our_pnl(db_tmp):
+    """Регрессия суммирования: окно тянется от ОТКРЫТИЯ позиции до «сейчас»,
+    а у восстановленной строки это всё время простоя. Ручная сделка
+    пользователя по тому же символу попадала в сумму — реальный убыток -15
+    превращался в фиктивную победу, и чужие деньги уходили в дневной
+    предохранитель.
+
+    Позицию размера Q могут закрыть только записи суммарным объёмом Q.
+    Всё, что дальше, — чужое."""
+    db = db_tmp
+    await db.init_db()
+    pos = await _tracked_position(db, symbol="GHOSTUSDT", age_min=180)
+    now = datetime.utcnow()
+    ex = FakeExchange(positions=[], closed_pnl=[
+        # наш стоп: закрыл позицию целиком (qty=1.0)
+        {"symbol": "GHOSTUSDT", "closedPnl": "-15.0", "avgExitPrice": "98.0",
+         "closedSize": "1.0", "updatedTime": _ms(now - timedelta(hours=2))},
+        # ручная сделка пользователя ПОСЛЕ нашей, тот же символ
+        {"symbol": "GHOSTUSDT", "closedPnl": "+200.0", "avgExitPrice": "150.0",
+         "closedSize": "5.0", "updatedTime": _ms(now - timedelta(minutes=10))},
+    ])
+    await tr.monitor_positions(ex)
+
+    assert state.daily_realized_pnl == pytest.approx(-15.0), (
+        f"чужой PnL попал в предохранитель: {state.daily_realized_pnl}")
+    row = sqlite3.connect(db.DB_PATH).execute(
+        "SELECT exit_price, pnl FROM trades WHERE symbol='GHOSTUSDT'").fetchone()
+    assert row[1] == pytest.approx(-15.0), "в историю записана чужая сделка"
+    assert row[0] == pytest.approx(98.0), "цена выхода взята у чужой сделки"
+
+
+async def test_missing_closed_size_falls_back_to_one_record(db_tmp):
+    """Если биржа не прислала closedSize, объём проверить нечем. Занизить
+    учёт безопаснее, чем приписать себе чужую сделку: берём только первую
+    запись и пишем предупреждение."""
+    db = db_tmp
+    await db.init_db()
+    await _tracked_position(db, symbol="NOSIZEUSDT", age_min=180)
+    now = datetime.utcnow()
+    ex = FakeExchange(positions=[], closed_pnl=[
+        {"symbol": "NOSIZEUSDT", "closedPnl": "-5.0", "avgExitPrice": "98.0",
+         "updatedTime": _ms(now - timedelta(hours=2))},
+        {"symbol": "NOSIZEUSDT", "closedPnl": "+300.0", "avgExitPrice": "150.0",
+         "updatedTime": _ms(now - timedelta(minutes=5))},
+    ])
+    await tr.monitor_positions(ex)
+    assert state.daily_realized_pnl == pytest.approx(-5.0), (
+        f"без closedSize учтено больше одной записи: {state.daily_realized_pnl}")
+
+
+async def test_monitor_syncs_entry_price_from_the_exchange(db_tmp, caplog):
+    """При неудачной верификации входа pos.entry оставался ценой СИГНАЛА.
+    Из-за этого детектор потолка риска был слеп ровно в том случае, ради
+    которого написан: при проскальзывании 1.5% реальные 4.5% риска
+    выглядели как ровно 3.00%, и CRITICAL не печатался."""
+    import logging
+    db = db_tmp
+    await db.init_db()
+    pos = Position(symbol="SLIPUSDT", side="Buy", entry=100.0, sl=97.0, tp1=0.0,
+                   tp2=106.0, tp3=0.0, qty=10.0, score=60,
+                   signal_type="VSA_CLIMAX", order_id="slip-1")
+    pos.ts = datetime.utcnow() - timedelta(minutes=30)
+    await db.save_trade_open(pos)
+    state.positions["SLIPUSDT"] = pos
+    state.balance = 1000.0
+    tr._RISK_WARNED.clear()
+
+    # биржа сообщает фактический залив 101.5 — риск 10*4.5 = 4.5% баланса
+    live = [{"symbol": "SLIPUSDT", "side": "Buy", "size": "10.0",
+             "avgPrice": "101.5", "stopLoss": "97.0", "takeProfit": "106.0",
+             "unrealisedPnl": "0"}]
+    with caplog.at_level(logging.CRITICAL):
+        await tr.monitor_positions(FakeExchange(positions=live))
+
+    assert pos.entry == pytest.approx(101.5), "цена входа не сверена с биржей"
+    crit = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+    assert crit, "превышение потолка риска не замечено из-за цены сигнала"
+    row = sqlite3.connect(db.DB_PATH).execute(
+        "SELECT entry FROM trades WHERE order_id='slip-1'").fetchone()
+    assert row[0] == pytest.approx(101.5), "в trades осталась цена сигнала"

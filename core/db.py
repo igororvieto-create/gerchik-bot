@@ -370,6 +370,40 @@ async def get_recent_candle_marks(hours: int = 8) -> Dict[str, int]:
             return {row[0]: int(row[1]) for row in await cur.fetchall()}
 
 
+async def history_span() -> Dict:
+    """Сколько истории реально лежит в базе прямо сейчас.
+
+    Признак is_ephemeral() смотрит на ПУТЬ и может ошибаться: том бывает
+    смонтирован не в /data, а DB_PATH может указывать куда угодно. Здесь —
+    факт вместо догадки: сколько сигналов и насколько стар самый старый.
+
+    Нужно потому, что потеря базы выглядит на дашборде как «стратегия
+    испортилась»: у владельца статистика за ночь превратилась из 0W/13L в
+    1W/3L, и понять по экрану, что это стёртые данные, а не новые сделки,
+    было нельзя.
+    """
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                    "SELECT COUNT(*), MIN(ts) FROM signals") as cur:
+                row = await cur.fetchone()
+        if row is None:            # COUNT всегда даёт строку, но не полагаемся
+            return {"rows": 0, "oldest_ts": None, "age_hours": None}
+        rows = int(row[0] or 0)
+        oldest = row[1]
+        age_h = None
+        if oldest:
+            try:
+                age_h = (datetime.utcnow()
+                         - datetime.fromisoformat(oldest)).total_seconds() / 3600
+            except ValueError:
+                age_h = None
+        return {"rows": rows, "oldest_ts": oldest, "age_hours": age_h}
+    except Exception as e:
+        log.error(f"history_span error: {e}")
+        return {"rows": -1, "oldest_ts": None, "age_hours": None}
+
+
 async def get_recent_signals(hours: int = 24, limit: int = 200) -> List[Dict]:
     cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
     try:

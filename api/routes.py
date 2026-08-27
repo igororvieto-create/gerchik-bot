@@ -449,6 +449,9 @@ async def get_stats(request: Request):
         # старте оказалось недостаточно, чтобы это заметили.
         "db_ephemeral": db.is_ephemeral(),
         "db_path": db.DB_PATH,
+        # Факт вместо догадки о пути: сколько истории реально в базе.
+        # Признак по пути может ошибаться, а эти два числа — нет.
+        "db_history": await db.history_span(),
         "last_scan_at": state.last_scan_at.isoformat() + "Z" if state.last_scan_at else None,
         # Сканер намеренно двигает счётчик и время даже при провале, поэтому
         # без этого поля HTTP-фолбэк рисовал растущий «Скан #43» и зелёный

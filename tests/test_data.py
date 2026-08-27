@@ -7,7 +7,7 @@ import importlib
 import os
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -581,3 +581,32 @@ async def test_stale_sealed_row_still_gets_its_pnl(legacy_db):
     row = sqlite3.connect(path).execute(
         "SELECT status, pnl FROM trades WHERE order_id='st-1'").fetchone()
     assert row == ("closed", -9.0), "stale-строка осталась без PnL"
+
+
+async def test_history_span_reports_facts_not_guesses(legacy_db):
+    """Признак is_ephemeral смотрит на ПУТЬ и может ошибаться: том бывает
+    смонтирован не в /data. Факт — сколько истории реально в базе.
+
+    Нужно потому, что потеря базы выглядит на дашборде как «стратегия
+    испортилась»: статистика за ночь превратилась из 0W/13L в 1W/3L, и
+    понять по экрану, что это стёртые данные, было нельзя."""
+    db, path = legacy_db
+    await db.init_db()
+    span = await db.history_span()
+    assert span["rows"] >= 1, "фикстура содержит сигнал — он обязан считаться"
+    assert span["age_hours"] is not None and span["age_hours"] >= 0
+
+    now = datetime.utcnow().isoformat()
+    old = (datetime.utcnow() - timedelta(hours=50)).isoformat()
+    c = sqlite3.connect(path)
+    for ts in (now, old):
+        c.execute("INSERT INTO signals(symbol,signal_type,direction,score,price,ts)"
+                  " VALUES('S','MOMENTUM','LONG',60,1.0,?)", (ts,))
+    c.commit(); c.close()
+    span = await db.history_span()
+    assert span["age_hours"] >= 49, "возраст берётся у САМОГО СТАРОГО сигнала"
+
+    # недоступная база не роняет дашборд, но и не притворяется пустой
+    db.DB_PATH = "/nonexistent-dir/x.db"
+    bad = await db.history_span()
+    assert bad["rows"] == -1, "сбой чтения выдан за пустую базу"

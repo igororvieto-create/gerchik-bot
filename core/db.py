@@ -961,13 +961,35 @@ async def get_trades(limit: int = 50) -> List[Dict]:
         return []
 
 
+# Докуда дотягивается оценщик: _MAX_AGE_HOURS(48) * 3. Нерешённый сигнал
+# старше этого срока вердикта уже не получит никогда, и держать его незачем.
+_EVAL_REACH_HOURS = 144
+
+
 async def cleanup_old_signals(keep_hours: int = 192) -> int:
+    """Чистка. РЕШЁННЫЕ сигналы по возрасту НЕ удаляются — никогда.
+
+    Здесь стояло `DELETE FROM signals WHERE ts < cutoff` без оговорок, и оно
+    сносило исходы вместе со всем остальным. Форвард-тест от этого упирался
+    в потолок: при 17 решённых в неделю и горизонте 8 дней в базе physически
+    не могло накопиться больше ~19 исходов, сколько бы месяцев бот ни
+    работал. Для вывода нужно ~130 — то есть замер не мог завершиться
+    НИКОГДА, и по цифрам на экране это выглядело бы нормально: свежие
+    исходы есть, счётчик живой.
+
+    Решённый исход — это накопленный результат наблюдения, а не мусор. Его
+    объём ограничивается ЧИСЛОМ строк (MAX_SIGNALS_DB), а не возрастом: при
+    5000 строк и текущем темпе это годы истории.
+
+    keep_hours теперь относится только к сигналам БЕЗ вердикта, и не может
+    оказаться короче досягаемости оценщика.
+    """
     from core.config import cfg
-    cutoff = (datetime.utcnow() - timedelta(hours=keep_hours)).isoformat()
+    stale_h = max(int(keep_hours), _EVAL_REACH_HOURS)
+    cutoff = (datetime.utcnow() - timedelta(hours=stale_h)).isoformat()
     try:
         async with aiosqlite.connect(DB_PATH) as db:
-            cur = await db.execute("DELETE FROM signals WHERE ts < ?", (cutoff,))
-            removed = cur.rowcount
+            removed = 0
             # Row-count cap (MAX_SIGNALS_DB) on top of the time-based retention —
             # a noisy market can write thousands of rows inside 48h
             # Лимит строк НЕ трогает сигналы, по которым оценщик ещё не вынес
@@ -988,16 +1010,14 @@ async def cleanup_old_signals(keep_hours: int = 192) -> int:
                 (max(cfg.MAX_SIGNALS_DB, 1),),
             )
             removed += cur2.rowcount
-            # Нерешённые старше окна оценки уже никогда не будут досуждены
+            # Нерешённые старше досягаемости оценщика вердикта уже не
+            # получат. Порог не может быть короче 144 ч: оценщик запрашивает
+            # нерешённые именно за это окно, и при более короткой чистке
+            # половина запрошенного окна физически не существовала — после
+            # его простоя строки исчезали БЕЗ вердикта, молча уменьшая n.
             cur3 = await db.execute(
-                # 144 часа, а не 72: оценщик запрашивает нерешённые за
-                # _MAX_AGE_HOURS * 3 = 144 ч, и при более короткой чистке
-                # половина запрошенного окна физически не существовала.
-                # После простоя оценщика дольше 72 ч строки исчезали БЕЗ
-                # вердикта — молча уменьшая n, по которому принимается
-                # решение о реальных деньгах.
                 "DELETE FROM signals WHERE outcome IS NULL AND ts < ?",
-                ((datetime.utcnow() - timedelta(hours=144)).isoformat(),),
+                (cutoff,),
             )
             removed += cur3.rowcount
             # Also purge closed trades older than 90 days

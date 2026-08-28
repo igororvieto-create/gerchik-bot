@@ -777,3 +777,72 @@ async def test_reopening_a_symbol_overwrites_the_stale_open_row(tmp_path,
     assert r["signal_type"] == "NEW_TRADE", "строка описывает ПРЕДЫДУЩУЮ сделку"
     assert r["tp2"] == 180.0, "цель осталась от чужой сделки"
     assert r["side"] == "Sell" and r["qty"] == 2.0 and r["score"] == 70
+
+
+# ── Чистка не имеет права стирать накопленные исходы ────────────────────────
+
+async def _mk_signal(d, symbol, hours_ago, outcome):
+    """Кладёт сигнал напрямую с заданным возрастом и вердиктом."""
+    import aiosqlite
+    from datetime import datetime, timedelta
+    ts = (datetime.utcnow() - timedelta(hours=hours_ago)).isoformat()
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO signals (symbol, signal_type, direction, score, price,
+                                    ts, outcome, sl_pct)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (symbol, "VSA_CLIMAX", "LONG", 55, 1.0, ts, outcome, 4.0),
+        )
+        await db.commit()
+
+
+async def _count(d, symbol):
+    import aiosqlite
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        async with db.execute(
+                "SELECT COUNT(*) FROM signals WHERE symbol=?", (symbol,)) as c:
+            return (await c.fetchone())[0]
+
+
+async def test_cleanup_never_deletes_decided_outcomes_by_age(tmp_path, monkeypatch):
+    """Форвард-тест копится МЕСЯЦАМИ, а чистка сносила всё старше keep_hours
+    вместе с исходами. При 17 решённых в неделю и горизонте 8 дней в базе
+    физически не могло накопиться больше ~19 исходов, сколько бы бот ни
+    работал, — а для вывода нужно ~130. Замер не мог завершиться НИКОГДА, и
+    по экрану это выглядело нормально: свежие исходы есть, счётчик живой."""
+    import core.db as d
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "c.db"))
+    await d.init_db()
+    await _mk_signal(d, "OLDWIN", hours_ago=24 * 60, outcome="WIN")    # 60 суток
+    await _mk_signal(d, "OLDLOSS", hours_ago=24 * 45, outcome="LOSS")  # 45 суток
+    await d.cleanup_old_signals(keep_hours=192)
+    assert await _count(d, "OLDWIN") == 1, "решённый исход удалён по возрасту"
+    assert await _count(d, "OLDLOSS") == 1, "решённый исход удалён по возрасту"
+
+
+async def test_cleanup_removes_undecided_beyond_the_evaluator_reach(tmp_path,
+                                                                    monkeypatch):
+    """Обратная сторона: нерешённый сигнал старше досягаемости оценщика
+    вердикта уже не получит, и держать его незачем."""
+    import core.db as d
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "c2.db"))
+    await d.init_db()
+    await _mk_signal(d, "STALE", hours_ago=200, outcome=None)
+    await _mk_signal(d, "FRESH", hours_ago=10, outcome=None)
+    await d.cleanup_old_signals(keep_hours=192)
+    assert await _count(d, "STALE") == 0, "нерешённый висит вечно"
+    assert await _count(d, "FRESH") == 1, "удалён сигнал, ещё ждущий вердикта"
+
+
+async def test_cleanup_window_cannot_be_shorter_than_the_evaluator_reach(
+        tmp_path, monkeypatch):
+    """Оценщик запрашивает нерешённые за 144 ч. При более коротком горизонте
+    половина запрошенного окна физически не существует, и после простоя
+    оценщика строки исчезали БЕЗ вердикта — молча уменьшая n."""
+    import core.db as d
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "c3.db"))
+    await d.init_db()
+    await _mk_signal(d, "WAITING", hours_ago=100, outcome=None)
+    await d.cleanup_old_signals(keep_hours=48)   # заведомо слишком короткий
+    assert await _count(d, "WAITING") == 1, \
+        "сигнал удалён раньше, чем оценщик мог до него дотянуться"

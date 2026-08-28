@@ -473,9 +473,43 @@ async def set_signal_outcome(signal_id: int, outcome: str, price: float,
 # правдоподобного реального эффекта, и сравнивать корзины нельзя.
 ROUND_TRIP_FEE_PCT = 0.13
 
+# Сколько выплат фандинга в среднем застаёт сделка.
+#
+# Замер по 2842 сделкам прогона: держим медианно 7.8 часа (полное окно 48ч
+# доживает лишь 18%), выплаты идут каждые 8 часов, медиана — 2 выплаты.
+# Берём медиану, а не подогнанное среднее 1.62: круглое число из структуры
+# данных, а не десятичная дробь, подобранная на этой же выборке. Оценка
+# получается слегка ПЕССИМИСТИЧНЕЕ факта (-0.0056R против -0.0046R), и это
+# правильная сторона ошибки для оценки ожидания.
+FUNDING_SETTLEMENTS = 2
+
+
+def funding_r(funding_pct: Optional[float], direction: Optional[str],
+              sl_pct: Optional[float]) -> Optional[float]:
+    """Фандинг за сделку в единицах R. ПЛЮС = получаем, минус = платим.
+
+    Учитывать его обязательно: позиция живёт часами и пересекает выплаты.
+    Величина мала — в среднем -0.005R против -0.036R комиссий, то есть
+    примерно восьмая часть, — но знак у неё не всегда отрицательный:
+    контрарный голос по фандингу ставит нас на ПРИНИМАЮЩУЮ сторону в 48%
+    сделок против 29% платящих.
+
+    Ставка положительна, когда лонги платят шортам, поэтому лонг её платит,
+    а шорт получает. Как и комиссия, в R она зависит от ширины стопа.
+
+    Живой реализованный PnL это уже учитывает сам: у Bybit
+    Closed P&L = P&L позиции - комиссия открытия - комиссия закрытия -
+    сумма фандинга. Здесь считается ТЕОРЕТИЧЕСКОЕ ожидание по меткам
+    исходов, где вычитались только комиссии.
+    """
+    if funding_pct is None or not sl_pct or sl_pct <= 0 or not direction:
+        return None
+    sign = 1.0 if direction == "LONG" else -1.0
+    return -sign * funding_pct * FUNDING_SETTLEMENTS / sl_pct
+
 
 def _ev(slot: Dict, sl_pct: Optional[float] = None,
-        fee_r: Optional[float] = None) -> Dict:
+        fee_r: Optional[float] = None, fund_r: Optional[float] = None) -> Dict:
     """Винрейт и матожидание в R.
 
     С переносом стопа в безубыток одного винрейта мало: исход BE даёт ~0R и
@@ -500,8 +534,14 @@ def _ev(slot: Dict, sl_pct: Optional[float] = None,
     # смещение.
     if fee_r is None:
         fee_r = (ROUND_TRIP_FEE_PCT / sl_pct) if (sl_pct and sl_pct > 0) else 0.0
-    out["ev_r"] = round(gross - fee_r, 3)
+    # Фандинг со СВОИМ знаком: он бывает и доходом, поэтому прибавляется,
+    # а не вычитается. Отсутствие данных — это 0.0, а не «дохода нет»:
+    # величина мала, и подставлять сюда пессимизм значило бы врать в
+    # другую сторону.
+    fund = fund_r or 0.0
+    out["ev_r"] = round(gross - fee_r + fund, 3)
     out["fee_r"] = round(fee_r, 3)
+    out["funding_r"] = round(fund, 4)
     return out
 
 
@@ -529,6 +569,20 @@ async def get_outcome_stats(days: int = 7) -> Dict:
             # И только по РЕШЁННЫМ: просрочки в знаменатель EV не входят.
             avg_fee = (ROUND_TRIP_FEE_PCT * float(row_sl[0])
                        if (row_sl and row_sl[0]) else None)
+            # Фандинг усредняется ПОСТРОЧНО и по тем же решённым сигналам:
+            # в R он делится на свой стоп, поэтому 1/sl нельзя выносить за
+            # среднее (то же неравенство Йенсена, что и с комиссией).
+            async with db.execute(
+                """SELECT AVG((CASE WHEN direction = 'LONG' THEN -funding
+                                    ELSE funding END) * ? / sl_pct)
+                   FROM signals
+                   WHERE ts >= ? AND outcome IN ('WIN','LOSS','BE')
+                     AND sl_pct IS NOT NULL AND sl_pct > 0
+                     AND funding IS NOT NULL""",
+                (FUNDING_SETTLEMENTS, cutoff),
+            ) as cur_fd:
+                row_fd = await cur_fd.fetchone()
+            avg_fund = float(row_fd[0]) if (row_fd and row_fd[0] is not None) else None
             async with db.execute(
                 """SELECT COALESCE(outcome, 'OPEN') o, COUNT(*) c FROM signals
                    WHERE ts >= ? GROUP BY o""",
@@ -540,7 +594,7 @@ async def get_outcome_stats(days: int = 7) -> Dict:
                     elif o == "BE":      stats["be"] = c
                     elif o == "EXPIRED": stats["expired"] = c
                     else:                stats["open"] = c
-        stats.update(_ev(stats, fee_r=avg_fee))
+        stats.update(_ev(stats, fee_r=avg_fee, fund_r=avg_fund))
         return stats
     except Exception as e:
         log.error(f"get_outcome_stats error: {e}")
@@ -661,7 +715,7 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """SELECT symbol, score, direction, signal_type, outcome, ts,
-                          sl_pct, atr_pct, headroom,
+                          sl_pct, atr_pct, headroom, funding,
                           flow_delta, flow_absorb, flow_span_min,
                           ob_bias, round_pos
                    FROM signals WHERE outcome IS NOT NULL AND ts >= ?
@@ -670,9 +724,11 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             ) as cur:
                 rows = await cur.fetchall()
 
-        def _acc(d: Dict, key: str, outcome: str, sl_pct=None) -> None:
+        def _acc(d: Dict, key: str, outcome: str, sl_pct=None,
+                 fund=None) -> None:
             slot = d.setdefault(key, {"win": 0, "loss": 0, "be": 0, "expired": 0,
-                                      "_fee_sum": 0.0, "_fee_n": 0})
+                                      "_fee_sum": 0.0, "_fee_n": 0,
+                                      "_fund_sum": 0.0, "_fund_n": 0})
             k = outcome.lower()
             if k in slot:
                 slot[k] += 1
@@ -685,36 +741,41 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             if sl_pct and sl_pct > 0 and k in ("win", "loss", "be"):
                 slot["_fee_sum"] += ROUND_TRIP_FEE_PCT / sl_pct
                 slot["_fee_n"] += 1
+            if fund is not None and k in ("win", "loss", "be"):
+                slot["_fund_sum"] += fund
+                slot["_fund_n"] += 1
 
         for r in rows:
             _sl = r["sl_pct"]
-            _acc(out["by_score"], _bucket(r["score"]), r["outcome"], _sl)
-            _acc(out["by_direction"], r["direction"], r["outcome"], _sl)
-            _acc(out["by_type"], r["signal_type"], r["outcome"], _sl)
+            _fd = funding_r(r["funding"], r["direction"], _sl)
+            _acc(out["by_score"], _bucket(r["score"]), r["outcome"], _sl, _fd)
+            _acc(out["by_direction"], r["direction"], r["outcome"], _sl, _fd)
+            _acc(out["by_type"], r["signal_type"], r["outcome"], _sl, _fd)
             slb = _sl_bucket(r["sl_pct"], r["atr_pct"])
             if slb:
-                _acc(out["by_sl_atr"], slb, r["outcome"], _sl)
+                _acc(out["by_sl_atr"], slb, r["outcome"], _sl, _fd)
             hrb = _hr_bucket(r["headroom"])
             if hrb:
-                _acc(out["by_headroom"], hrb, r["outcome"], _sl)
+                _acc(out["by_headroom"], hrb, r["outcome"], _sl, _fd)
             fb = _flow_bucket(r["flow_delta"], r["flow_absorb"], r["flow_span_min"])
             if fb:
-                _acc(out["by_flow"], fb, r["outcome"], _sl)
+                _acc(out["by_flow"], fb, r["outcome"], _sl, _fd)
             obb = _ob_bucket(r["ob_bias"], r["direction"])
             if obb:
-                _acc(out["by_ob"], obb, r["outcome"], _sl)
+                _acc(out["by_ob"], obb, r["outcome"], _sl, _fd)
             rb = _round_bucket(r["round_pos"])
             if rb:
-                _acc(out["by_round"], rb, r["outcome"], _sl)
+                _acc(out["by_round"], rb, r["outcome"], _sl, _fd)
 
         for d in (out["by_score"], out["by_direction"], out["by_type"],
                   out["by_sl_atr"], out["by_headroom"], out["by_flow"],
                   out["by_ob"], out["by_round"]):
             for slot in d.values():
                 fee = (slot["_fee_sum"] / slot["_fee_n"]) if slot["_fee_n"] else None
-                slot.update(_ev(slot, fee_r=fee))
-                slot.pop("_fee_sum", None)
-                slot.pop("_fee_n", None)
+                fnd = (slot["_fund_sum"] / slot["_fund_n"]) if slot["_fund_n"] else None
+                slot.update(_ev(slot, fee_r=fee, fund_r=fnd))
+                for k_tmp in ("_fee_sum", "_fee_n", "_fund_sum", "_fund_n"):
+                    slot.pop(k_tmp, None)
 
         out["recent"] = [
             {"symbol": r["symbol"], "score": r["score"], "dir": r["direction"],

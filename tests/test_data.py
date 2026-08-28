@@ -628,3 +628,54 @@ def test_signal_limit_cannot_be_set_low_enough_to_destroy_history(value):
 def test_signal_limit_keeps_a_sane_value_untouched():
     """Кламп не должен ломать рабочую настройку."""
     assert _cfg_value({"MAX_SIGNALS_DB": "5000"}, "cfg.MAX_SIGNALS_DB") == 5000
+
+
+# ── Фандинг в расчёте ожидания ──────────────────────────────────────────────
+
+def test_funding_is_income_for_the_receiving_side():
+    """Ставка положительна — лонги платят шортам. Знак обязан следовать за
+    направлением: иначе учёт превратит доход в издержку и наоборот."""
+    from core.db import funding_r, FUNDING_SETTLEMENTS
+    # +0.05% при стопе 5%: лонг платит, шорт получает
+    assert funding_r(0.05, "LONG", 5.0) < 0, "лонг при плюсовой ставке платит"
+    assert funding_r(0.05, "SHORT", 5.0) > 0, "шорт при плюсовой ставке получает"
+    # и наоборот при отрицательной ставке
+    assert funding_r(-0.05, "LONG", 5.0) > 0
+    assert funding_r(-0.05, "SHORT", 5.0) < 0
+    # величина: ставка × выплаты / ширина стопа
+    assert funding_r(0.05, "SHORT", 5.0) == pytest.approx(
+        0.05 * FUNDING_SETTLEMENTS / 5.0)
+
+
+def test_funding_in_r_scales_with_stop_width():
+    """Как и комиссия, в R фандинг зависит от ширины стопа: при узком стопе
+    та же ставка весит В РАЗЫ больше. Плоская константа сместила бы срез
+    по ширине стопа."""
+    from core.db import funding_r
+    narrow = funding_r(0.05, "LONG", 0.7)
+    wide = funding_r(0.05, "LONG", 7.0)
+    assert abs(narrow) > abs(wide) * 9, "фандинг не масштабируется стопом"
+
+
+def test_missing_funding_data_is_not_treated_as_income():
+    from core.db import funding_r
+    assert funding_r(None, "LONG", 5.0) is None
+    assert funding_r(0.05, None, 5.0) is None
+    assert funding_r(0.05, "LONG", 0.0) is None
+    assert funding_r(0.05, "LONG", None) is None
+
+
+def test_expectancy_subtracts_funding_cost_and_adds_funding_income():
+    """Главное: ev_r обязан двигаться от фандинга. Раньше он вычитал только
+    комиссии, и карточка на дашборде была оптимистичнее реальности."""
+    from core.db import _ev
+    slot = {"win": 10, "loss": 20, "be": 0}
+    base = _ev(dict(slot), fee_r=0.04)["ev_r"]
+    cost = _ev(dict(slot), fee_r=0.04, fund_r=-0.02)["ev_r"]
+    income = _ev(dict(slot), fee_r=0.04, fund_r=+0.02)["ev_r"]
+    assert cost == pytest.approx(base - 0.02), "издержка фандинга не вычтена"
+    assert income == pytest.approx(base + 0.02), "доход от фандинга не учтён"
+    assert _ev(dict(slot), fee_r=0.04, fund_r=None)["ev_r"] == pytest.approx(base)
+    # брутто фандинг НЕ трогает: это издержка/доход, а не исход
+    assert _ev(dict(slot), fee_r=0.04, fund_r=-0.02)["ev_gross_r"] == \
+        _ev(dict(slot), fee_r=0.04)["ev_gross_r"]

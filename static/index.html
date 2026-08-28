@@ -1390,7 +1390,11 @@ async function openOutcomes(){
         h+=`<div class="drow"><span class="dk">${esc(k)}</span>`
           +`<span class="dv" style="color:${evc}">`
           +`${v.ev_r==null?'—':(v.ev_r>0?'+':'')+v.ev_r+'R'} <span style="color:var(--muted)">`
-          +`(${v.fee_r?'до комиссий '+(v.ev_gross_r>0?'+':'')+v.ev_gross_r+'R, ':''}`
+          +`(${v.fee_r?'до издержек '+(v.ev_gross_r>0?'+':'')+v.ev_gross_r+'R, ':''}`
+          // Фандинг показываем, только когда он различим на фоне округления
+          // до сотых R: иначе строка обрастает нулями. Знак важен — он
+          // бывает доходом, мы чаще на принимающей стороне.
+          +`${Math.abs(v.funding_r||0)>=0.005?'фандинг '+(v.funding_r>0?'+':'')+v.funding_r.toFixed(3)+'R, ':''}`
           +`${v.win}W/${v.loss}L${v.be?'/'+v.be+'БУ':''}${v.expired?'/'+v.expired+'E':''}`
           +`${v.winrate!=null?', '+v.winrate+'%':''}${dec<10?', мало данных':''})</span></span></div>`;
       }

@@ -265,11 +265,34 @@ async def save_trade_open(pos: Position) -> bool:
             # считать чужую позицию своей.
             if not pos.order_id:
                 async with db.execute(
-                    "SELECT 1 FROM trades WHERE symbol=? AND status='open' LIMIT 1",
+                    "SELECT id FROM trades WHERE symbol=? AND status='open' "
+                    "ORDER BY opened_at DESC LIMIT 1",
                     (pos.symbol,),
                 ) as cur:
-                    if await cur.fetchone():
-                        return True   # строка уже есть — идемпотентный успех
+                    hit = await cur.fetchone()
+                if hit:
+                    # Строка уже есть — но она может описывать ПРЕДЫДУЩУЮ
+                    # сделку по этому символу, чья запись закрытия провалилась
+                    # и оставила status='open'. Раньше здесь стоял голый
+                    # `return True`, и такая строка доживала до рестарта: при
+                    # усыновлении вход, стоп и объём подтягиваются с биржи, а
+                    # ЦЕЛИ, score и order_id берутся из строки — то есть
+                    # позиция получала чужой TP2 и чужой order_id, по которому
+                    # потом искался PnL закрытия.
+                    #
+                    # Переписываем строку под живую позицию: одна открытая
+                    # строка на символ, и она описывает то, что есть сейчас.
+                    await db.execute(
+                        """UPDATE trades SET side=?, entry=?, sl=?, tp1=?, tp2=?,
+                                             tp3=?, qty=?, score=?, signal_type=?,
+                                             opened_at=?
+                           WHERE id=?""",
+                        (pos.side, pos.entry, pos.sl, pos.tp1, pos.tp2, pos.tp3,
+                         pos.qty, pos.score, pos.signal_type,
+                         pos.ts.isoformat(), hit[0]),
+                    )
+                    await db.commit()
+                    return True
             await db.execute(
                 """INSERT OR IGNORE INTO trades
                    (symbol, side, entry, sl, tp1, tp2, tp3, qty,

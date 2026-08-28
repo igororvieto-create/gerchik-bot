@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse as _BaseJSONResponse
 
 from core.state import state
 from core import db
+from core.config import env_name_typos as cfg_env_typos
 
 log = logging.getLogger("api")
 router = APIRouter()
@@ -99,6 +100,11 @@ async def health():
     return {
         "status":       "ok",
         "scan_count":   state.scan_count,
+        # Результат ПОСЛЕДНЕГО скана. Без него дашборд на этом пути писал
+        # «Скан #43 · 07:15» без числа находок, а на HTTP-пути — с числом:
+        # одна и та же строка мигала между двумя форматами, и пустой скан
+        # было не отличить от продуктивного.
+        "last_scan_found": state.last_scan_found,
         "last_scan_at": state.last_scan_at.isoformat() + "Z" if state.last_scan_at else None,
         "ws_clients":   len(state.ws_clients),
         "scan_error":   state.last_scan_error or None,
@@ -448,6 +454,11 @@ async def get_stats(request: Request):
         # Эфемерная база = вся статистика форвард-теста стирается при
         # каждом деплое. Отдаём признак наружу: одной строки в логе при
         # старте оказалось недостаточно, чтобы это заметили.
+        # Опечатки в ИМЕНАХ переменных окружения. В лог такое писалось и
+        # раньше, но лога никто не читает: реальная переменная
+        # " DASHBOARD_TOKEN" с пробелом молча отключила защиту дашборда, и
+        # заметить это было нельзя ничем, кроме чтения настроек глазами.
+        "env_typos": cfg_env_typos(),
         "db_ephemeral": db.is_ephemeral(),
         "db_path": db.DB_PATH,
         # Факт вместо догадки о пути: сколько истории реально в базе.

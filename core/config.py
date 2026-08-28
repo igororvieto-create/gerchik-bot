@@ -1,7 +1,7 @@
 import logging
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, fields, field
 from typing import List
 
 _log = logging.getLogger("config")
@@ -283,3 +283,53 @@ if _worst > cfg.DAILY_LOSS_LIMIT_PCT:
         f"MAX_POSITIONS снижен до {_new_max}"
     )
     cfg.MAX_POSITIONS = _new_max
+
+
+# ── Опечатки в ИМЕНАХ переменных окружения ──────────────────────────────────
+#
+# Реальный случай: переменная была названа " DASHBOARD_TOKEN" — с пробелом в
+# начале. os.getenv("DASHBOARD_TOKEN") вернул пустоту, защита дашборда молча
+# выключилась, и мутирующие эндпоинты боевого бота с ключами биржи оказались
+# открыты всем, у кого есть ссылка. Ни одной ошибки при этом не появилось:
+# для кода переменной просто не существовало.
+#
+# Значение мы не проверяем — оно может быть любым. Проверяем ИМЯ: пробелы по
+# краям не бывают намеренными, а расхождение только в регистре означает, что
+# человек хотел задать известный параметр и промахнулся.
+_KNOWN_ENV_NAMES = frozenset(
+    [f.name for f in fields(Config)] + [
+        # читаются напрямую, минуя Config
+        "DASHBOARD_TOKEN", "DB_PATH", "PORT", "AUTO_TRADE", "BOT_MODE",
+        "PROXY_URL", "PROXY_LIST",
+    ]
+)
+
+
+def env_name_typos() -> List[str]:
+    """Переменные, чьё ИМЯ почти совпадает с известным параметром.
+
+    Возвращает готовые к показу строки. Пусто — значит совпадений нет.
+    """
+    out: List[str] = []
+    for raw in os.environ:
+        cleaned = raw.strip()
+        if cleaned == raw and raw not in _KNOWN_ENV_NAMES:
+            # имя без пробелов и не наше — чужая переменная, не наше дело
+            upper = raw.upper()
+            if upper in _KNOWN_ENV_NAMES and upper != raw:
+                out.append(f"{raw!r} — код читает {upper}, регистр не совпадает")
+            continue
+        if cleaned != raw and cleaned.upper() in _KNOWN_ENV_NAMES:
+            out.append(f"{raw!r} — лишние пробелы в имени, "
+                       f"код читает {cleaned.upper()} и НЕ ВИДИТ эту переменную")
+        elif cleaned != raw:
+            out.append(f"{raw!r} — лишние пробелы в имени переменной")
+    return sorted(out)
+
+
+_TYPOS = env_name_typos()
+if _TYPOS:
+    import logging as _lg2
+    _tl = _lg2.getLogger("config")
+    for _t in _TYPOS:
+        _tl.error(f"ПЕРЕМЕННАЯ ОКРУЖЕНИЯ НЕ ПРИМЕНЕНА: {_t}")

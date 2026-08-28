@@ -750,3 +750,30 @@ def test_local_disk_is_not_reported_as_ephemeral(tmp_path):
     r = _db_probe({"RAILWAY_ENVIRONMENT": None,
                    "RAILWAY_VOLUME_MOUNT_PATH": None, "DB_PATH": None}, tmp_path)
     assert r["eph"] is False
+
+
+async def test_reopening_a_symbol_overwrites_the_stale_open_row(tmp_path,
+                                                                monkeypatch):
+    """Строка предыдущей сделки, чья запись закрытия провалилась, остаётся
+    status='open'. Раньше новая позиция без order_id видела её и молча
+    считала записанной себя — а при усыновлении после рестарта цели, score
+    и order_id берутся ИЗ СТРОКИ, то есть позиция получала ЧУЖОЙ TP2."""
+    import core.db as d
+    from core.state import Position
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "t.db"))
+    await d.init_db()
+    old = Position(symbol="AAAUSDT", side="Buy", entry=100.0, sl=95.0,
+                   tp1=105.0, tp2=110.0, tp3=115.0, qty=1.0, score=50,
+                   signal_type="OLD_TRADE")
+    assert await d.save_trade_open(old) is True
+    new = Position(symbol="AAAUSDT", side="Sell", entry=200.0, sl=210.0,
+                   tp1=195.0, tp2=180.0, tp3=170.0, qty=2.0, score=70,
+                   signal_type="NEW_TRADE")
+    assert await d.save_trade_open(new) is True
+    rows = await d.get_open_trades()
+    rows = [r for r in rows if r["symbol"] == "AAAUSDT"]
+    assert len(rows) == 1, "на символ должна остаться ровно одна открытая строка"
+    r = rows[0]
+    assert r["signal_type"] == "NEW_TRADE", "строка описывает ПРЕДЫДУЩУЮ сделку"
+    assert r["tp2"] == 180.0, "цель осталась от чужой сделки"
+    assert r["side"] == "Sell" and r["qty"] == 2.0 and r["score"] == 70

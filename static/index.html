@@ -367,6 +367,7 @@ input[type=range]::-moz-range-thumb{
   <div class="scan-pulse" id="scan-pulse"></div>
   <span id="scan-info">Ожидание первого скана…</span>
   <span id="db-info" style="opacity:.75;margin-left:8px"></span>
+  <span id="env-info" style="display:none;color:var(--red);margin-left:8px"></span>
 </div>
 
 <div class="pos-panel" id="pos-panel">
@@ -753,6 +754,7 @@ async function refreshStats(){
     // деплоя (скана ещё не было) и при падающих сканах — а это и есть
     // моменты, когда данные теряются.
     renderDbState(d);
+    renderEnvTypos(d);
 
     if(d.last_scan_at){
       const t=new Date(d.last_scan_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
@@ -819,6 +821,24 @@ async function refreshBalance(){
     $('s-bal').textContent='—';
     showAlert('⚠ Баланс: ответ не получен', 'balance');
   }
+}
+
+// Опечатка в ИМЕНИ переменной окружения делает её невидимой для кода и не
+// вызывает никакой ошибки: реальная переменная " DASHBOARD_TOKEN" с пробелом
+// в начале молча выключила защиту дашборда. Показываем на экране — в лог это
+// писалось и раньше, но лога никто не читает.
+// Ниже этого числа решённых исходов цвет и вывод не ставятся: выборка не
+// отличает прибыльную стратегию от убыточной. Порог из docs/REVIEW.md
+// §0-А п.6 — чтобы доказать винрейт 45% против безубытка, нужно ~80
+// исходов; 30 — это минимум, ниже которого утверждать нельзя ничего.
+const MIN_DECIDED_FOR_COLOR = 30;
+
+function renderEnvTypos(d){
+  const el=$('env-info'); if(!el) return;
+  const t=(d && Array.isArray(d.env_typos)) ? d.env_typos : [];
+  if(!t.length){ el.textContent=''; el.style.display='none'; return; }
+  el.style.display='';
+  el.textContent='⚠ Переменные окружения НЕ применены: '+t.join('; ');
 }
 
 function renderDbState(d){
@@ -915,6 +935,15 @@ async function closePos(symbol){
     if(d.ok){
       const card=$('poscard-'+symbol);
       if(card) card.remove();
+      // settled=false: на бирже позиция закрыта, но PnL не подтверждён и в
+      // учёт не попал. Раньше это поле игнорировалось, и сделка выглядела
+      // полностью завершённой, хотя её результат не попадал ни в дневной
+      // предохранитель, ни в статистику. Молчать здесь нельзя.
+      if(d.settled===false){
+        showAlert('⚠ '+symbol+': позиция закрыта на бирже, но результат ещё не '
+                 +'подтверждён — учёт досчитается на ближайшем тике монитора',
+                 'close-'+symbol);
+      }
       await refreshPositions();
     } else {
       alert('Ошибка: '+(d.error||'неизвестно'));
@@ -1094,10 +1123,22 @@ async function doScan(){
 // Объявление ДО IIFE ниже: она заполняет _memToken токеном из ссылки, а
 // обращение к let-переменной раньше её объявления даёт ReferenceError.
 let _memToken='';
-// Открой дашборд один раз как ...app/?token=ТВОЙ_ТОКЕН — он сохранится.
+// Открой дашборд один раз как ...app/#token=ТВОЙ_ТОКЕН — он сохранится.
+//
+// Именно РЕШЁТКА, а не «?»: фрагмент URL браузер на сервер не отправляет,
+// поэтому токен не попадает ни в строку запроса, ни в журналы доступа
+// хостинга, ни в заголовок Referer при переходе по внешней ссылке.
+// Форма с «?token=» принимается для совместимости со старыми ссылками, но
+// такой токен уже засветился в логах — его стоит сменить.
 (function(){
   const u = new URL(location.href);
-  const t = u.searchParams.get('token');
+  let t = u.searchParams.get('token');
+  let fromHash = false;
+  if(!t && location.hash){
+    const hp = new URLSearchParams(location.hash.replace(/^#/, ''));
+    const ht = hp.get('token');
+    if(ht){ t = ht; fromHash = true; }
+  }
   if(t){
     let saved=false;
     // В память — ВСЕГДА: в приватной вкладке и в PWA setItem бросает, и
@@ -1109,7 +1150,17 @@ let _memToken='';
     // Токен из адреса убираем ТОЛЬКО если он реально сохранился: в приватном
     // режиме Safari setItem бросает, и прежний код всё равно стирал токен из
     // URL — после этого не помогала даже перезагрузка.
-    if(saved){ u.searchParams.delete('token'); history.replaceState(null,'',u); }
+    if(saved){
+      if(fromHash){
+        const hp = new URLSearchParams(location.hash.replace(/^#/, ''));
+        hp.delete('token');
+        const rest = hp.toString();
+        history.replaceState(null, '', u.pathname + u.search + (rest ? '#'+rest : ''));
+      } else {
+        u.searchParams.delete('token');
+        history.replaceState(null, '', u);
+      }
+    }
   }
 })();
 function authHeaders(){
@@ -1289,7 +1340,10 @@ async function pollOnce(){
           $('scan-info').textContent=`⚠ Скан #${sr.scan_count} · ${t} · ошибка: ${sr.scan_error}`;
         } else {
           gScanErr=false;
-          $('scan-info').textContent=`Скан #${sr.scan_count} · ${t}`;
+          // «найдено» обязано быть и здесь: без него строка мигала между
+          // двумя форматами, и пустой скан не отличался от продуктивного.
+          $('scan-info').textContent=`Скан #${sr.scan_count} · ${t}`
+            +` · найдено: ${sr.last_scan_found??0}`;
         }
       }
     }
@@ -1386,7 +1440,13 @@ async function openOutcomes(){
       // именно её монотонность этот срез и измеряет.
       for(const k of keys){
         const v=obj[k], dec=v.win+v.loss;
-        const evc = v.ev_r==null?'var(--muted)':(v.ev_r>0?'var(--green)':'var(--red)');
+        // Цвет — это утверждение «стратегия прибыльна/убыточна». На десятке
+        // исходов такого утверждения сделать нельзя: 95% интервал для 5W/10L
+        // тянется от 15% до 58% (docs/REVIEW.md §0-А п.6). Красить в зелёный
+        // случайный плюс значит врать пользователю уверенным тоном, поэтому
+        // до порога цвет нейтральный.
+        const evc = (v.ev_r==null || dec<MIN_DECIDED_FOR_COLOR)
+          ? 'var(--muted)' : (v.ev_r>0?'var(--green)':'var(--red)');
         h+=`<div class="drow"><span class="dk">${esc(k)}</span>`
           +`<span class="dv" style="color:${evc}">`
           +`${v.ev_r==null?'—':(v.ev_r>0?'+':'')+v.ev_r+'R'} <span style="color:var(--muted)">`
@@ -1396,12 +1456,14 @@ async function openOutcomes(){
           // бывает доходом, мы чаще на принимающей стороне.
           +`${Math.abs(v.funding_r||0)>=0.005?'фандинг '+(v.funding_r>0?'+':'')+v.funding_r.toFixed(3)+'R, ':''}`
           +`${v.win}W/${v.loss}L${v.be?'/'+v.be+'БУ':''}${v.expired?'/'+v.expired+'E':''}`
-          +`${v.winrate!=null?', '+v.winrate+'%':''}${dec<10?', мало данных':''})</span></span></div>`;
+          +`${v.winrate!=null?', '+v.winrate+'%':''}${dec<MIN_DECIDED_FOR_COLOR?', мало данных':''})</span></span></div>`;
       }
       return h;
     };
     const sm=d.summary||{};
-    const smc = sm.ev_r==null?'var(--muted)':(sm.ev_r>0?'var(--green)':'var(--red)');
+    const smDec=(sm.win??0)+(sm.loss??0);
+    const smc = (sm.ev_r==null || smDec<MIN_DECIDED_FOR_COLOR)
+      ? 'var(--muted)' : (sm.ev_r>0?'var(--green)':'var(--red)');
     let html=`<div class="drow"><span class="dk">Всего</span><span class="dv" style="color:${smc}">`
       +`${sm.ev_r==null?'—':(sm.ev_r>0?'+':'')+sm.ev_r+'R'} <span style="color:var(--muted)">`
       +`(${sm.win??0}W/${sm.loss??0}L${sm.be?'/'+sm.be+'БУ':''}/${sm.expired??0}E`

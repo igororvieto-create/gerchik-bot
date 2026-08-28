@@ -361,3 +361,66 @@ def test_ephemeral_flag_follows_the_mounted_volume(monkeypatch):
     # и путь, лишь ПОХОЖИЙ на точку монтирования, томом не считается
     db.DB_PATH = "/mnt/volume-other/signals.db"
     assert db.is_ephemeral() is True, "совпадение по префиксу принято за том"
+
+
+# ── Опечатки в именах переменных окружения ──────────────────────────────────
+
+def test_env_var_name_with_spaces_is_reported(monkeypatch):
+    """Реальный случай: переменная названа ' DASHBOARD_TOKEN' с пробелом.
+    os.getenv('DASHBOARD_TOKEN') вернул пустоту, защита дашборда молча
+    выключилась, и мутирующие эндпоинты боевого бота оказались открыты
+    всем, у кого есть ссылка. Ни одной ошибки при этом не возникло."""
+    from core.config import env_name_typos
+    monkeypatch.setenv(" DASHBOARD_TOKEN", "secret")
+    found = env_name_typos()
+    # Недостаточно просто упомянуть имя: сообщение обязано назвать ИМЯ, ПОД
+    # КОТОРЫМ читает код, и сказать, что переменная НЕ ВИДНА. Иначе владелец
+    # смотрит на «лишние пробелы» и не понимает, что защита выключена.
+    hit = [f for f in found if "DASHBOARD_TOKEN" in f]
+    assert hit, "переменная с пробелом в имени не замечена"
+    assert any("НЕ ВИДИТ" in f and "код читает DASHBOARD_TOKEN" in f
+               for f in hit), \
+        f"сообщение не объясняет, что переменная не применена: {hit}"
+
+
+def test_env_var_name_in_wrong_case_is_reported(monkeypatch):
+    from core.config import env_name_typos
+    monkeypatch.setenv("db_path", "/x/y.db")
+    assert any("DB_PATH" in f for f in env_name_typos())
+
+
+def test_correct_env_names_are_not_reported(monkeypatch):
+    """Ложная тревога хуже молчания: на неё перестают смотреть."""
+    from core.config import env_name_typos
+    monkeypatch.setenv("DASHBOARD_TOKEN", "secret")
+    monkeypatch.setenv("DB_PATH", "/data/s.db")
+    monkeypatch.setenv("SOME_UNRELATED_THING", "1")
+    for f in env_name_typos():
+        assert "SOME_UNRELATED_THING" not in f
+        assert f.strip() != "'DASHBOARD_TOKEN'"
+    assert not any("'DASHBOARD_TOKEN'" in f for f in env_name_typos())
+    assert not any("'DB_PATH'" in f for f in env_name_typos())
+
+
+async def test_stats_exposes_env_typos(monkeypatch):
+    """Строка в логе такое уже писала — лога никто не читает. Признак обязан
+    доходить до экрана."""
+    import json as _j
+    from api import routes as R
+    monkeypatch.setenv(" MIN_SCORE", "40")
+    monkeypatch.delenv("DASHBOARD_TOKEN", raising=False)
+    resp = await R.get_stats(FakeRequest())
+    body = _j.loads(bytes(resp.body).decode())
+    assert "env_typos" in body, "признак не отдаётся наружу"
+    assert any("MIN_SCORE" in t for t in body["env_typos"])
+
+
+async def test_health_reports_the_last_scan_result():
+    """Дашборд на этом пути писал «Скан #43 · 07:15» без числа находок, а на
+    HTTP-пути — с числом: одна строка мигала между форматами, и пустой скан
+    не отличался от продуктивного."""
+    from api import routes
+    from core.state import state
+    state.last_scan_found = 7
+    h = await routes.health()
+    assert h["last_scan_found"] == 7

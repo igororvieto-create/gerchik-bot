@@ -99,7 +99,20 @@ class ReplayClient:
 
     async def get_open_interest(self, symbol: str, interval: str = "4h",
                                 limit: int = 12) -> List[Dict]:
-        rows = [r for r in self._h["oi"] if r["ts"] < self.now_ms]
+        # ГРАНИЦА ВКЛЮЧИТЕЛЬНО, и это НЕ заглядывание в будущее.
+        #
+        # Ряд OI строится фетчером как «последний замер НЕ ПОЗЖЕ границы»
+        # (fetch_history_binance.open_interest), а сами границы совпадают с
+        # закрытиями 4h-свечей — то есть с моментом анализа. Запись со
+        # ts == now_ms содержит ровно то, что боевой бот читает из
+        # ticker.openInterestValue прямо сейчас.
+        #
+        # Строгое '<' выбрасывало её и подставляло значение ПРЕДЫДУЩЕЙ
+        # свечи: замер показал, что запись ровно в now_ms есть у 2159 из
+        # 2160 моментов, а корреляция лагового ΔOI с актуальным всего
+        # 0.03..0.26 — это разные величины. OI даёт до 30 очков из ~64 и
+        # задаёт тип сигнала, так что прогон мерил не ту стратегию.
+        rows = [r for r in self._h["oi"] if r["ts"] <= self.now_ms]
         return rows[-limit:]
 
     async def get_orderbook(self, symbol: str, limit: int = 20) -> Dict:
@@ -156,7 +169,10 @@ def build_ticker(hist: Dict[str, Any], now_ms: int) -> Optional[Dict]:
     if not fund:
         return None
     rate = fund[-1]["rate"]
-    oi_rows = [r for r in hist["oi"] if r["ts"] < now_ms]
+    # Та же граница, что и в get_open_interest, и по той же причине.
+    # Фандинг, наоборот, остаётся строгим: его записи — события в свой
+    # момент, а не агрегат «на момент», и запас здесь консервативен.
+    oi_rows = [r for r in hist["oi"] if r["ts"] <= now_ms]
     if not oi_rows:
         return None
     oi_val = oi_rows[-1]["oi"] * price
@@ -197,6 +213,61 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple:
     return (max(0.0, c - h), min(1.0, c + h))
 
 
+def half_window(start_ms: int, end_ms: int, half: str) -> tuple:
+    """Границы половины выборки, С ЭМБАРГО (López de Prado, purging/embargo).
+
+    Разрез идёт по моменту ВХОДА, а исход тянется до 48ч вперёд: сигнал за
+    час до границы судится свечами из закрытой трети. Замер: 23 из 1730
+    explore-сигналов (1.33%) так подсматривали holdout. Течёт только в эту
+    сторону, но проверочная треть обязана быть неприкосновенной — поэтому у
+    explore отрезаем последние 48 часов.
+    """
+    cut = start_ms + int((end_ms - start_ms) * 2 / 3)
+    embargo = _MAX_AGE_HOURS * 3600 * 1000
+    if half == "explore":
+        return (start_ms, cut - embargo)
+    if half == "holdout":
+        return (cut, end_ms)
+    return (0, 0)
+
+
+def avg_concurrency(rows: List[Dict]) -> float:
+    """Во сколько раз метки перекрываются (López de Prado, §5 LITERATURE).
+
+    Интервал Уилсона считает наблюдения НЕЗАВИСИМЫМИ. У нас это неправда:
+    исход тянется 48ч, и сигналы по одному символу внутри этого окна судятся
+    во многом одними и теми же свечами. Отчёт по круглым числам заявлял
+    точность ±0.6 п.п., хотя честная — вдвое-втрое хуже.
+
+    Считаем среднюю «занятость»: сколько сигналов того же символа делят окно
+    с данным (включая его самого). Эффективное n = n / этой величины.
+    Межсимвольную корреляцию НЕ учитываем — оценка консервативна в сторону
+    заниженного перекрытия, то есть интервал всё ещё слегка оптимистичен.
+    """
+    span = _MAX_AGE_HOURS * 3600 * 1000
+    by_sym: Dict[str, List[int]] = {}
+    for r in rows:
+        by_sym.setdefault(str(r["symbol"]), []).append(int(r["ts"]))
+    tot, cnt = 0, 0
+    for ts_list in by_sym.values():
+        ts_list.sort()
+        lo = hi = 0
+        for t in ts_list:
+            while ts_list[lo] <= t - span:
+                lo += 1
+            while hi < len(ts_list) and ts_list[hi] < t + span:
+                hi += 1
+            tot += hi - lo
+            cnt += 1
+    return (tot / cnt) if cnt else 1.0
+
+
+def wilson_overlap(k: int, n: int, rows: List[Dict]) -> tuple:
+    """Интервал Уилсона по ЭФФЕКТИВНОМУ размеру выборки."""
+    c = avg_concurrency(rows)
+    return wilson(int(round(k / c)), max(1, int(round(n / c))))
+
+
 def _acc(d: Dict, key: str, outcome: str, sl_pct: float) -> None:
     """Накопление корзины — теми же правилами, что в core/db.py.
 
@@ -225,7 +296,11 @@ def _finish(d: Dict) -> None:
 # Варианты структуры стратегии. Каждый — гипотеза, сформулированная ДО
 # просмотра результата, а не порог, подобранный под него.
 VARIANTS: Dict[str, Dict[str, Any]] = {
-    # как сейчас в бою
+    # как сейчас в бою: пусто, потому что apply_variant сбрасывает ВСЕ флаги
+    # в True перед применением варианта. Без этого сброса пустой словарь
+    # ничего не восстанавливал — в одном процессе "nospike" после
+    # "nofunding" давал фактически "both", а повторный "baseline"
+    # отчитывался чужой конфигурацией: флаги живут в глобальном cfg.
     "baseline":   {},
     # фандинг задаёт сторону ~2/3 сделок, литературной опоры нет (§4)
     "nofunding":  {"FUNDING_VOTE": False},
@@ -245,10 +320,20 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
 }
 
 
+_SWITCHES = ("FUNDING_VOTE", "VSA_SPIKE_EXEMPT",
+             "VSA_MTF_EXEMPT", "VSA_LEVEL_EXEMPT")
+
+
 def apply_variant(name: str) -> None:
-    """Переключатели ставятся ДО прогона и не трогают боевые дефолты."""
+    """Переключатели ставятся ДО прогона и не трогают боевые дефолты.
+
+    Сначала ВСЕ флаги возвращаются к True, потом применяется вариант.
+    Без сброса варианты накапливались друг на друга в одном процессе.
+    """
     if name not in VARIANTS:
         raise SystemExit(f"неизвестный вариант {name}; есть: {list(VARIANTS)}")
+    for k in _SWITCHES:
+        setattr(cfg, k, True)
     for k, v in VARIANTS[name].items():
         setattr(cfg, k, v)
 
@@ -382,6 +467,8 @@ def report(rows: List[Dict], meta: Dict) -> str:
         f"\nИсточник данных: {meta.get('source', 'не указан')}"
         f"\nСимволов: {len(meta.get('symbols', []))}   окно: {meta.get('days')} дн."
         f"\nСигналов с исходом: {len(rows)}"
+        f"   перекрытие меток: x{avg_concurrency(rows):.2f}"
+        f" (эффективно ~{int(len(rows) / max(avg_concurrency(rows), 1e-9))})"
         f"\nПороги: MIN_SCORE={cfg.MIN_SCORE} TRADE_MIN_SCORE={cfg.TRADE_MIN_SCORE} "
         f"MIN_RR={cfg.MIN_RR} MIN_TRADE_HEADROOM_R={cfg.MIN_TRADE_HEADROOM_R}"
     )
@@ -394,6 +481,9 @@ def report(rows: List[Dict], meta: Dict) -> str:
         "\n    закрытия 4h-свечи;"
         "\n  * один момент на свечу (сразу после закрытия), а не каждые 4 мин."
         "\nЗначит это измерение ЯДРА стратегии, а не её боевой копии."
+        "\n\nCI95 в таблицах посчитаны как для НЕЗАВИСИМЫХ наблюдений. Метки"
+        "\nперекрываются (исход тянется 48ч), поэтому честный интервал шире"
+        "\nв корень из перекрытия — множитель напечатан в шапке."
         "\n\nДИСЦИПЛИНА: прогон делается ОДИН РАЗ. Подкручивать пороги по его"
         "\nрезультату нельзя — порог, подобранный на выборке, нельзя"
         "\nобосновывать той же выборкой (docs/LITERATURE.md §6)."
@@ -432,9 +522,8 @@ async def main() -> int:
     apply_variant(args.variant)
     lo_ms = hi_ms = 0
     if args.half:
-        a, b = int(meta["start_ms"]), int(meta["end_ms"])
-        cut = a + int((b - a) * 2 / 3)
-        lo_ms, hi_ms = (a, cut) if args.half == "explore" else (cut, b)
+        lo_ms, hi_ms = half_window(int(meta["start_ms"]), int(meta["end_ms"]),
+                                   args.half)
 
     rows: List[Dict] = []
     for sym in meta["symbols"]:

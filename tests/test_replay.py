@@ -85,7 +85,12 @@ def poison_future(hist, now_ms):
                              "low": c["low"] * 10, "close": c["close"] * 10,
                              "volume": c["volume"] * 1000})
         out[key] = rows
-    out["oi"] = [r if r["ts"] < now_ms else {**r, "oi": r["oi"] * 1000}
+    # OI травится СТРОГО ПОСЛЕ now_ms, а не с включением границы.
+    # Ряд OI — это «последний замер не позже границы», и границы совпадают
+    # с моментами анализа: запись со ts == now_ms содержит настоящее, а не
+    # будущее. Прежнее `< now_ms` объявляло её будущим и тем самым
+    # ЗАКРЕПЛЯЛО дефект — починка кода покраснела бы ложно.
+    out["oi"] = [r if r["ts"] <= now_ms else {**r, "oi": r["oi"] * 1000}
                  for r in hist["oi"]]
     out["funding"] = [r if r["ts"] < now_ms else {**r, "rate": 0.5}
                       for r in hist["funding"]]
@@ -389,7 +394,7 @@ def test_missing_funding_or_oi_skips_the_moment():
     no_fund = {**hist, "funding": [f for f in hist["funding"] if f["ts"] >= now]}
     assert build_ticker(no_fund, now) is None, "фандинг подставлен нулём"
 
-    no_oi = {**hist, "oi": [r for r in hist["oi"] if r["ts"] >= now]}
+    no_oi = {**hist, "oi": [r for r in hist["oi"] if r["ts"] > now]}
     assert build_ticker(no_oi, now) is None, "open interest подставлен нулём"
 
 
@@ -460,3 +465,100 @@ async def test_round_stop_sits_beyond_the_round_number():
         if checked >= 3:
             break
     assert checked, "не нашлось ни одного сигнала fade для проверки стопа"
+
+
+async def test_open_interest_uses_the_value_available_at_the_moment():
+    """Ряд OI строится как «последний замер НЕ ПОЗЖЕ границы», а границы
+    совпадают с моментами анализа. Значит запись со ts == now_ms — это
+    настоящее, и выбрасывать её нельзя: строгое '<' подставляло значение
+    ПРЕДЫДУЩЕЙ свечи, а ΔOI даёт до 30 очков из ~64 и задаёт тип сигнала."""
+    hist = make_hist()
+    i = 60
+    now = hist["k4"][i]["ts"] + _H4_MS
+    # в синтетике сетка OI лежит на ts свечей; добавим замер ровно в now
+    hist = {**hist, "oi": hist["oi"] + [{"ts": now, "oi": 123456.0}]}
+    rows = await ReplayClient(hist, now).get_open_interest("TSTUSDT", "4h", 2)
+    assert rows[-1]["ts"] == now, "текущее значение OI выброшено"
+    assert rows[-1]["oi"] == pytest.approx(123456.0)
+    # а вот замер ПОСЛЕ момента анализа обязан быть отброшен
+    hist2 = {**hist, "oi": hist["oi"] + [{"ts": now + 1, "oi": 999999.0}]}
+    rows2 = await ReplayClient(hist2, now).get_open_interest("TSTUSDT", "4h", 2)
+    assert all(r["ts"] <= now for r in rows2), "взято значение из будущего"
+
+
+def test_ticker_open_interest_uses_the_current_value_not_the_previous():
+    """Второй канал того же дефекта: openInterestValue в тикере. Боевой бот
+    читает АКТУАЛЬНОЕ значение, а строгое '<' подставляло замер предыдущей
+    свечи — ΔOI даёт до 30 очков из ~64 и задаёт тип сигнала."""
+    hist = make_hist()
+    i = 60
+    now = hist["k4"][i]["ts"] + _H4_MS
+    price = [k for k in hist["k4"] if k["ts"] + _H4_MS <= now][-1]["close"]
+    hist = {**hist, "oi": hist["oi"] + [{"ts": now, "oi": 777.0}]}
+    t = build_ticker(hist, now)
+    assert t is not None
+    assert float(t["openInterestValue"]) == pytest.approx(777.0 * price), \
+        "тикер взял OI предыдущей свечи вместо текущей"
+    # замер ПОСЛЕ момента анализа по-прежнему не берётся
+    hist2 = {**hist, "oi": hist["oi"] + [{"ts": now + 1, "oi": 111.0}]}
+    t2 = build_ticker(hist2, now)
+    assert t2 is not None
+    assert float(t2["openInterestValue"]) == pytest.approx(777.0 * price), \
+        "тикер заглянул в будущее"
+
+
+def test_baseline_variant_restores_all_switches():
+    """VARIANTS['baseline'] был пустым словарём и ничего не сбрасывал: в
+    одном процессе nospike после nofunding давал фактически both, а
+    повторный baseline отчитывался чужой конфигурацией."""
+    from tools.replay import apply_variant, _SWITCHES
+    apply_variant("strict_nf")
+    assert not any(getattr(cfg, k) for k in _SWITCHES)
+    apply_variant("baseline")
+    assert all(getattr(cfg, k) for k in _SWITCHES), "baseline не восстановил флаги"
+    apply_variant("nofunding")
+    assert cfg.FUNDING_VOTE is False and cfg.VSA_SPIKE_EXEMPT is True
+    apply_variant("nospike")
+    assert cfg.FUNDING_VOTE is True, "вариант унаследовал флаг предыдущего"
+    apply_variant("baseline")
+
+
+def test_explore_half_is_embargoed_from_the_holdout():
+    """Разрез половин идёт по моменту ВХОДА, а исход тянется 48ч вперёд:
+    сигнал за час до границы судился бы свечами из закрытой трети. Проверочная
+    треть обязана быть неприкосновенной, поэтому explore теряет последние 48ч."""
+    from tools.replay import half_window
+    from strategy.evaluator import _MAX_AGE_HOURS
+    a, b = _T0, _T0 + 365 * 24 * 3600 * 1000
+    e_lo, e_hi = half_window(a, b, "explore")
+    h_lo, h_hi = half_window(a, b, "holdout")
+    span = _MAX_AGE_HOURS * 3600 * 1000
+    assert e_lo == a and h_hi == b, "окно выборки урезано не с той стороны"
+    assert e_hi + span <= h_lo, (
+        "исход последнего explore-сигнала дотягивается до закрытой трети")
+    assert h_lo - e_hi >= span, "эмбарго короче окна исхода"
+    # закрытая треть не должна ужиматься — она и так меньшая
+    assert half_window(a, b, "") == (0, 0), "без --half окно обязано быть полным"
+
+
+def test_overlapping_labels_widen_the_interval():
+    """Уилсон считает наблюдения независимыми. Исход тянется 48ч, и сигналы
+    по одному символу внутри окна судятся общими свечами — заявлять по ним
+    точность как по независимым значит завышать её вдвое-втрое."""
+    from tools.replay import avg_concurrency, wilson, wilson_overlap
+    hour = 3600 * 1000
+    # десять сигналов подряд с шагом 4ч по одному символу: окно 48ч,
+    # значит каждый делит его почти со всеми остальными
+    dense = [{"symbol": "A", "ts": _T0 + i * 4 * hour} for i in range(10)]
+    assert avg_concurrency(dense) > 5, "плотное перекрытие не обнаружено"
+    # те же десять, но раз в неделю — окна не пересекаются вовсе
+    sparse = [{"symbol": "A", "ts": _T0 + i * 168 * hour} for i in range(10)]
+    assert avg_concurrency(sparse) == pytest.approx(1.0)
+    # и разные символы друг друга не занимают
+    cross = [{"symbol": f"S{i}", "ts": _T0} for i in range(10)]
+    assert avg_concurrency(cross) == pytest.approx(1.0)
+
+    raw = wilson(300, 900)
+    adj = wilson_overlap(300, 900, dense)
+    assert (adj[1] - adj[0]) > (raw[1] - raw[0]) * 1.5, \
+        "интервал не расширился при перекрытии меток"

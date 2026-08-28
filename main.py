@@ -10,6 +10,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 
 from core.config import cfg
+from datetime import datetime
+
 from core.state import state
 from core import db
 from exchange.bybit import BybitClient
@@ -201,8 +203,23 @@ async def _scan_job():
 
 
 async def _monitor_job():
-    if _client:
+    """Монитор досылает и удерживает стоп — падать молча ему нельзя.
+
+    Без этого блока исключение уходило в APScheduler: задача повторялась
+    каждые 30 секунд и падала снова, живые позиции оставались без
+    присмотра, а наружу не выходило ничего. Отмечаем ФАКТ успешного
+    прохода: по нему дашборд отличает работу от холостого хода.
+    """
+    if not _client:
+        return
+    try:
         await monitor_positions(_client)
+    except Exception as e:
+        state.last_monitor_error = f"{type(e).__name__}: {e}"
+        log.error(f"монитор позиций упал: {e}", exc_info=True)
+        return
+    state.last_monitor_error = ""
+    state.last_monitor_ok = datetime.utcnow()
 
 
 async def _outcome_job():

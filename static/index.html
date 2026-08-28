@@ -755,6 +755,7 @@ async function refreshStats(){
     // моменты, когда данные теряются.
     renderDbState(d);
     renderEnvTypos(d);
+    renderMonitorState(d);
 
     if(d.last_scan_at){
       const t=new Date(d.last_scan_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
@@ -832,6 +833,27 @@ async function refreshBalance(){
 // §0-А п.6 — чтобы доказать винрейт 45% против безубытка, нужно ~80
 // исходов; 30 — это минимум, ниже которого утверждать нельзя ничего.
 const MIN_DECIDED_FOR_COLOR = 30;
+
+// Монитор досылает и удерживает стоп у живых позиций. Раньше его падение
+// было невидимо: счётчик сканов рос, пульс горел зелёным, а позиции стояли
+// без присмотра. Порог 3 минуты при интервале 30 секунд — это шесть
+// подряд пропущенных проходов, случайностью уже не объяснить.
+const MONITOR_STALE_MIN = 3;
+
+function renderMonitorState(d){
+  if(!d) return;
+  const st=d.monitor_stale_min, err=d.monitor_error;
+  const pos=(d.positions_count!=null)?d.positions_count:null;
+  if(err){
+    showAlert('⛔ Монитор позиций падает ('+err+') — стоп живым позициям '
+             +'не досылается', 'monitor');
+  } else if(typeof st==='number' && st>MONITOR_STALE_MIN){
+    showAlert('⛔ Монитор позиций не отрабатывал '+Math.round(st)+' мин — '
+             +'позиции без присмотра', 'monitor');
+  } else {
+    clearAlert('monitor');
+  }
+}
 
 function renderEnvTypos(d){
   const el=$('env-info'); if(!el) return;

@@ -459,6 +459,15 @@ async def get_stats(request: Request):
         # " DASHBOARD_TOKEN" с пробелом молча отключила защиту дашборда, и
         # заметить это было нельзя ничем, кроме чтения настроек глазами.
         "env_typos": cfg_env_typos(),
+        # Сколько минут монитор не проходил успешно. Он досылает и держит
+        # стоп: если он падает, позиции без присмотра, а прежде наружу об
+        # этом не выходило ничего. None — ни одного успешного прохода ещё
+        # не было (только что стартовали).
+        "monitor_stale_min": (
+            None if state.last_monitor_ok is None
+            else (datetime.utcnow() - state.last_monitor_ok).total_seconds() / 60
+        ),
+        "monitor_error": state.last_monitor_error or None,
         "db_ephemeral": db.is_ephemeral(),
         "db_path": db.DB_PATH,
         # Факт вместо догадки о пути: сколько истории реально в базе.

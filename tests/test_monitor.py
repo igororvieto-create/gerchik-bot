@@ -1,3 +1,4 @@
+import pytest
 """monitor_positions — непрерывная страховка, на которую опирается вход.
 
 enter_trade в трёх местах явно делегирует безопасность монитору
@@ -734,3 +735,63 @@ async def test_monitor_syncs_entry_price_from_the_exchange(db_tmp, caplog):
     row = sqlite3.connect(db.DB_PATH).execute(
         "SELECT entry FROM trades WHERE order_id='slip-1'").fetchone()
     assert row[0] == pytest.approx(101.5), "в trades осталась цена сигнала"
+
+
+# ── Падение монитора обязано быть видно ─────────────────────────────────────
+
+async def test_monitor_crash_is_recorded_and_does_not_kill_the_job(monkeypatch):
+    """Монитор досылает и удерживает стоп. У его задачи не было обработки
+    исключений: падение повторялось каждые 30 секунд, позиции оставались
+    без присмотра, а наружу не выходило НИЧЕГО — счётчик сканов рос, пульс
+    горел зелёным."""
+    import main as M
+    from core.state import state
+    state.last_monitor_ok = None
+    state.last_monitor_error = ""
+    monkeypatch.setattr(M, "_client", object())
+
+    async def boom(_c):
+        raise RuntimeError("биржа недоступна")
+    monkeypatch.setattr(M, "monitor_positions", boom)
+    await M._monitor_job()          # НЕ должно бросить наружу
+    assert "биржа недоступна" in state.last_monitor_error, \
+        "падение монитора не зафиксировано"
+    assert state.last_monitor_ok is None, "провал засчитан за успешный проход"
+
+
+async def test_successful_monitor_pass_clears_the_error(monkeypatch):
+    import main as M
+    from core.state import state
+    state.last_monitor_error = "старая ошибка"
+    state.last_monitor_ok = None
+    monkeypatch.setattr(M, "_client", object())
+
+    async def fine(_c):
+        return None
+    monkeypatch.setattr(M, "monitor_positions", fine)
+    await M._monitor_job()
+    assert state.last_monitor_error == "", "ошибка висит после успешного прохода"
+    assert state.last_monitor_ok is not None, "успешный проход не отмечен"
+
+
+async def test_stats_exposes_monitor_staleness(monkeypatch):
+    """Признак обязан доходить до экрана: в логе такое уже писалось."""
+    import json as _j
+    from datetime import datetime, timedelta
+    from api import routes as R
+    from core.state import state
+    monkeypatch.delenv("DASHBOARD_TOKEN", raising=False)
+    state.last_monitor_ok = datetime.utcnow() - timedelta(minutes=17)
+    state.last_monitor_error = ""
+
+    # Заглушка строится ЗДЕСЬ, а не импортируется из соседнего теста:
+    # кросс-импорт между файлами тестов ломает mypy ("Source file found
+    # twice under different module names") — уже наступали.
+    class _Req:
+        headers: dict = {}
+        query_params: dict = {}
+        url = type("U", (), {"path": "/api/stats"})()
+
+    body = _j.loads(bytes((await R.get_stats(_Req())).body).decode())
+    assert body["monitor_stale_min"] == pytest.approx(17, abs=1), \
+        "простой монитора не виден снаружи"

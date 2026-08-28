@@ -158,6 +158,14 @@ class AppState:
         self.client: Any = None  # set by main.py after BybitClient init
         self.last_balance_error: str = ""
         self.last_scan_error: str = ""  # non-empty if the most recent scan failed
+        # Монитор — единственное, что досылает и удерживает стоп у живых
+        # позиций. У его задачи не было обработки исключений: падение
+        # повторялось каждые 30 секунд, позиции оставались без присмотра, а
+        # на дашборде не менялось НИЧЕГО — счётчик сканов рос, пульс горел
+        # зелёным. Отмечаем время последнего УСПЕШНОГО прохода, чтобы
+        # «работает» отличалось от «крутится вхолостую».
+        self.last_monitor_ok: Optional[datetime] = None
+        self.last_monitor_error: str = ""
         self.signal_seen: Dict[str, datetime] = {}  # symbol → last broadcast time
         # Daily circuit breaker — defined here (not attached lazily) so a read
         # before the first _ensure_daily_state() can never raise AttributeError

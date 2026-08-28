@@ -8,15 +8,31 @@ import aiosqlite
 from core.state import Signal, Position
 
 log = logging.getLogger("db")
-# Priority: DB_PATH env var > Railway Volume at /data (survives deploys!)
-# > <project-root>/data/signals.db (ephemeral — wiped on every redeploy).
-# Without a Volume the forward-test statistics reset with each git push.
-if os.path.isdir("/data") and os.access("/data", os.W_OK):
-    _DEFAULT_DB = "/data/signals.db"
-else:
-    _DEFAULT_DB = os.path.normpath(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "signals.db")
+# Где живёт база. Приоритет: DB_PATH > том Railway ГДЕ БЫ ОН НИ БЫЛ
+# смонтирован > <корень проекта>/data/signals.db (эфемерно, стирается при
+# каждом деплое).
+#
+# Про том спрашиваем саму платформу: Railway выставляет
+# RAILWAY_VOLUME_MOUNT_PATH с фактической точкой монтирования. Раньше здесь
+# был зашит путь /data, и это стоило нам всей истории форвард-теста: тома
+# не было вовсе, ветка уходила в запасной путь /app/data/signals.db, а он
+# живёт внутри контейнера и пропадает при каждом рестарте. На дашборде это
+# выглядело как «статистика стала хуже», а не как потеря данных.
+#
+# Зашитый /data оставлен запасным вариантом — на случай тома, смонтированного
+# туда до появления этой переменной.
+def _resolve_default_db() -> str:
+    vol = (os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or "").strip()
+    for cand in (vol, "/data"):
+        if cand and os.path.isdir(cand) and os.access(cand, os.W_OK):
+            return os.path.join(cand, "signals.db")
+    return os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                     "data", "signals.db")
     )
+
+
+_DEFAULT_DB = _resolve_default_db()
 DB_PATH = os.getenv("DB_PATH", _DEFAULT_DB)
 
 
@@ -27,8 +43,23 @@ def is_ephemeral() -> bool:
     видит: на дашборде статистика просто обнулялась после пуша, и это
     выглядело как «стратегия стала хуже», а не как потеря данных.
     Признак отдаётся в API, чтобы предупреждение висело на экране.
+
+    Судим по ФАКТУ монтирования, а не по виду пути. Прежняя проверка
+    «путь начинается с /data» врала в обе стороны: том, смонтированный в
+    другое место, объявлялся эфемерным, а заданный вручную DB_PATH
+    считался надёжным, даже когда указывал внутрь контейнера — ровно этот
+    случай и стёр историю.
     """
-    return not os.getenv("DB_PATH") and not DB_PATH.startswith("/data")
+    vol = (os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or "").strip()
+    if vol:
+        root = os.path.abspath(vol).rstrip(os.sep) + os.sep
+        return not os.path.abspath(DB_PATH).startswith(root)
+    if os.getenv("RAILWAY_ENVIRONMENT"):
+        # Мы на Railway, а тома нет ни одного: что бы ни стояло в DB_PATH,
+        # запись идёт внутрь контейнера и не переживёт рестарт.
+        return True
+    # Не на Railway: обычный диск, деплоев нет, терять нечего.
+    return False
 
 
 async def init_db() -> None:
@@ -36,12 +67,12 @@ async def init_db() -> None:
     # в stderr мимо настроенного в main.py формата, потому что basicConfig
     # ещё не отработал, и (б) срабатывало ложно, когда том смонтирован не в
     # /data, а путь задан через DB_PATH.
-    if not os.getenv("DB_PATH") and not DB_PATH.startswith("/data"):
+    if is_ephemeral():
         # Без тома вся история сделок и форвард-теста исчезает при каждом
         # деплое, а get_open_trades() после рестарта не находит своих позиций —
         # живые позиции бота получают ярлык MANUAL и лишаются защиты стопа.
-        log.error("Railway Volume (/data) НЕ подключён — база эфемерная, "
-                  "история и открытые сделки не переживут деплой")
+        log.error(f"Том Railway НЕ подключён — база {DB_PATH} эфемерная, "
+                  f"история и открытые сделки не переживут рестарт")
     dirpath = os.path.dirname(DB_PATH)
     if dirpath:
         try:

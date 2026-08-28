@@ -679,3 +679,74 @@ def test_expectancy_subtracts_funding_cost_and_adds_funding_income():
     # брутто фандинг НЕ трогает: это издержка/доход, а не исход
     assert _ev(dict(slot), fee_r=0.04, fund_r=-0.02)["ev_gross_r"] == \
         _ev(dict(slot), fee_r=0.04)["ev_gross_r"]
+
+
+# ── Где живёт база: том Railway ищется по факту, а не по виду пути ──────────
+#
+# Каждая проверка — отдельный процесс: DB_PATH вычисляется на импорте
+# модуля, и подмена os.environ внутри теста мерила бы не то, что делает
+# боевой старт (docs/REVIEW.md §0-Б п.7).
+
+def _db_probe(env: dict, tmp_path) -> dict:
+    import json as _json
+    import os as _os
+    import subprocess
+    import sys as _sys
+    code = ("import json, core.db as d; "
+            "print(json.dumps({'path': d.DB_PATH, 'eph': d.is_ephemeral()}))")
+    e = {**_os.environ, **env}
+    for k, v in list(e.items()):
+        if v is None:
+            e.pop(k, None)
+    out = subprocess.run([_sys.executable, "-c", code], env=e, capture_output=True,
+                         text=True, cwd=_os.path.dirname(_os.path.dirname(
+                             _os.path.abspath(__file__))))
+    assert out.returncode == 0, out.stderr
+    return _json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def test_db_follows_the_volume_wherever_it_is_mounted(tmp_path):
+    """Раньше путь /data был зашит. Том, смонтированный в другое место,
+    не использовался, и база уходила внутрь контейнера."""
+    vol = tmp_path / "mnt"
+    vol.mkdir()
+    r = _db_probe({"RAILWAY_VOLUME_MOUNT_PATH": str(vol),
+                   "RAILWAY_ENVIRONMENT": "production", "DB_PATH": None}, tmp_path)
+    assert r["path"] == str(vol / "signals.db"), "том не найден"
+    assert r["eph"] is False, "база на томе объявлена эфемерной"
+
+
+def test_railway_without_a_volume_is_always_ephemeral(tmp_path):
+    """Ровно наш случай: тома нет, путь уходит в /app/data внутри
+    контейнера и стирается при каждом рестарте."""
+    r = _db_probe({"RAILWAY_ENVIRONMENT": "production",
+                   "RAILWAY_VOLUME_MOUNT_PATH": None, "DB_PATH": None}, tmp_path)
+    assert r["eph"] is True, "отсутствие тома не распознано"
+
+
+def test_db_path_pointing_outside_the_volume_is_ephemeral(tmp_path):
+    """Заданный вручную DB_PATH раньше СЧИТАЛСЯ надёжным сам по себе.
+    Он может указывать внутрь контейнера — тогда история так же пропадёт."""
+    vol = tmp_path / "mnt"
+    vol.mkdir()
+    r = _db_probe({"RAILWAY_VOLUME_MOUNT_PATH": str(vol),
+                   "RAILWAY_ENVIRONMENT": "production",
+                   "DB_PATH": "/app/data/signals.db"}, tmp_path)
+    assert r["path"] == "/app/data/signals.db"
+    assert r["eph"] is True, "путь мимо тома объявлен надёжным"
+
+
+def test_db_path_inside_the_volume_is_persistent(tmp_path):
+    vol = tmp_path / "mnt"
+    (vol / "sub").mkdir(parents=True)
+    r = _db_probe({"RAILWAY_VOLUME_MOUNT_PATH": str(vol),
+                   "RAILWAY_ENVIRONMENT": "production",
+                   "DB_PATH": str(vol / "sub" / "s.db")}, tmp_path)
+    assert r["eph"] is False
+
+
+def test_local_disk_is_not_reported_as_ephemeral(tmp_path):
+    """Не на Railway деплоев нет — пугать нечем."""
+    r = _db_probe({"RAILWAY_ENVIRONMENT": None,
+                   "RAILWAY_VOLUME_MOUNT_PATH": None, "DB_PATH": None}, tmp_path)
+    assert r["eph"] is False

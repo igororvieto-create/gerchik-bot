@@ -367,6 +367,7 @@ input[type=range]::-moz-range-thumb{
   <div class="scan-pulse" id="scan-pulse"></div>
   <span id="scan-info">Ожидание первого скана…</span>
   <span id="db-info" style="opacity:.75;margin-left:8px"></span>
+  <span id="flow-info" style="display:none;opacity:.75;margin-left:8px"></span>
   <span id="env-info" style="display:none;color:var(--red);margin-left:8px"></span>
 </div>
 
@@ -756,6 +757,7 @@ async function refreshStats(){
     renderDbState(d);
     renderEnvTypos(d);
     renderMonitorState(d);
+    renderFlowProgress(d);
 
     if(d.last_scan_at){
       const t=new Date(d.last_scan_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
@@ -852,6 +854,29 @@ function renderMonitorState(d){
              +'позиции без присмотра', 'monitor');
   } else {
     clearAlert('monitor');
+  }
+}
+
+// Прогресс замера потока ордеров (docs/PREREGISTRATION.md, замер III).
+// Показываем ЧИСЛО набранных исходов — правило остановки задано по n, а не
+// по результату, поэтому смотреть на счётчик разрешено. На сами исходы по
+// потоку смотрят ОДИН раз, когда счётчик дойдёт до цели.
+function renderFlowProgress(d){
+  const el=$('flow-info'); if(!el) return;
+  const p=d && d.flow_progress;
+  if(!p || !p.target){ el.style.display='none'; return; }
+  el.style.display='';
+  const pct=Math.min(100, Math.round(p.usable/p.target*100));
+  el.textContent=`замер потока: ${p.usable}/${p.target} (${pct}%)`;
+  // Диагностика вместо восьминедельного ожидания впустую: если пригодных
+  // нет, а короткая лента копится — ленты не хватает по охвату, и это надо
+  // чинить сейчас, а не узнавать в конце.
+  if(p.usable===0 && (p.too_short+p.no_tape)>=10){
+    showAlert('⚠ Замер потока не копится: пригодных лент 0, коротких '
+             +p.too_short+', без ленты '+p.no_tape
+             +' — увеличь TRADE_FLOW_LIMIT', 'flow');
+  } else {
+    clearAlert('flow');
   }
 }
 

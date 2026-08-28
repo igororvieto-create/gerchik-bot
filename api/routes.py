@@ -468,6 +468,10 @@ async def get_stats(request: Request):
             else (datetime.utcnow() - state.last_monitor_ok).total_seconds() / 60
         ),
         "monitor_error": state.last_monitor_error or None,
+        # Прогресс замера III (docs/PREREGISTRATION.md). Смотреть на ЧИСЛО
+        # набранных исходов правилом разрешено — остановка задана по n, а не
+        # по результату. На сами исходы по потоку смотрят один раз в конце.
+        "flow_progress": await db.flow_progress(),
         "db_ephemeral": db.is_ephemeral(),
         "db_path": db.DB_PATH,
         # Факт вместо догадки о пути: сколько истории реально в базе.

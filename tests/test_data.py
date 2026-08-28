@@ -846,3 +846,49 @@ async def test_cleanup_window_cannot_be_shorter_than_the_evaluator_reach(
     await d.cleanup_old_signals(keep_hours=48)   # заведомо слишком короткий
     assert await _count(d, "WAITING") == 1, \
         "сигнал удалён раньше, чем оценщик мог до него дотянуться"
+
+
+# ── Прогресс замера потока обязан быть виден ───────────────────────────────
+
+async def _mk_flow_signal(d, symbol, outcome, delta, span):
+    import aiosqlite
+    from datetime import datetime
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO signals (symbol, signal_type, direction, score, price,
+                                    ts, outcome, sl_pct, flow_delta, flow_span_min)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (symbol, "VSA_CLIMAX", "LONG", 55, 1.0, datetime.utcnow().isoformat(),
+             outcome, 4.0, delta, span),
+        )
+        await db.commit()
+
+
+async def test_flow_progress_counts_only_usable_tape(tmp_path, monkeypatch):
+    """Лента короче минуты у ликвидной монеты покрывает секунды — это шум, а
+    не поток, и в замер такие строки не входят. Если считать их пригодными,
+    через восемь недель мы получим вывод не о потоке, а о том, у скольких
+    символов лента была короткой."""
+    import core.db as d
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "f.db"))
+    await d.init_db()
+    await _mk_flow_signal(d, "GOODA", "WIN", 0.3, 5.0)
+    await _mk_flow_signal(d, "GOODB", "LOSS", -0.2, 2.0)
+    await _mk_flow_signal(d, "SHORTTAPE", "WIN", 0.1, 0.2)
+    await _mk_flow_signal(d, "NOTAPE", "LOSS", None, 0.0)
+    await _mk_flow_signal(d, "PENDING", None, 0.4, 9.0)   # без вердикта
+    p = await d.flow_progress()
+    assert p["usable"] == 2, "в замер попали непригодные ленты"
+    assert p["too_short"] == 1
+    assert p["no_tape"] == 1
+    assert p["decided_total"] == 4, "нерешённый сигнал засчитан за исход"
+    assert p["target"] == d.FLOW_TARGET_N
+
+
+async def test_flow_progress_survives_a_broken_database(tmp_path, monkeypatch):
+    """Счётчик не должен ронять весь /api/stats: дашборд уже молчал при
+    падении соседнего запроса, и это было отдельным багом."""
+    import core.db as d
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "nonexistent" / "x.db"))
+    p = await d.flow_progress()
+    assert p["usable"] == 0 and p["target"] == d.FLOW_TARGET_N

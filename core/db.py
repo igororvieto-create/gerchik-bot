@@ -966,6 +966,49 @@ async def get_trades(limit: int = 50) -> List[Dict]:
 _EVAL_REACH_HOURS = 144
 
 
+# Цель замера III (docs/PREREGISTRATION.md): 130 решённых исходов с
+# ПРИГОДНОЙ лентой. Считать прогресс обязательно, и вот почему: правило
+# остановки задано числом n, а не результатом, поэтому смотреть на счётчик
+# можно и нужно — в отличие от самих исходов по потоку, на которые смотрят
+# ОДИН раз в конце.
+FLOW_TARGET_N = 130
+
+
+async def flow_progress() -> Dict:
+    """Сколько исходов с пригодной лентой уже набрано.
+
+    Отдельно считается «лента была, но короткая»: если этот счётчик растёт,
+    а нужный стоит на нуле, значит TRADE_FLOW_LIMIT слишком мал и замер
+    копит непригодные строки. Без этой цифры мы узнали бы об этом через
+    восемь недель.
+    """
+    out = {"usable": 0, "too_short": 0, "no_tape": 0,
+           "decided_total": 0, "target": FLOW_TARGET_N}
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                """SELECT
+                     COUNT(*),
+                     SUM(CASE WHEN flow_delta IS NOT NULL
+                               AND flow_span_min >= 1.0 THEN 1 ELSE 0 END),
+                     SUM(CASE WHEN flow_delta IS NOT NULL
+                               AND (flow_span_min IS NULL OR flow_span_min < 1.0)
+                              THEN 1 ELSE 0 END),
+                     SUM(CASE WHEN flow_delta IS NULL THEN 1 ELSE 0 END)
+                   FROM signals
+                   WHERE outcome IN ('WIN','LOSS','BE')"""
+            ) as cur:
+                row = await cur.fetchone()
+        if row:
+            out["decided_total"] = int(row[0] or 0)
+            out["usable"] = int(row[1] or 0)
+            out["too_short"] = int(row[2] or 0)
+            out["no_tape"] = int(row[3] or 0)
+    except Exception as e:
+        log.error(f"flow_progress error: {e}")
+    return out
+
+
 async def cleanup_old_signals(keep_hours: int = 192) -> int:
     """Чистка. РЕШЁННЫЕ сигналы по возрасту НЕ удаляются — никогда.
 

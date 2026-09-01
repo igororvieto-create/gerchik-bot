@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse as _BaseJSONResponse
 
 from core.state import state
 from core import db
-from core.config import env_name_typos as cfg_env_typos
+from core.config import cfg, env_name_typos as cfg_env_typos
 
 log = logging.getLogger("api")
 router = APIRouter()
@@ -472,6 +472,9 @@ async def get_stats(request: Request):
         # набранных исходов правилом разрешено — остановка задана по n, а не
         # по результату. На сами исходы по потоку смотрят один раз в конце.
         "flow_progress": await db.flow_progress(),
+        # Какой стратегии принадлежит показанная статистика. Без этого
+        # после смены стратегии экран выглядел бы как «всё обнулилось».
+        "strategy_id": cfg.STRATEGY_ID,
         "db_ephemeral": db.is_ephemeral(),
         "db_path": db.DB_PATH,
         # Факт вместо догадки о пути: сколько истории реально в базе.

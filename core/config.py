@@ -177,6 +177,12 @@ class Config:
     # Signal history
     # 5000 ≈ 8 суток потока сигналов: лимит не должен обрезать семидневную
     # выборку винрейта (500 выбирались за ~5 дней и статистика теряла хвост)
+    # Ярлык стратегии. Статистика считается ТОЛЬКО по сигналам с текущим
+    # ярлыком, поэтому при переходе на другую стратегию старые исходы не
+    # смешиваются с новыми — и при этом не стираются, а остаются для
+    # сравнения. Менять базу вручную не нужно: достаточно задать новое
+    # значение переменной.
+    STRATEGY_ID: str = (os.getenv("STRATEGY_ID", "vsa-v1") or "vsa-v1").strip()
     MAX_SIGNALS_DB:  int = _env_int("MAX_SIGNALS_DB", 5000)
     SIGNAL_TTL_HOURS: int = _env_int("SIGNAL_TTL_HOURS", 24)
 
@@ -300,6 +306,7 @@ _KNOWN_ENV_NAMES = frozenset(
     [f.name for f in fields(Config)] + [
         # читаются напрямую, минуя Config
         "DASHBOARD_TOKEN", "DB_PATH", "PORT", "AUTO_TRADE", "BOT_MODE",
+        "STRATEGY_ID",
         "PROXY_URL", "PROXY_LIST",
     ]
 )

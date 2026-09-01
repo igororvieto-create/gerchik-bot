@@ -368,6 +368,7 @@ input[type=range]::-moz-range-thumb{
   <span id="scan-info">Ожидание первого скана…</span>
   <span id="db-info" style="opacity:.75;margin-left:8px"></span>
   <span id="flow-info" style="display:none;opacity:.75;margin-left:8px"></span>
+  <span id="strat-info" style="display:none;opacity:.75;margin-left:8px"></span>
   <span id="env-info" style="display:none;color:var(--red);margin-left:8px"></span>
 </div>
 
@@ -758,6 +759,7 @@ async function refreshStats(){
     renderEnvTypos(d);
     renderMonitorState(d);
     renderFlowProgress(d);
+    renderStrategyTag(d);
 
     if(d.last_scan_at){
       const t=new Date(d.last_scan_at).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
@@ -861,6 +863,16 @@ function renderMonitorState(d){
 // Показываем ЧИСЛО набранных исходов — правило остановки задано по n, а не
 // по результату, поэтому смотреть на счётчик разрешено. На сами исходы по
 // потоку смотрят ОДИН раз, когда счётчик дойдёт до цели.
+// Какой стратегии принадлежат цифры на экране. После смены стратегии
+// статистика начинается с нуля не потому, что данные потеряны, а потому
+// что считается по новому ярлыку — старая история цела и лежит рядом.
+function renderStrategyTag(d){
+  const el=$('strat-info'); if(!el) return;
+  const s=d && d.strategy_id;
+  if(!s){ el.style.display='none'; return; }
+  el.style.display=''; el.textContent='стратегия: '+s;
+}
+
 function renderFlowProgress(d){
   const el=$('flow-info'); if(!el) return;
   const p=d && d.flow_progress;

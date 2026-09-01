@@ -36,6 +36,23 @@ _DEFAULT_DB = _resolve_default_db()
 DB_PATH = os.getenv("DB_PATH", _DEFAULT_DB)
 
 
+def _strategy_id() -> str:
+    from core.config import cfg
+    return cfg.STRATEGY_ID
+
+
+# Условие «только текущая стратегия» для запросов статистики.
+#
+# Зачем: при переходе на другую стратегию её исходы нельзя складывать со
+# старыми — получится среднее по двум разным вещам, и ни одно из них не
+# будет измерено. Раньше единственным способом разделить их было СТЕРЕТЬ
+# базу, то есть потерять и то, и другое.
+#
+# NULL считается своим для строк, записанных до появления ярлыка: миграция
+# проставляет им текущий ярлык, но на всякий случай запрос это переживает.
+_CUR_STRAT = "(strategy = ? OR strategy IS NULL)"
+
+
 def is_ephemeral() -> bool:
     """True — база не переживёт деплой.
 
@@ -114,6 +131,10 @@ async def init_db() -> None:
                     # срезать винрейт по запасу до цели и убедиться, что полоса
                     # 1.5-2.0R действительно проигрышная.
                     "headroom REAL",
+                    # Ярлык стратегии: статистика считается только по
+                    # текущему, поэтому переход на новую стратегию
+                    # разделяет результаты САМ, без стирания истории.
+                    "strategy TEXT",
                     # mfe_r — максимальный ход в плюс в единицах R до исхода.
                     # Позволяет подбирать порог переноса стопа в безубыток по
                     # фактическим данным, а не по модели случайного блуждания.
@@ -219,7 +240,18 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status, opened_at)")
         await db.commit()
-    log.info(f"DB initialised at {DB_PATH}")
+    # Строки, записанные до появления ярлыка, принадлежат текущей
+    # стратегии — она с тех пор не менялась. Без этого первый же запрос
+    # статистики после обновления показал бы ноль.
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE signals SET strategy = ? WHERE strategy IS NULL",
+                (_strategy_id(),))
+            await db.commit()
+    except Exception as e:
+        log.error(f"strategy backfill error: {e}")
+    log.info(f"DB initialised at {DB_PATH} (стратегия {_strategy_id()})")
 
 
 async def save_signal(sig: Signal) -> None:
@@ -231,8 +263,8 @@ async def save_signal(sig: Signal) -> None:
                     oi_change, vol_ratio, funding, ob_bias, atr_pct, details,
                     entry, sl, tp1, tp2, tp3, rr, sl_pct, headroom,
                     flow_delta, flow_span_min, flow_absorb,
-                    ob_ratio, confidence, round_pos, candle_ts, ts)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    ob_ratio, confidence, round_pos, candle_ts, strategy, ts)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (sig.symbol, sig.signal_type, sig.direction, sig.score, sig.price,
                  sig.oi_change, sig.vol_ratio, sig.funding, sig.ob_bias, sig.atr_pct,
                  sig.details,
@@ -240,7 +272,7 @@ async def save_signal(sig: Signal) -> None:
                  sig.headroom,
                  sig.flow_delta, sig.flow_span_min, int(sig.flow_absorb),
                  sig.ob_ratio, sig.confidence, sig.round_pos, sig.candle_ts,
-                 sig.ts.isoformat()),
+                 _strategy_id(), sig.ts.isoformat()),
             )
             await db.commit()
     except Exception as e:
@@ -612,10 +644,11 @@ async def get_outcome_stats(days: int = 7) -> Dict:
             # на одном экране, вплоть до смены знака (+0.05R зелёным в
             # шапке против -0.14R красным в срезе по тем же сделкам).
             async with db.execute(
-                """SELECT AVG(1.0 / sl_pct) FROM signals
-                   WHERE ts >= ? AND outcome IN ('WIN','LOSS','BE')
-                     AND sl_pct IS NOT NULL AND sl_pct > 0""",
-                (cutoff,),
+                f"""SELECT AVG(1.0 / sl_pct) FROM signals
+                    WHERE ts >= ? AND outcome IN ('WIN','LOSS','BE')
+                      AND sl_pct IS NOT NULL AND sl_pct > 0
+                      AND {_CUR_STRAT}""",
+                (cutoff, _strategy_id()),
             ) as cur_sl:
                 row_sl = await cur_sl.fetchone()
             # AVG(1/sl), а не 1/AVG(sl): усреднение обратной величины —
@@ -627,20 +660,22 @@ async def get_outcome_stats(days: int = 7) -> Dict:
             # в R он делится на свой стоп, поэтому 1/sl нельзя выносить за
             # среднее (то же неравенство Йенсена, что и с комиссией).
             async with db.execute(
-                """SELECT AVG((CASE WHEN direction = 'LONG' THEN -funding
-                                    ELSE funding END) * ? / sl_pct)
-                   FROM signals
-                   WHERE ts >= ? AND outcome IN ('WIN','LOSS','BE')
-                     AND sl_pct IS NOT NULL AND sl_pct > 0
-                     AND funding IS NOT NULL""",
-                (FUNDING_SETTLEMENTS, cutoff),
+                f"""SELECT AVG((CASE WHEN direction = 'LONG' THEN -funding
+                                     ELSE funding END) * ? / sl_pct)
+                    FROM signals
+                    WHERE ts >= ? AND outcome IN ('WIN','LOSS','BE')
+                      AND sl_pct IS NOT NULL AND sl_pct > 0
+                      AND funding IS NOT NULL
+                      AND {_CUR_STRAT}""",
+                (FUNDING_SETTLEMENTS, cutoff, _strategy_id()),
             ) as cur_fd:
                 row_fd = await cur_fd.fetchone()
             avg_fund = float(row_fd[0]) if (row_fd and row_fd[0] is not None) else None
             async with db.execute(
-                """SELECT COALESCE(outcome, 'OPEN') o, COUNT(*) c FROM signals
-                   WHERE ts >= ? GROUP BY o""",
-                (cutoff,),
+                f"""SELECT COALESCE(outcome, 'OPEN') o, COUNT(*) c
+                    FROM signals
+                    WHERE ts >= ? AND {_CUR_STRAT} GROUP BY o""",
+                (cutoff, _strategy_id()),
             ) as cur:
                 for o, c in await cur.fetchall():
                     if o == "WIN":       stats["win"] = c
@@ -773,8 +808,9 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
                           flow_delta, flow_absorb, flow_span_min,
                           ob_bias, round_pos
                    FROM signals WHERE outcome IS NOT NULL AND ts >= ?
+                     AND """ + _CUR_STRAT + """
                    ORDER BY ts DESC""",
-                (cutoff,),
+                (cutoff, _strategy_id()),
             ) as cur:
                 rows = await cur.fetchall()
 
@@ -996,7 +1032,8 @@ async def flow_progress() -> Dict:
                               THEN 1 ELSE 0 END),
                      SUM(CASE WHEN flow_delta IS NULL THEN 1 ELSE 0 END)
                    FROM signals
-                   WHERE outcome IN ('WIN','LOSS','BE')"""
+                   WHERE outcome IN ('WIN','LOSS','BE')
+                     AND """ + _CUR_STRAT, (_strategy_id(),)
             ) as cur:
                 row = await cur.fetchone()
         if row:

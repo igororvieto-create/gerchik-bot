@@ -892,3 +892,110 @@ async def test_flow_progress_survives_a_broken_database(tmp_path, monkeypatch):
     monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "nonexistent" / "x.db"))
     p = await d.flow_progress()
     assert p["usable"] == 0 and p["target"] == d.FLOW_TARGET_N
+
+
+# ── Ярлык стратегии: старые исходы не смешиваются с новыми ─────────────────
+
+async def _mk_tagged(d, symbol, outcome, strategy):
+    import aiosqlite
+    from datetime import datetime
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO signals (symbol, signal_type, direction, score, price,
+                                    ts, outcome, sl_pct, flow_delta,
+                                    flow_span_min, strategy)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (symbol, "VSA_CLIMAX", "LONG", 55, 1.0, datetime.utcnow().isoformat(),
+             outcome, 4.0, 0.3, 5.0, strategy),
+        )
+        await db.commit()
+
+
+async def test_statistics_ignore_signals_of_another_strategy(tmp_path, monkeypatch):
+    """При переходе на другую стратегию её исходы нельзя складывать со
+    старыми: получится среднее по двум разным вещам, и ни одно из них не
+    будет измерено. Раньше разделить их можно было только СТЕРЕВ базу, то
+    есть потеряв и то, и другое."""
+    import core.db as d
+    from core.config import cfg
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "s.db"))
+    monkeypatch.setattr(cfg, "STRATEGY_ID", "new-v2")
+    await d.init_db()
+    # старая стратегия: сплошные победы
+    for i in range(6):
+        await _mk_tagged(d, f"OLD{i}", "WIN", "vsa-v1")
+    # новая: сплошные поражения
+    for i in range(4):
+        await _mk_tagged(d, f"NEW{i}", "LOSS", "new-v2")
+    st = await d.get_outcome_stats(days=7)
+    assert st["win"] == 0 and st["loss"] == 4, \
+        f"в статистику новой стратегии попали чужие исходы: {st}"
+    p = await d.flow_progress()
+    assert p["decided_total"] == 4, "прогресс замера считает чужие исходы"
+
+
+async def test_old_rows_without_a_tag_are_adopted_by_migration(tmp_path,
+                                                               monkeypatch):
+    """Строки, записанные до появления ярлыка, принадлежат текущей стратегии.
+    Без переноса первый же запрос после обновления показал бы ноль — то есть
+    обновление выглядело бы как потеря всей истории."""
+    import aiosqlite
+    import core.db as d
+    from core.config import cfg
+    from datetime import datetime
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "m.db"))
+    monkeypatch.setattr(cfg, "STRATEGY_ID", "vsa-v1")
+    await d.init_db()
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO signals (symbol, signal_type, direction, score,
+                                    price, ts, outcome, sl_pct)
+               VALUES ('LEGACY','VSA_CLIMAX','LONG',55,1.0,?, 'WIN', 4.0)""",
+            (datetime.utcnow().isoformat(),))
+        await db.commit()
+    await d.init_db()          # повторный старт выполняет перенос
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        async with db.execute(
+                "SELECT strategy FROM signals WHERE symbol='LEGACY'") as c:
+            assert (await c.fetchone())[0] == "vsa-v1", "ярлык не проставлен"
+    st = await d.get_outcome_stats(days=7)
+    assert st["win"] == 1, "история потерялась после обновления"
+
+
+async def test_saved_signal_carries_the_current_strategy_tag(tmp_path,
+                                                            monkeypatch):
+    import aiosqlite
+    import core.db as d
+    from core.config import cfg
+    from core.state import Signal
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "t.db"))
+    monkeypatch.setattr(cfg, "STRATEGY_ID", "xsec-v1")
+    await d.init_db()
+    await d.save_signal(Signal(symbol="AAA", signal_type="X", direction="LONG",
+                               score=50, price=1.0, oi_change=0.0, vol_ratio=0.0,
+                               funding=0.0, ob_bias="NEUTRAL", atr_pct=1.0,
+                               details=""))
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        async with db.execute("SELECT strategy FROM signals") as c:
+            assert (await c.fetchone())[0] == "xsec-v1"
+
+
+async def test_slices_ignore_signals_of_another_strategy(tmp_path, monkeypatch):
+    """Срезы — тот же вопрос, что и карточка: смешать исходы двух стратегий
+    в одном срезе значит получить среднее по двум разным вещам. Проверяется
+    отдельно, потому что запрос там свой."""
+    import core.db as d
+    from core.config import cfg
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "sl.db"))
+    monkeypatch.setattr(cfg, "STRATEGY_ID", "new-v2")
+    await d.init_db()
+    for i in range(6):
+        await _mk_tagged(d, f"OLD{i}", "WIN", "vsa-v1")
+    for i in range(4):
+        await _mk_tagged(d, f"NEW{i}", "LOSS", "new-v2")
+    b = await d.get_outcome_breakdown(days=7)
+    total = sum(v.get("win", 0) + v.get("loss", 0) + v.get("be", 0)
+                for v in b["by_direction"].values())
+    assert total == 4, f"в срезы попали исходы чужой стратегии: {b['by_direction']}"
+    assert all(v.get("win", 0) == 0 for v in b["by_direction"].values()), \
+        "победы чужой стратегии засчитаны новой"

@@ -562,3 +562,48 @@ def test_overlapping_labels_widen_the_interval():
     adj = wilson_overlap(300, 900, dense)
     assert (adj[1] - adj[0]) > (raw[1] - raw[0]) * 1.5, \
         "интервал не расширился при перекрытии меток"
+
+
+def test_flip_mirrors_the_trade_without_changing_the_risk():
+    """Разворот обязан менять ТОЛЬКО сторону. Если заодно поедет ширина
+    стопа, сравнение с исходным вариантом потеряет смысл: разница будет
+    не от знака, а от другой геометрии (PREREGISTRATION, замер IV)."""
+    from tools.replay import _flip_signal
+    from core.state import Signal
+    s = Signal(symbol="X", signal_type="VSA_CLIMAX", direction="SHORT",
+               score=55, price=100.0, oi_change=0.0, vol_ratio=0.0,
+               funding=0.0, ob_bias="NEUTRAL", atr_pct=4.0, details="",
+               # SHORT, вход 100, стоп 104 -> риск 4. Цели ОБЯЗАНЫ быть
+               # согласованы с этим риском: боевой сканер ставит tp2 ровно
+               # на 2R (проверено на реальных сигналах), и заготовка с
+               # целью на 1R сравнивала бы разные геометрии.
+               entry=100.0, sl=104.0, tp1=96.0, tp2=92.0, tp3=88.0,
+               sl_pct=4.0)
+    f = _flip_signal(s)
+    assert f.direction == "LONG"
+    assert f.entry == s.entry, "вход поехал — сравнивать было бы нечего"
+    assert abs(f.entry - f.sl) == pytest.approx(abs(s.entry - s.sl)), \
+        "риск изменился вместе со стороной"
+    assert f.sl < f.entry < f.tp2, "стоп и цель не по ту сторону входа"
+    assert (f.tp2 - f.entry) == pytest.approx(2 * (f.entry - f.sl)), \
+        "цель перестала быть 2R"
+    # и обратно
+    b = _flip_signal(f)
+    assert b.direction == "SHORT"
+    assert b.sl == pytest.approx(s.sl) and b.tp2 == pytest.approx(s.tp2)
+    # исходный сигнал не мутирован
+    assert s.direction == "SHORT" and s.sl == 104.0
+
+
+async def test_flip_is_off_by_default():
+    """Диагностика не имеет права влиять на обычный прогон."""
+    from tools.replay import replay_symbol
+    hist = make_hist()
+    normal = await replay_symbol(hist, step=8)
+    flipped = await replay_symbol(hist, step=8, flip=True)
+    if not normal:
+        pytest.skip("на этом ряду отбор не дал сигналов")
+    dirs_n = {r["direction"] for r in normal}
+    dirs_f = {r["direction"] for r in flipped}
+    assert dirs_n and dirs_f
+    assert dirs_n != dirs_f or len(dirs_n) > 1, "флаг ничего не изменил"

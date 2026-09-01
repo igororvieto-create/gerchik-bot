@@ -350,10 +350,36 @@ async def _make_signal(client, ticker, strategy: str):
     return await analyze_round(client, ticker, strategy.split("_", 1)[1])
 
 
+def _flip_signal(sig):
+    """Тот же сигнал, но в ПРОТИВОПОЛОЖНУЮ сторону (PREREGISTRATION IV).
+
+    Геометрия сохраняется точно: та же ширина стопа в процентах, стоп и
+    цели зеркалятся относительно входа, цель по-прежнему 2R. Меняется
+    ТОЛЬКО сторона — отбор, гейты и моменты входа остаются боевыми.
+
+    Зачем: боевой отбор даёт винрейт ниже случайного входа при той же
+    геометрии (28.4% против 33.33%). Либо знак направления неверен и в
+    сигнале есть информация с обратным знаком, либо плохи сами моменты и
+    до 2R не доходит ни одна сторона. Разворот эти два случая различает.
+    """
+    import copy
+    f = copy.copy(sig)
+    f.direction = "SHORT" if sig.direction == "LONG" else "LONG"
+    entry = sig.entry if sig.entry > 0 else sig.price
+    f.entry = entry
+    s = 1.0 if f.direction == "LONG" else -1.0
+    risk = entry * sig.sl_pct / 100.0
+    f.sl = entry - s * risk
+    f.tp1 = entry + s * risk
+    f.tp2 = entry + s * 2.0 * risk
+    f.tp3 = entry + s * 3.0 * risk
+    return f
+
+
 async def replay_symbol(hist: Dict[str, Any], step: int = 1,
                         lo_ms: int = 0, hi_ms: int = 0,
                         long_only: bool = False,
-                        strategy: str = "live") -> List[Dict]:
+                        strategy: str = "live", flip: bool = False) -> List[Dict]:
     """Прогон одного символа: сигналы + их исходы."""
     out: List[Dict] = []
     k4 = hist["k4"]
@@ -384,6 +410,8 @@ async def replay_symbol(hist: Dict[str, Any], step: int = 1,
             continue
         if long_only and sig.direction != "LONG":
             continue
+        if flip:
+            sig = _flip_signal(sig)
         verdict = judge_signal(hist, sig, now_ms)
         if verdict is None:
             continue
@@ -507,6 +535,9 @@ async def main() -> int:
     ap.add_argument("--strategy", default="live",
                     choices=["live", "round_fade", "round_break"],
                     help="live = боевой отбор; round_* = вход по круглым числам")
+    ap.add_argument("--flip", action="store_true",
+                    help="развернуть направление, сохранив геометрию "
+                         "(docs/PREREGISTRATION.md, замер IV)")
     ap.add_argument("--half", default="", choices=["", "explore", "holdout"],
                     help="explore = первые 2/3 окна, holdout = последняя треть")
     args = ap.parse_args()
@@ -534,6 +565,7 @@ async def main() -> int:
             hist = json.load(f)
         got = await replay_symbol(hist, step=args.step, lo_ms=lo_ms,
                                   hi_ms=hi_ms, long_only=args.long_only,
+                                  flip=args.flip,
                                   strategy=args.strategy)
         rows.extend(got)
         print(f"{sym}: {len(got)} исходов", file=sys.stderr)

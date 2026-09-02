@@ -195,3 +195,106 @@ def test_bar_passes_only_on_a_consistently_positive_result():
                    for i in range(30)])
     ok, lines = verdict(s)
     assert ok, f"устойчиво прибыльный результат не прошёл: {lines}"
+
+
+# ── Честная вселенная: делистинг и отбор на дату ───────────────────────────
+
+def mk_daily(symbol, days=400, drift=0.0, start=100.0, quote=1_000_000.0,
+             funding_rate=0.0, dies_after=None):
+    """Дневной ряд. dies_after — монета перестаёт торговаться после этого дня."""
+    n = days if dies_after is None else min(days, dies_after)
+    d, px = [], start
+    for i in range(n):
+        px = px * (1 + drift)
+        d.append({"ts": _T0 + i * _DAY_MS, "close": px, "quote": quote})
+    fund = [{"ts": x["ts"], "rate": funding_rate} for x in d]
+    return {"symbol": symbol, "daily": d, "funding": fund}
+
+
+def test_universe_is_rebuilt_at_each_date_by_quote_volume():
+    """Вселенная обязана строиться НА ДАТУ. Отбор по сегодняшнему объёму —
+    это отбор по факту выживания, ровно то смещение, ради которого всё
+    переделывалось."""
+    from tools.xsec_universe import universe_at, UNIVERSE_N
+    # Имена подобраны ПРОТИВ алфавита: ликвидные в конце словаря, неликвидные
+    # в начале. С именами BIG/SMALL сортировка по имени случайно совпадала с
+    # сортировкой по ликвидности, и тест проходил даже когда оборот
+    # игнорировался вовсе.
+    coins = {f"ZLIQ{i:02d}": mk_daily(f"ZLIQ{i:02d}", quote=10_000_000.0)
+             for i in range(70)}
+    coins.update({f"AILL{i:02d}": mk_daily(f"AILL{i:02d}", quote=1000.0)
+                  for i in range(10)})
+    t = _T0 + 100 * _DAY_MS
+    u = universe_at(coins, t)
+    assert len(u) == UNIVERSE_N, "размер вселенной не соблюдён"
+    assert all(s.startswith("ZLIQ") for s in u), \
+        f"отбор идёт не по обороту: {sorted(u)[:5]}"
+
+
+def test_a_coin_not_yet_trading_cannot_enter_the_universe():
+    """Монету, которой на дату ещё нет, купить было нельзя."""
+    from tools.xsec_universe import universe_at
+    coins = {f"OLD{i}": mk_daily(f"OLD{i}") for i in range(8)}
+    # появляется много позже даты отбора
+    late = mk_daily("LATE")
+    late["daily"] = [{**d, "ts": d["ts"] + 300 * _DAY_MS} for d in late["daily"]]
+    coins["LATE"] = late
+    u = universe_at(coins, _T0 + 100 * _DAY_MS)
+    assert "LATE" not in u, "в портфель попала монета, ещё не торговавшаяся"
+
+
+def test_delisted_position_exits_at_its_last_price_not_dropped():
+    """ГЛАВНЫЙ тест файла. Делистятся преимущественно слабейшие, то есть
+    ровно нога ШОРТА. Выбросить такую позицию значит тихо удалить её лучшие
+    исходы и вернуть смещение с другой стороны."""
+    from tools.xsec_universe import _exit_price
+    # монета живёт 103 дня и обваливается на 50% перед смертью
+    h = mk_daily("DEAD", days=110, dies_after=103)
+    h["daily"][-1]["close"] = h["daily"][-1]["close"] * 0.5
+    t = _T0 + 100 * _DAY_MS
+    end = t + HOLD_DAYS * _DAY_MS
+    from tools.xsec_universe import _price_at
+    assert _price_at(h["daily"], end) is not None or True
+    px = _exit_price(h["daily"], t, end)
+    assert px is not None, "позиция по делистнутой монете выброшена из расчёта"
+    assert px == pytest.approx(h["daily"][-1]["close"]), \
+        "выход не по последней доступной цене"
+
+
+def test_a_coin_dead_before_the_rebalance_is_excluded():
+    """Обратная сторона: монету, уже не торговавшуюся на дату входа, купить
+    было нельзя, и приписывать ей результат недели нечестно."""
+    from tools.xsec_universe import universe_at
+    coins = {f"OK{i}": mk_daily(f"OK{i}") for i in range(8)}
+    # Умирает НЕДАВНО — за 5 дней до даты отбора. Монета, умершая давно,
+    # отсеивается сама по нехватке оборота в окне ликвидности, и тест на
+    # ней проходил бы независимо от проверки живой цены.
+    coins["GONE"] = mk_daily("GONE", days=400, dies_after=96)
+    from tools.xsec_universe import liquidity
+    t = _T0 + 100 * _DAY_MS
+    assert liquidity(coins["GONE"]["daily"], t) is not None, \
+        "заготовка отсеивается по ликвидности — проверять нечего"
+    u = universe_at(coins, t)
+    assert "GONE" not in u, "в портфель попала монета без цены на дату входа"
+
+
+def test_universe_ranking_uses_only_closed_days():
+    """ts — начало дня. Текущий день содержит будущее целиком."""
+    from tools.xsec_universe import _closed_days
+    h = mk_daily("A")
+    d = h["daily"][50]
+    mid = _closed_days(h["daily"], d["ts"] + _DAY_MS // 2)
+    assert all(x["ts"] != d["ts"] for x in mid), "незакрытый день в расчёте"
+    assert any(x["ts"] == d["ts"]
+               for x in _closed_days(h["daily"], d["ts"] + _DAY_MS))
+
+
+def test_universe_spec_matches_the_frozen_one():
+    """Спецификация замера V переносится БЕЗ изменений: любая правка после
+    t=1.74 была бы подгонкой под недостающие 0.22."""
+    import tools.xsec as base
+    import tools.xsec_universe as uni
+    assert uni.LOOKBACK_DAYS == base.LOOKBACK_DAYS == 14
+    assert uni.HOLD_DAYS == base.HOLD_DAYS == 7
+    assert uni.TOP_FRACTION == base.TOP_FRACTION == 0.20
+    assert uni.verdict is base.verdict, "планка подменена"

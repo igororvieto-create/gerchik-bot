@@ -359,3 +359,62 @@ def test_weak_price_move_never_decides_direction_anywhere():
         assert weak == "NEUTRAL", f"{sig_type}: сторону решило движение 0.05%"
         strong, _ = s._direction(sig_type, 0.5, "NEUTRAL", -0.08)
         assert strong == "LONG", f"{sig_type}: честное движение перестало решать"
+
+
+# ── Лента сделок запрашивается только под состоявшийся сигнал ──────────────
+
+async def test_tape_is_not_fetched_for_symbols_without_a_signal():
+    """Трафик, а не изящество. Ответ recent-trade весит ~141 байт на
+    сделку; запрос на каждый из 100 символов каждые 4 минуты при глубине
+    1000 давал бы ~5 ГБ в сутки. Прокси Webshare тарифицируются по
+    трафику, и перерасход заканчивается рецидивирующим багом №1: 402 ->
+    перебор -> прямое соединение -> гео-блок -> get_positions() = None ->
+    проверка наличия стопа прекращается.
+
+    Сигналов около 50 в сутки, поэтому лента под них стоит ~7 МБ."""
+    import strategy.scanner as scanner
+    calls = []
+
+    class C:
+        async def get_klines(self, symbol, interval="240", limit=25):
+            return []          # пустые свечи -> анализ выйдет рано
+        async def get_open_interest(self, symbol, interval="4h", limit=12):
+            return []
+        async def get_orderbook(self, symbol, limit=20):
+            return {"bids": [], "asks": []}
+        async def get_recent_trades(self, symbol, limit=500):
+            calls.append(symbol)
+            return []
+        async def get_instrument_info(self, symbol):
+            return {"launchTime": 0}
+
+    scanner._LISTING_AGE_CACHE.clear()
+    res = await scanner._analyze_symbol(C(), {
+        "symbol": "NOSIGUSDT", "lastPrice": "1.0", "price24hPcnt": "0.0",
+        "fundingRate": "0.0", "volume24h": "1000", "openInterestValue": "1000"})
+    assert res is None, "заготовка обязана НЕ давать сигнала"
+    assert calls == [], (
+        f"лента запрошена для символа без сигнала ({calls}) — "
+        f"это возвращает расход трафика на все 100 символов каждый скан")
+
+
+def test_tape_depth_is_justified_by_the_deferred_fetch():
+    """Глубина 1000 допустима ТОЛЬКО потому, что лента берётся под сигнал.
+    Если запрос вернут в общий сбор, глубину придётся вернуть вместе с ним:
+    иначе трафик вырастет в восемь раз и упрётся в квоту прокси."""
+    src = open("strategy/scanner.py", encoding="utf-8").read()
+    head = src[:src.index("sig = Signal(")]
+    bulk = head[head.index("await asyncio.gather("):]
+    bulk = bulk[:bulk.index(")\n")]
+    assert "get_recent_trades" not in bulk, (
+        "лента вернулась в общий сбор данных по каждому символу — "
+        "при глубине 1000 это ~5 ГБ трафика в сутки")
+
+
+def test_missing_tape_is_not_reported_as_balanced_flow():
+    """Отсутствие ленты — это None, а НЕ 0.0. Ноль означал бы «поток
+    сбалансирован», и срез по потоку мерил бы долю символов с недоступной
+    лентой вместо самого потока."""
+    from strategy.scanner import _EMPTY_FLOW, _trade_flow
+    assert _EMPTY_FLOW["delta"] is None
+    assert _trade_flow([])["delta"] is None

@@ -217,7 +217,17 @@ async def fetch_matching_closed_pnl(client: BybitClient, pos: Position,
                 # closedSize которых равен Q. Берём записи по порядку и
                 # останавливаемся, как только позиция закрыта полностью;
                 # всё, что дальше, — чужое.
-                qty = abs(pos.qty)
+                # Ограничиваем ИСХОДНЫМ размером, а не текущим.
+                #
+                # pos.qty уменьшается при частичном закрытии (монитор
+                # синхронизирует его с живым размером) и обнуляется
+                # риск-гардом. От этого ломались обе стороны: при остатке
+                # цикл обрывался на первой же частичной записи и терял PnL
+                # финального выхода, а при нуле условие `qty > 0`
+                # отключало ограничитель целиком — и в сумму снова
+                # попадали ЧУЖИЕ сделки, ровно тот случай, от которого
+                # ограничитель и написан.
+                qty = abs(pos.qty_opened or pos.qty)
                 taken, acc = [], 0.0
                 for rec_ms, rec in hits:
                     taken.append((rec_ms, rec))
@@ -231,7 +241,10 @@ async def fetch_matching_closed_pnl(client: BybitClient, pos: Position,
                 # closedSize не пришёл ни в одной записи — объём проверить
                 # нечем. Берём ТОЛЬКО первую: занизить учёт безопаснее, чем
                 # приписать себе чужую сделку.
-                if acc <= 0:
+                # Объём проверить нечем — ни closedSize, ни исходного
+                # размера. Берём ТОЛЬКО первую запись: занизить учёт
+                # безопаснее, чем приписать себе чужую сделку.
+                if acc <= 0 or qty <= 0:
                     taken = hits[:1]
                 total = sum(float(r.get("closedPnl", 0)) for _, r in taken)
                 exit_px = float(taken[-1][1].get("avgExitPrice", 0))
@@ -558,7 +571,7 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             symbol=sig.symbol, side=side,
             entry=sig.entry, sl=sl_px,
             tp1=sig.tp1, tp2=tp_px, tp3=sig.tp3,
-            qty=qty, score=sig.score,
+            qty=qty, qty_opened=qty, score=sig.score,
             signal_type=sig.signal_type, order_id=order_id,
         )
         # Track the position BEFORE verification/DB writes: the order is live
@@ -863,7 +876,7 @@ async def monitor_positions(client: BybitClient) -> None:
                             entry=entry_px or row["entry"],
                             sl=float(lp.get("stopLoss") or 0) or (row["sl"] or 0),
                             tp1=row["tp1"] or 0.0, tp2=row["tp2"] or 0.0, tp3=row["tp3"] or 0.0,
-                            qty=size, score=row["score"] or 0,
+                            qty=size, qty_opened=size, score=row["score"] or 0,
                             signal_type=row["signal_type"] or "RESTORED",
                             order_id=row["order_id"] or "",
                         )
@@ -876,7 +889,8 @@ async def monitor_positions(client: BybitClient) -> None:
                             symbol=sym, side=lp.get("side", "Buy"), entry=entry_px,
                             sl=float(lp.get("stopLoss") or 0), tp1=0.0,
                             tp2=float(lp.get("takeProfit") or 0), tp3=0.0,
-                            qty=size, score=0, signal_type="MANUAL",
+                            qty=size, qty_opened=size, score=0,
+                            signal_type="MANUAL",
                         )
                         log.info(f"{sym}: ручная позиция на бирже "
                                  f"({adopted.side} {size} @ {entry_px}) — только наблюдение")
@@ -919,7 +933,8 @@ async def monitor_positions(client: BybitClient) -> None:
                         symbol=sym, side=lp.get("side", "Buy"), entry=entry_px,
                         sl=float(lp.get("stopLoss") or 0), tp1=0.0,
                         tp2=float(lp.get("takeProfit") or 0), tp3=0.0,
-                        qty=abs(float(lp.get("size") or 0)), score=0,
+                        qty=abs(float(lp.get("size") or 0)),
+                        qty_opened=abs(float(lp.get("size") or 0)), score=0,
                         signal_type="RECOVERED",
                     )
                     if not await db.save_trade_open(pos):
@@ -1230,7 +1245,8 @@ async def monitor_positions(client: BybitClient) -> None:
                     symbol=sym_r, side=row["side"], entry=row["entry"] or 0.0,
                     sl=row["sl"] or 0.0, tp1=row["tp1"] or 0.0,
                     tp2=row["tp2"] or 0.0, tp3=row["tp3"] or 0.0,
-                    qty=row["qty"] or 0.0, score=row["score"] or 0,
+                    qty=row["qty"] or 0.0, qty_opened=row["qty"] or 0.0,
+                    score=row["score"] or 0,
                     signal_type=row["signal_type"] or "RESTORED",
                     order_id=row["order_id"] or "",
                 )

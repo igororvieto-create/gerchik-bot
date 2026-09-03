@@ -795,3 +795,78 @@ async def test_stats_exposes_monitor_staleness(monkeypatch):
     body = _j.loads(bytes((await R.get_stats(_Req())).body).decode())
     assert body["monitor_stale_min"] == pytest.approx(17, abs=1), \
         "простой монитора не виден снаружи"
+
+
+# ── Учёт закрытий опирается на ИСХОДНЫЙ размер позиции ─────────────────────
+
+def _rec(ms, pnl, size, exit_px):
+    return {"updatedTime": str(ms), "closedPnl": str(pnl),
+            "closedSize": str(size), "avgExitPrice": str(exit_px)}
+
+
+async def test_partial_close_does_not_lose_the_final_exit(monkeypatch):
+    """pos.qty — ОСТАТОК после частичного закрытия, а записи закрытия
+    относятся к полному размеру. Ограничитель обрывался на первой же
+    записи и терял PnL финального выхода: дневной предохранитель
+    недосчитывал большую часть убытка."""
+    import strategy.trader as tr
+    from core.state import Position
+    from datetime import datetime
+    pos = Position(symbol="AAAUSDT", side="Buy", entry=100.0, sl=95.0,
+                   tp1=0.0, tp2=110.0, tp3=0.0, qty=4.0, qty_opened=10.0,
+                   score=50, signal_type="X")
+    pos.ts = datetime.utcnow()
+    base = int(pos.ts.timestamp() * 1000)
+
+    class C:
+        async def get_closed_pnl(self, symbol, limit=1):
+            return [_rec(base + 1000, -3.0, 6.0, 99.5),
+                    _rec(base + 2000, -8.0, 4.0, 96.0)]
+    px, pnl = await tr.fetch_matching_closed_pnl(C(), pos, attempts=1)
+    assert pnl == pytest.approx(-11.0), \
+        f"потерян PnL финального выхода: получено {pnl}, ожидалось -11.0"
+    assert px == pytest.approx(96.0), "цена выхода взята от частичного залива"
+
+
+async def test_zero_qty_does_not_reopen_the_foreign_pnl_hole(monkeypatch):
+    """Риск-гард обнуляет pos.qty, когда сокращение закрыло позицию целиком.
+    Условие `qty > 0` тогда отключало ограничитель, и в сумму снова
+    попадали ЧУЖИЕ сделки по тому же символу — ровно тот баг, ради
+    которого ограничитель написан (-15 реального убытка превращались в
+    +185 фиктивной победы)."""
+    import strategy.trader as tr
+    from core.state import Position
+    from datetime import datetime
+    pos = Position(symbol="AAAUSDT", side="Buy", entry=100.0, sl=95.0,
+                   tp1=0.0, tp2=110.0, tp3=0.0, qty=0.0, qty_opened=0.0,
+                   score=50, signal_type="X")
+    pos.ts = datetime.utcnow()
+    base = int(pos.ts.timestamp() * 1000)
+
+    class C:
+        async def get_closed_pnl(self, symbol, limit=1):
+            return [_rec(base + 1000, -15.0, 10.0, 98.0),
+                    _rec(base + 9000, +200.0, 50.0, 120.0)]   # ручная сделка
+    px, pnl = await tr.fetch_matching_closed_pnl(C(), pos, attempts=1)
+    assert pnl == pytest.approx(-15.0), \
+        f"в учёт попал чужой PnL: получено {pnl}"
+
+
+async def test_full_size_bound_still_excludes_foreign_trades():
+    """Обратная проверка: ограничитель обязан продолжать отсекать чужое,
+    когда исходный размер известен."""
+    import strategy.trader as tr
+    from core.state import Position
+    from datetime import datetime
+    pos = Position(symbol="AAAUSDT", side="Buy", entry=100.0, sl=95.0,
+                   tp1=0.0, tp2=110.0, tp3=0.0, qty=10.0, qty_opened=10.0,
+                   score=50, signal_type="X")
+    pos.ts = datetime.utcnow()
+    base = int(pos.ts.timestamp() * 1000)
+
+    class C:
+        async def get_closed_pnl(self, symbol, limit=1):
+            return [_rec(base + 1000, -15.0, 10.0, 98.0),
+                    _rec(base + 9000, +200.0, 50.0, 120.0)]
+    _, pnl = await tr.fetch_matching_closed_pnl(C(), pos, attempts=1)
+    assert pnl == pytest.approx(-15.0), "чужая сделка снова в сумме"

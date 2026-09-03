@@ -424,3 +424,46 @@ async def test_health_reports_the_last_scan_result():
     state.last_scan_found = 7
     h = await routes.health()
     assert h["last_scan_found"] == 7
+
+
+def test_slider_bounds_match_server_validation():
+    """Границы ползунка = границы валидации (docs/REVIEW.md §3, роль D).
+
+    Разъезд опасен в обе стороны: ползунок ШИРЕ проверки даёт молчаливый
+    отказ на значении, которое интерфейс показал допустимым; ползунок УЖЕ
+    проверки прячет разрешённые значения. А для риска и плеча это ещё и
+    инварианты из CLAUDE.md — риск не выше 3%, плечо не выше 5x.
+    """
+    import re
+    h = open("static/index.html", encoding="utf-8").read()
+    src = open("api/routes.py", encoding="utf-8").read()
+
+    server = {}
+    for m in re.finditer(
+            r'"(\w+)":\s*\((?:int|float),\s*([\d.]+),\s*([\d.]+)\)', src):
+        server[m.group(1)] = (float(m.group(2)), float(m.group(3)))
+    assert {"risk_per_trade", "leverage", "max_positions", "min_score",
+            "trade_min_score"} <= set(server), \
+        f"не найдены границы валидации на сервере: {sorted(server)}"
+
+    html = {}
+    for m in re.finditer(r"<input([^>]*)>", h):
+        a = m.group(1)
+        i = re.search(r'id="([^"]+)"', a)
+        lo = re.search(r'min="([\d.]+)"', a)
+        hi = re.search(r'max="([\d.]+)"', a)
+        if i and lo and hi:
+            html[i.group(1)] = (float(lo.group(1)), float(hi.group(1)))
+
+    pairs = {"set-risk": "risk_per_trade", "set-lev": "leverage",
+             "set-maxpos": "max_positions", "set-minscore": "min_score",
+             "set-tradescore": "trade_min_score"}
+    for el, key in pairs.items():
+        assert el in html, f"поле {el} потеряло границы в HTML"
+        assert html[el] == server[key], (
+            f"{el}: ползунок {html[el]} против валидации {server[key]}")
+
+    # Инварианты CLAUDE.md — отдельно и явно, чтобы их нельзя было ослабить
+    # синхронно с обеих сторон и не заметить.
+    assert server["risk_per_trade"][1] <= 3.0, "потолок риска выше 3%"
+    assert server["leverage"][1] <= 5, "плечо выше 5x"

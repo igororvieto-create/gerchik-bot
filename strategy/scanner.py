@@ -3,7 +3,7 @@ import json
 import logging
 import math
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -83,6 +83,15 @@ def _calc_atr(klines: list, period: int = 14) -> float:
     for t in tr[period:]:
         atr_val = (atr_val * (period - 1) + float(t)) / period
     return atr_val
+
+
+# Лента отсутствует или недоступна. delta = None, а НЕ 0.0: ноль означал бы
+# «поток сбалансирован», и срез по потоку мерил бы долю символов с
+# недоступной лентой вместо самого потока.
+# Явная аннотация: без неё mypy выводит Dict[str, float | None] по значению
+# None у delta и запрещает передать span_min во float, а absorb в bool.
+_EMPTY_FLOW: Dict[str, Any] = {"delta": None, "span_min": 0.0,
+                               "turnover": 0.0, "absorb": False}
 
 
 def _trade_flow(trades: list) -> dict:
@@ -733,24 +742,38 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         # на решения она не влияет, пока не наберётся статистика исходов.
         # return_exceptions: сбой ленты не должен ронять анализ символа —
         # это дополнительная метрика, а не обязательные данные.
-        oi_hist, klines, ob, klines_1h, trades = await asyncio.gather(
+        oi_hist, klines, ob, klines_1h = await asyncio.gather(
             client.get_open_interest(symbol, interval="4h", limit=2),
             client.get_klines(symbol, interval="240", limit=kline_4h_limit),
             client.get_orderbook(symbol, limit=20),
             client.get_klines(symbol, interval="60", limit=max(cfg.MTF_TREND_LOOKBACK + 3, 10)),
-            client.get_recent_trades(symbol, limit=cfg.TRADE_FLOW_LIMIT)
-            if cfg.TRADE_FLOW_LIMIT > 0 else asyncio.sleep(0, result=[]),
             return_exceptions=True,
         )
-        if isinstance(trades, BaseException):
-            log.debug(f"{symbol}: лента сделок недоступна — {trades}")
-            trades = []
+        # Лента сделок здесь НЕ запрашивается — только после того, как
+        # сигнал состоится (см. конец функции). Причина в трафике, и она
+        # заканчивается рецидивирующим багом №1.
+        #
+        # Ответ recent-trade весит ~141 байт на сделку. Запрос на КАЖДЫЙ из
+        # 100 символов каждые 4 минуты при глубине 1000 давал бы ~5 ГБ в
+        # сутки; прокси Webshare тарифицируются по трафику, стартовый
+        # гигабайт выгорал бы за час с небольшим, дальше цепочка
+        # механическая: 402/403 -> перебор прокси -> прямое соединение с IP
+        # Railway -> гео-блок Bybit -> get_positions() = None -> проверка
+        # наличия стопа прекращается.
+        #
+        # Сигналов же около 50 в сутки. Запрос ленты только под них — это
+        # ~7 МБ в сутки, то есть в СТО раз меньше прежних 0.62 ГБ при
+        # глубине 100, и при этом глубина может быть максимальной.
+        #
+        # Перенос безопасен ровно потому, что flow_* ни на отбор, ни на
+        # скор не влияют: это замер, ожидающий статистики исходов. Если
+        # поток когда-нибудь войдёт в решение, запрос придётся вернуть
+        # обратно — и вместе с ним вернуть расчёт трафика.
         for _name, _val in (("oi_hist", oi_hist), ("klines", klines),
                             ("ob", ob), ("klines_1h", klines_1h)):
             if isinstance(_val, BaseException):
                 log.warning(f"{symbol}: {_name} — {_val}")
                 return None
-        flow = _trade_flow(trades)
 
         if not oi_hist or not klines:
             log.warning(f"{symbol}: partial data — oi_hist={len(oi_hist)} klines={len(klines)}")
@@ -953,6 +976,18 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
             f"ATR {atr_pct:.2f}% | RR {levels['rr']:.1f} | запас {levels['headroom']:.1f}R"
         )
 
+
+        # Лента запрашивается ЗДЕСЬ: сигнал уже состоялся, и это
+        # единственный момент, когда лента вообще нужна. Сбой ленты
+        # сигнал не отменяет — это замер, а не обязательные данные.
+        flow = _EMPTY_FLOW
+        if cfg.TRADE_FLOW_LIMIT > 0:
+            try:
+                flow = _trade_flow(
+                    await client.get_recent_trades(
+                        symbol, limit=cfg.TRADE_FLOW_LIMIT))
+            except Exception as fe:
+                log.debug(f"{symbol}: лента сделок недоступна — {fe}")
         sig = Signal(
             symbol=symbol,
             signal_type=sig_type,

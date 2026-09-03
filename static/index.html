@@ -847,7 +847,6 @@ const MONITOR_STALE_MIN = 3;
 function renderMonitorState(d){
   if(!d) return;
   const st=d.monitor_stale_min, err=d.monitor_error;
-  const pos=(d.positions_count!=null)?d.positions_count:null;
   if(err){
     showAlert('⛔ Монитор позиций падает ('+err+') — стоп живым позициям '
              +'не досылается', 'monitor');

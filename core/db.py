@@ -1,7 +1,7 @@
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 
 import aiosqlite
 
@@ -1018,10 +1018,19 @@ async def flow_progress() -> Dict:
     копит непригодные строки. Без этой цифры мы узнали бы об этом через
     восемь недель.
     """
-    out = {"usable": 0, "too_short": 0, "no_tape": 0,
-           "decided_total": 0, "target": FLOW_TARGET_N}
+    from core.config import cfg
+    # Явная аннотация: без неё mypy выводит Dict[str, int | None] по
+    # значению None у usable_share и запрещает положить туда долю.
+    out: Dict[str, Any] = {"usable": 0, "too_short": 0, "no_tape": 0,
+                           "decided_total": 0, "target": FLOW_TARGET_N,
+                           "usable_share": None}
     try:
         async with aiosqlite.connect(DB_PATH) as db:
+            # Считаем ТОЛЬКО торгуемые сигналы. Решение, ради которого идёт
+            # замер, — ставить ли поток гейтом на сделки, которые бот берёт.
+            # Мерить его на сигналах ниже TRADE_MIN_SCORE значит отвечать на
+            # другой вопрос: из 25 пригодных по ленте торгуемыми оказались
+            # ПЯТЬ, то есть замер шёл почти целиком по неторгуемым.
             async with db.execute(
                 """SELECT
                      COUNT(*),
@@ -1033,7 +1042,8 @@ async def flow_progress() -> Dict:
                      SUM(CASE WHEN flow_delta IS NULL THEN 1 ELSE 0 END)
                    FROM signals
                    WHERE outcome IN ('WIN','LOSS','BE')
-                     AND """ + _CUR_STRAT, (_strategy_id(),)
+                     AND score >= ?
+                     AND """ + _CUR_STRAT, (cfg.TRADE_MIN_SCORE, _strategy_id(),)
             ) as cur:
                 row = await cur.fetchone()
         if row:
@@ -1041,6 +1051,12 @@ async def flow_progress() -> Dict:
             out["usable"] = int(row[1] or 0)
             out["too_short"] = int(row[2] or 0)
             out["no_tape"] = int(row[3] or 0)
+            # Доля пригодных — главный признак СМЕЩЕНИЯ, а не просто
+            # медленного накопления. Отбраковка по длине ленты не случайна:
+            # она выбрасывает самые бурные сигналы. Пока доля высокая,
+            # смещение мало; падает — замер меряет не ту популяцию.
+            if out["decided_total"]:
+                out["usable_share"] = out["usable"] / out["decided_total"]
     except Exception as e:
         log.error(f"flow_progress error: {e}")
     return out

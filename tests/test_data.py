@@ -850,7 +850,7 @@ async def test_cleanup_window_cannot_be_shorter_than_the_evaluator_reach(
 
 # ── Прогресс замера потока обязан быть виден ───────────────────────────────
 
-async def _mk_flow_signal(d, symbol, outcome, delta, span):
+async def _mk_flow_signal(d, symbol, outcome, delta, span, score=55):
     import aiosqlite
     from datetime import datetime
     async with aiosqlite.connect(d.DB_PATH) as db:
@@ -858,8 +858,8 @@ async def _mk_flow_signal(d, symbol, outcome, delta, span):
             """INSERT INTO signals (symbol, signal_type, direction, score, price,
                                     ts, outcome, sl_pct, flow_delta, flow_span_min)
                VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (symbol, "VSA_CLIMAX", "LONG", 55, 1.0, datetime.utcnow().isoformat(),
-             outcome, 4.0, delta, span),
+            (symbol, "VSA_CLIMAX", "LONG", score, 1.0,
+             datetime.utcnow().isoformat(), outcome, 4.0, delta, span),
         )
         await db.commit()
 
@@ -999,3 +999,54 @@ async def test_slices_ignore_signals_of_another_strategy(tmp_path, monkeypatch):
     assert total == 4, f"в срезы попали исходы чужой стратегии: {b['by_direction']}"
     assert all(v.get("win", 0) == 0 for v in b["by_direction"].values()), \
         "победы чужой стратегии засчитаны новой"
+
+
+async def test_flow_progress_counts_only_tradable_signals(tmp_path, monkeypatch):
+    """Замер решает, ставить ли поток гейтом на сделки, которые бот БЕРЁТ.
+    Считать по сигналам ниже TRADE_MIN_SCORE значит отвечать на другой
+    вопрос — и именно это и происходило: из 25 пригодных по ленте
+    торгуемыми оказались пять."""
+    import core.db as d
+    from core.config import cfg
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "ft.db"))
+    monkeypatch.setattr(cfg, "TRADE_MIN_SCORE", 45)
+    await d.init_db()
+    for i in range(3):
+        await _mk_flow_signal(d, f"TRAD{i}", "WIN", 0.3, 5.0, score=55)
+    for i in range(7):
+        await _mk_flow_signal(d, f"CHEAP{i}", "LOSS", 0.2, 5.0, score=30)
+    p = await d.flow_progress()
+    assert p["usable"] == 3, \
+        f"в замер попали сигналы, которые бот не торгует: {p}"
+    assert p["decided_total"] == 3
+
+
+async def test_flow_progress_reports_the_usable_share(tmp_path, monkeypatch):
+    """Доля пригодных — признак СМЕЩЕНИЯ, а не медленного накопления.
+    Отбраковка по длине ленты выбрасывает самые бурные сигналы: у
+    отброшенных ATR 9.9% против 4.1%, score 46.8 против 35.8. Низкая доля
+    означает, что замер меряет не ту популяцию."""
+    import core.db as d
+    from core.config import cfg
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "fs.db"))
+    monkeypatch.setattr(cfg, "TRADE_MIN_SCORE", 45)
+    await d.init_db()
+    for i in range(2):
+        await _mk_flow_signal(d, f"OK{i}", "WIN", 0.3, 5.0, score=55)
+    for i in range(8):
+        await _mk_flow_signal(d, f"SHORT{i}", "LOSS", 0.2, 0.1, score=55)
+    p = await d.flow_progress()
+    assert p["usable"] == 2 and p["too_short"] == 8
+    assert p["usable_share"] == pytest.approx(0.2), \
+        "доля пригодных не считается — смещение будет невидимо"
+
+
+def test_tape_depth_is_deep_enough_to_avoid_selection():
+    """Лимит ленты — не вкусовой параметр. При 100 лента покрывала минуту
+    лишь у 46% сигналов, и отбраковка была систематической: сто сделок
+    покрывают тем меньше времени, чем сильнее всплеск, то есть ровно на
+    климаксе, который стратегия и ловит."""
+    from core.config import cfg
+    assert cfg.TRADE_FLOW_LIMIT >= 500, (
+        f"TRADE_FLOW_LIMIT={cfg.TRADE_FLOW_LIMIT} — при такой глубине "
+        f"отбраковка по длине ленты снова станет отбором по силе движения")

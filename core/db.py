@@ -33,7 +33,14 @@ def _resolve_default_db() -> str:
 
 
 _DEFAULT_DB = _resolve_default_db()
-DB_PATH = os.getenv("DB_PATH", _DEFAULT_DB)
+# `or` вместо дефолта getenv: у getenv дефолт подставляется только для
+# ОТСУТСТВУЮЩЕЙ переменной, а заданная пустой даёт "". sqlite3.connect("")
+# открывает анонимную ВРЕМЕННУЮ базу, которая уничтожается при закрытии
+# соединения, — а мы открываем новое соединение на каждый вызов. Итог:
+# каждая операция уходила в свежую пустую базу, init_db рапортовал успех,
+# и торговля шла без записи вообще. Тот же класс уже обезврежен для
+# STRATEGY_ID; здесь урок применён не был.
+DB_PATH = (os.getenv("DB_PATH") or "").strip() or _DEFAULT_DB
 
 
 def _strategy_id() -> str:
@@ -251,6 +258,25 @@ async def init_db() -> None:
             await db.commit()
     except Exception as e:
         log.error(f"strategy backfill error: {e}")
+    # САМОПРОВЕРКА. Создание таблиц могло «удаться» в базу, которая не
+    # переживает закрытие соединения (пустой путь, /dev/null, каталог без
+    # права записи). Открываем НОВОЕ соединение и убеждаемся, что таблицы
+    # видны из него: только это доказывает, что данные где-то лежат.
+    #
+    # Бросаем, а не логируем: main.py на исключении init_db останавливает
+    # торговлю. Молчаливый успех здесь означал бы торговлю без записи
+    # сигналов и без усыновления живых позиций — то есть без стопов.
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('signals','trades')") as cur:
+            found = {r[0] for r in await cur.fetchall()}
+    missing = {"signals", "trades"} - found
+    if missing:
+        raise RuntimeError(
+            f"база по пути {DB_PATH!r} не сохраняет данные: после создания "
+            f"таблиц из нового соединения не видны {sorted(missing)}. "
+            f"Проверь DB_PATH и права на каталог.")
     log.info(f"DB initialised at {DB_PATH} (стратегия {_strategy_id()})")
 
 

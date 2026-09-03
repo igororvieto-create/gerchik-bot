@@ -179,6 +179,12 @@ class AppState:
         self.daily_pnl_date: Optional[str] = None
         self.daily_realized_pnl: float = 0.0
         self.trading_halted: bool = False
+        # ПОЧЕМУ торговля остановлена. Флага мало: его взводит не только
+        # дневной лимит, но и провал init_db. Ролловер суток снимал флаг
+        # безусловно, и бот начинал торговать реальными деньгами с
+        # неинициализированной базой — то есть без записи сигналов, ради
+        # которой халт и ставился. Снимать вправе только тот, кто поставил.
+        self.halt_reason: str = ""
 
     def add_ws(self, ws) -> None:
         self.ws_clients.add(ws)

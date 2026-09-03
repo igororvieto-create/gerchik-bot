@@ -91,6 +91,7 @@ async def lifespan(app: FastAPI):
         log.info("DB ready")
     except Exception as e:
         state.trading_halted = True
+        state.halt_reason = "db_init_failed"
         log.critical(f"init_db провалилась ({e}) — торговля остановлена: без "
                      f"миграции сигналы не пишутся и форвард-тест пуст")
 

@@ -115,6 +115,7 @@ def _reevaluate_halt() -> bool:
         loss_pct = -state.daily_realized_pnl / state.balance * 100
         if loss_pct >= cfg.DAILY_LOSS_LIMIT_PCT:
             state.trading_halted = True
+            state.halt_reason = "daily_loss"
             log.error(
                 f"DAILY LOSS LIMIT HIT: {loss_pct:.2f}% >= "
                 f"{cfg.DAILY_LOSS_LIMIT_PCT}% — halting new trades until UTC reset"
@@ -142,11 +143,20 @@ async def _ensure_daily_state() -> None:
             # суток и бот торговал бы с потерянным убытком. Пока прочитать
             # не удалось — торговля стоит; следующий тик повторит.
             state.trading_halted = True
+            state.halt_reason = state.halt_reason or "daily_pnl_unreadable"
             log.error(f"не удалось восстановить дневной PnL ({e}) — "
                       f"торговля приостановлена до успешного чтения")
             return
         state.daily_realized_pnl = pnl
-        state.trading_halted = False
+        # Снимаем халт ТОЛЬКО если его поставил дневной лимит. Причины
+        # вроде провала init_db суточным ролловером не лечатся, и снимать
+        # их сменой даты значит начать торговать с неисправной базой.
+        if state.halt_reason in ("", "daily_loss"):
+            state.trading_halted = False
+            state.halt_reason = ""
+        elif state.trading_halted:
+            log.warning(f"суточный ролловер не снимает халт: причина "
+                        f"{state.halt_reason!r} не связана с дневным лимитом")
         state.daily_pnl_date = today
         _reevaluate_halt()  # no-op while balance is 0; re-run later in enter_trade
 
@@ -473,7 +483,8 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             log.debug(f"{sig.symbol}: notional capped to {max_notional:.2f}")
 
         qty = _round_step(position_usdt / sig.entry, qty_step)
-        if qty < min_qty:
+        bumped = qty < min_qty
+        if bumped:
             qty = min_qty
         # Проверяем ФАКТИЧЕСКИЙ риск после округления, а не только случай
         # qty < min_qty: _round_step округляет к БЛИЖАЙШЕМУ шагу, поэтому
@@ -490,6 +501,25 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
                 f"{sig.symbol}: лот {qty} (шаг {qty_step}, мин {min_qty}) даёт риск "
                 f"{actual_risk:.2f} USDT ({actual_risk/balance*100:.2f}% баланса) "
                 f"вместо целевых {risk_usdt:.2f} — пропуск"
+            )
+            _forget_symbol(sig.symbol)
+            return False
+
+        # ПОТОЛОК МАРЖИ перепроверяется ПОСЛЕ подъёма до минимального лота.
+        #
+        # Раньше после подъёма проверялся только риск, а верхняя граница
+        # нотионала — нет. На малом счёте это пробивало MAX_MARGIN_PCT в
+        # разы: при балансе 50 USDT и минимальном лоте BTCUSDT 0.001
+        # нотионал выходил 60 USDT, маржа 12 USDT = 24% баланса при
+        # потолке 10%. Инвариант по риску при этом оставался цел, поэтому
+        # проверка риска подъём и пропускала. Бьёт тем сильнее, чем меньше
+        # счёт, — то есть ровно на первых реальных сделках.
+        if bumped and qty * entry_px > max_notional:
+            log.info(
+                f"{sig.symbol}: минимальный лот {min_qty} даёт нотионал "
+                f"{qty * entry_px:.2f} при потолке {max_notional:.2f} "
+                f"(маржа {qty * entry_px / cfg.LEVERAGE / balance * 100:.1f}% "
+                f"баланса при лимите {cfg.MAX_MARGIN_PCT}%) — пропуск"
             )
             _forget_symbol(sig.symbol)
             return False

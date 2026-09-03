@@ -1050,3 +1050,52 @@ def test_tape_depth_is_deep_enough_to_avoid_selection():
     assert cfg.TRADE_FLOW_LIMIT >= 500, (
         f"TRADE_FLOW_LIMIT={cfg.TRADE_FLOW_LIMIT} — при такой глубине "
         f"отбраковка по длине ленты снова станет отбором по силе движения")
+
+
+# ── База обязана доказать, что она пишет ───────────────────────────────────
+
+def test_blank_db_path_falls_back_instead_of_a_temp_database(tmp_path):
+    """DB_PATH="" (переменная задана, но пустая — обычное дело в Railway)
+    у getenv не заменяется дефолтом. sqlite3.connect("") открывает
+    АНОНИМНУЮ временную базу, которая гибнет при закрытии соединения, а мы
+    открываем новое соединение на каждый вызов: каждая операция уходила в
+    свежую пустую базу, init_db рапортовал успех, торговля шла без записи
+    вообще, а get_open_trades бросал — значит живые позиции не
+    усыновлялись и оставались без стопа."""
+    import json as _j, os as _os, subprocess, sys as _sys
+    code = "import json, core.db as d; print(json.dumps({'p': d.DB_PATH}))"
+    for blank in ("", "   "):
+        env = {**_os.environ, "DB_PATH": blank}
+        out = subprocess.run([_sys.executable, "-c", code], env=env,
+                             capture_output=True, text=True,
+                             cwd=_os.path.dirname(_os.path.dirname(
+                                 _os.path.abspath(__file__))))
+        assert out.returncode == 0, out.stderr
+        p = _j.loads(out.stdout.strip().splitlines()[-1])["p"]
+        assert p.strip(), f"пустой DB_PATH={blank!r} принят как путь"
+        assert p.endswith(".db"), f"подставлен странный путь: {p!r}"
+
+
+async def test_init_db_refuses_a_path_that_does_not_persist(tmp_path,
+                                                            monkeypatch):
+    """Создание таблиц могло «удаться» в базу, которая не переживает
+    закрытие соединения. Молчаливый успех здесь означает торговлю без
+    записи сигналов и без усыновления живых позиций — то есть без стопов.
+    main.py на исключении init_db останавливает торговлю, поэтому здесь
+    именно исключение, а не строка в логе."""
+    import core.db as d
+    # Путь, на котором таблицы СОЗДАЮТСЯ успешно, но не переживают закрытие
+    # соединения. /dev/null не годится: там падает уже создание, и тест
+    # проходил бы, даже если самопроверку убрать (мутация это показала).
+    for path in ("", ":memory:"):
+        monkeypatch.setattr(d, "DB_PATH", path)
+        with pytest.raises(Exception, match="не сохраняет данные"):
+            await d.init_db()
+
+
+async def test_init_db_accepts_a_real_path(tmp_path, monkeypatch):
+    """Обратная сторона: самопроверка не должна ложно ронять рабочую базу."""
+    import core.db as d
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "ok.db"))
+    await d.init_db()
+    await d.init_db()          # идемпотентность

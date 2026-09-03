@@ -870,3 +870,106 @@ async def test_full_size_bound_still_excludes_foreign_trades():
                     _rec(base + 9000, +200.0, 50.0, 120.0)]
     _, pnl = await tr.fetch_matching_closed_pnl(C(), pos, attempts=1)
     assert pnl == pytest.approx(-15.0), "чужая сделка снова в сумме"
+
+
+# ── Стоп-кран снимает только тот, кто его поставил ─────────────────────────
+
+async def test_daily_rollover_does_not_clear_a_database_halt(monkeypatch):
+    """trading_halted взводит не только дневной лимит: main.py ставит его
+    при провале init_db («без миграции сигналы не пишутся»). Ролловер
+    суток снимал флаг безусловно, и бот начинал торговать реальными
+    деньгами с неинициализированной базой."""
+    import strategy.trader as tr
+    from core.state import state
+    state.trading_halted = True
+    state.halt_reason = "db_init_failed"
+    state.daily_pnl_date = None
+
+    async def pnl(_since):
+        return 0.0
+    monkeypatch.setattr(tr.db, "get_realized_pnl_since", pnl)
+    await tr._ensure_daily_state()
+    assert state.trading_halted is True, \
+        "суточный ролловер снял халт, поставленный из-за неисправной базы"
+    assert state.halt_reason == "db_init_failed"
+
+
+async def test_daily_rollover_clears_a_daily_loss_halt(monkeypatch):
+    """Обратная сторона: халт по дневному лимиту суточным ролловером
+    сниматься ОБЯЗАН, иначе бот встанет навсегда."""
+    import strategy.trader as tr
+    from core.state import state
+    state.trading_halted = True
+    state.halt_reason = "daily_loss"
+    state.daily_pnl_date = None
+
+    async def pnl(_since):
+        return 0.0
+    monkeypatch.setattr(tr.db, "get_realized_pnl_since", pnl)
+    await tr._ensure_daily_state()
+    assert state.trading_halted is False, "халт по дневному лимиту не снят"
+    assert state.halt_reason == ""
+
+
+async def test_min_lot_bump_cannot_break_the_margin_cap(monkeypatch):
+    """Подъём до минимального лота проверял только РИСК, а верхнюю границу
+    нотионала — нет. На малом счёте это пробивало MAX_MARGIN_PCT в разы:
+    баланс 50 USDT, минимальный лот BTCUSDT 0.001, цена 60000 -> нотионал
+    60 USDT, маржа 12 USDT = 24% баланса при потолке 10%. Инвариант по
+    риску при этом цел, поэтому проверка риска подъём и пропускала. Бьёт
+    тем сильнее, чем меньше счёт, то есть на первых реальных сделках."""
+    import strategy.trader as tr
+    from core.config import cfg
+    from core.state import state, Signal
+    monkeypatch.setattr(cfg, "AUTO_TRADE", True)
+    monkeypatch.setattr(cfg, "RISK_PER_TRADE", 1.0)
+    monkeypatch.setattr(cfg, "LEVERAGE", 5)
+    monkeypatch.setattr(cfg, "MAX_MARGIN_PCT", 10.0)
+    monkeypatch.setattr(cfg, "TRADE_MIN_SCORE", 0)
+    monkeypatch.setattr(cfg, "MIN_TRADE_HEADROOM_R", 0.0)
+    state.balance = 50.0
+    state.positions.clear()
+    state.pending_entries.clear()
+    state.trading_halted = False
+    state.halt_reason = ""
+
+    placed = []
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_balance(self):
+            return 50.0
+
+        async def get_instrument_info(self, symbol):
+            # Шаг МЕНЬШЕ минимального лота — иначе без подъёма объём
+            # округляется в ноль и отсекается минимальным нотионалом, а
+            # мутация «подъёма не было» проходит незамеченной.
+            return {"lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.01",
+                                      "minNotionalValue": "5"},
+                    "priceFilter": {"tickSize": "0.1"}}
+        async def get_positions(self, symbol=None):
+            return []
+        async def set_leverage(self, symbol, lev):
+            return True
+        async def place_order(self, **kw):
+            placed.append(kw)
+            return {"retCode": 0, "result": {"orderId": "1"}}
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "BTCUSDT", "lastPrice": "6000"}]
+
+    sig = Signal(symbol="BTCUSDT", signal_type="X", direction="LONG", score=99,
+                 price=6000.0, oi_change=0.0, vol_ratio=0.0, funding=0.0,
+                 ob_bias="NEUTRAL", atr_pct=1.0, details="",
+                 entry=6000.0, sl=5940.0, tp1=6060.0, tp2=6120.0,
+                 tp3=6180.0, rr=2.0, headroom=3.0, sl_pct=1.0)
+    ok = await tr.enter_trade(C(), sig)
+    # Заглушка обязана быть ПОЛНОЙ: без get_balance вход падал на
+    # AttributeError, ордер не отправлялся, и тест проходил бы даже со
+    # снятой проверкой потолка — ровно это и показала мутация.
+    assert not any("AttributeError" in str(r) for r in placed)
+    assert not placed, (
+        f"ордер отправлен: нотионал {placed[0].get('qty', 0) * 6000:.0f} USDT "
+        f"при потолке {50.0 * 10 / 100 * 5:.0f} — потолок маржи пробит")
+    assert ok is False

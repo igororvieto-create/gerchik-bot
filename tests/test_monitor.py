@@ -973,3 +973,136 @@ async def test_min_lot_bump_cannot_break_the_margin_cap(monkeypatch):
         f"ордер отправлен: нотионал {placed[0].get('qty', 0) * 6000:.0f} USDT "
         f"при потолке {50.0 * 10 / 100 * 5:.0f} — потолок маржи пробит")
     assert ok is False
+
+
+async def test_order_error_still_checks_the_exchange(monkeypatch):
+    """Ветка потерянного ответа спрашивала биржу, соседняя — нет: любой
+    ненулевой retCode считался доказательством, что позиции не возникло.
+    Если ордер всё же приняли, а ответили ошибкой, позиция осталась бы без
+    строки в trades, монитор усыновил бы её как MANUAL, а ручным стоп НЕ
+    ДОСЫЛАЕТСЯ — буквальный рецидив бага №1."""
+    import strategy.trader as tr
+    from core.config import cfg
+    from core.state import state, Signal
+    monkeypatch.setattr(cfg, "AUTO_TRADE", True)
+    monkeypatch.setattr(cfg, "TRADE_MIN_SCORE", 0)
+    monkeypatch.setattr(cfg, "MIN_TRADE_HEADROOM_R", 0.0)
+    monkeypatch.setattr(cfg, "RISK_PER_TRADE", 1.0)
+    state.balance = 10000.0
+    state.positions.clear(); state.pending_entries.clear()
+    state.trading_halted = False; state.halt_reason = ""
+    asked = []
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_balance(self):
+            return 10000.0
+
+        async def get_instrument_info(self, symbol):
+            return {"lotSizeFilter": {"qtyStep": "0.01", "minOrderQty": "0.01",
+                                      "minNotionalValue": "5"},
+                    "priceFilter": {"tickSize": "0.01"}}
+
+        async def get_positions(self, symbol=None):
+            return []
+
+        async def set_leverage(self, symbol, lev):
+            return True
+
+        async def place_order(self, **kw):
+            return {"retCode": 10001, "retMsg": "some error"}
+
+        async def get_position(self, symbol):
+            asked.append(symbol)
+            return {"side": "Buy", "size": "1.0", "avgPrice": "100.0"}
+
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "AAAUSDT", "lastPrice": "100"}]
+
+    sig = Signal(symbol="AAAUSDT", signal_type="X", direction="LONG", score=99,
+                 price=100.0, oi_change=0.0, vol_ratio=0.0, funding=0.0,
+                 ob_bias="NEUTRAL", atr_pct=1.0, details="",
+                 entry=100.0, sl=99.0, tp1=101.0, tp2=102.0, tp3=103.0,
+                 rr=2.0, headroom=3.0, sl_pct=1.0)
+    await tr.enter_trade(C(), sig)
+    assert asked, ("после отказа ордера биржу не спросили — живая позиция "
+                   "осталась бы без строки в trades и без стопа")
+    # Главное не число запросов, а исход: позиция взята под учёт, а не
+    # брошена. Брошенную монитор усыновил бы как MANUAL, а ручным стоп не
+    # досылается.
+    assert "AAAUSDT" in state.positions, \
+        "живая позиция брошена после ошибочного ответа на ордер"
+
+
+async def test_over_risk_positions_reach_the_dashboard(monkeypatch):
+    """Инвариант «потолок 3% жёсткий» превращается в «жёсткий, если
+    сокращение прошло»: при отказе биржи или превышении меньше
+    минимального лота позиция живёт с повышенным риском. Бот её намеренно
+    не трогает — это решение владельца, — но признак жил ОДНОЙ строкой в
+    логе за всю жизнь позиции, то есть при отсутствии алертинга нигде."""
+    import strategy.trader as tr
+    from core.state import state, Position
+    state.over_risk.clear()
+    state.balance = 1000.0
+    pos = Position(symbol="RISKUSDT", side="Buy", entry=100.0, sl=90.0,
+                   tp1=0.0, tp2=0.0, tp3=0.0, qty=5.0, qty_opened=5.0,
+                   score=50, signal_type="X", order_id="o")
+    # риск = 5 * 10 = 50 USDT = 5% баланса при потолке 3%
+    state.positions["RISKUSDT"] = pos
+    tr._RISK_WARNED.discard("RISKUSDT")
+
+    live = {"symbol": "RISKUSDT", "side": "Buy", "size": "5",
+            "avgPrice": "100.0", "stopLoss": "90.0", "takeProfit": "0",
+            "unrealisedPnl": "0"}
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_positions(self, symbol=None):
+            return [live]
+
+        async def get_balance(self):
+            return 1000.0
+
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "RISKUSDT", "lastPrice": "100"}]
+
+    await tr.monitor_positions(C())
+    assert state.over_risk.get("RISKUSDT") == pytest.approx(5.0), (
+        f"превышение риска не доходит до экрана: {state.over_risk}")
+
+
+async def test_over_risk_clears_when_the_position_is_reduced(monkeypatch):
+    """Признак обязан быть АКТУАЛЬНЫМ: сократили вручную — строка уходит
+    сама. Иначе предупреждение висит вечно и его перестают читать."""
+    import strategy.trader as tr
+    from core.state import state, Position
+    state.over_risk["RISKUSDT"] = 5.0
+    state.balance = 1000.0
+    pos = Position(symbol="RISKUSDT", side="Buy", entry=100.0, sl=90.0,
+                   tp1=0.0, tp2=0.0, tp3=0.0, qty=1.0, qty_opened=5.0,
+                   score=50, signal_type="X", order_id="o")
+    state.positions["RISKUSDT"] = pos
+    live = {"symbol": "RISKUSDT", "side": "Buy", "size": "1",
+            "avgPrice": "100.0", "stopLoss": "90.0", "takeProfit": "0",
+            "unrealisedPnl": "0"}
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_positions(self, symbol=None):
+            return [live]
+
+        async def get_balance(self):
+            return 1000.0
+
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "RISKUSDT", "lastPrice": "100"}]
+
+    await tr.monitor_positions(C())
+    assert "RISKUSDT" not in state.over_risk, \
+        "предупреждение висит после сокращения позиции"

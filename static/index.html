@@ -369,6 +369,7 @@ input[type=range]::-moz-range-thumb{
   <span id="db-info" style="opacity:.75;margin-left:8px"></span>
   <span id="flow-info" style="display:none;opacity:.75;margin-left:8px"></span>
   <span id="strat-info" style="display:none;opacity:.75;margin-left:8px"></span>
+  <span id="risk-info" style="display:none;color:var(--red);margin-left:8px"></span>
   <span id="env-info" style="display:none;color:var(--red);margin-left:8px"></span>
 </div>
 
@@ -758,6 +759,7 @@ async function refreshStats(){
     renderDbState(d);
     renderEnvTypos(d);
     renderMonitorState(d);
+    renderOverRisk(d);
     renderFlowProgress(d);
     renderStrategyTag(d);
 
@@ -843,6 +845,23 @@ const MIN_DECIDED_FOR_COLOR = 30;
 // без присмотра. Порог 3 минуты при интервале 30 секунд — это шесть
 // подряд пропущенных проходов, случайностью уже не объяснить.
 const MONITOR_STALE_MIN = 3;
+
+// Риск выше жёсткого потолка 3%. Сокращение могло не пройти (отказ биржи,
+// превышение меньше минимального лота), и тогда позиция живёт с повышенным
+// риском. Автоматически бот её не трогает — это решение владельца, — но
+// молчать об этом нельзя.
+function renderOverRisk(d){
+  const el=$('risk-info'); if(!el) return;
+  const r=(d && d.over_risk) || {};
+  const names=Object.keys(r);
+  if(!names.length){ el.style.display='none'; clearAlert('overrisk'); return; }
+  el.style.display='';
+  el.textContent='⛔ риск выше 3%: '
+    +names.map(k=>k+' '+r[k]+'%').join(', ');
+  showAlert('⛔ Позиции с риском выше потолка 3%: '
+           +names.map(k=>k+' ('+r[k]+'%)').join(', ')
+           +' — сократи вручную, бот их не трогает', 'overrisk');
+}
 
 function renderMonitorState(d){
   if(!d) return;

@@ -42,6 +42,7 @@ def _forget_symbol(symbol: str) -> None:
     _TP_RETRIES.pop(symbol, None)
     _SL_RETRIES.pop(symbol, None)
     _RISK_WARNED.discard(symbol)
+    state.over_risk.pop(symbol, None)
 
 
 async def close_and_verify(client: BybitClient, symbol: str, side: str,
@@ -592,9 +593,38 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
                 log.warning(f"{sig.symbol}: позиция ЖИВА (size={lp.get('size')}) — оформляю как свою")
                 qty = abs(float(lp.get("size") or qty))
             else:
-                log.error(f"{sig.symbol}: order failed — {ret_msg}")
-                _forget_symbol(sig.symbol)
-                return False
+                # Симметрично ветке потерянного ответа: сверяемся с биржей,
+                # а не считаем ненулевой код доказательством, что позиции
+                # нет. Соседняя ветка спрашивает биржу, эта — не спрашивала,
+                # и асимметрия стоила бы дорого: если ордер всё же приняли,
+                # а ответили ошибкой, позиция осталась бы без строки в
+                # trades, монитор усыновил бы её как MANUAL, а ручным стоп
+                # НЕ ДОСЫЛАЕТСЯ — буквальный рецидив бага №1.
+                #
+                # Лишний запрос стоит одного вызова на неудачный ордер;
+                # цена ошибки — позиция без стопа.
+                log.error(f"{sig.symbol}: order failed — {ret_msg} — сверяю с биржей")
+                lp = await client.get_position(sig.symbol)
+                if lp is None:
+                    log.critical(
+                        f"{sig.symbol}: биржа недоступна после отказа ордера — "
+                        f"состояние НЕИЗВЕСТНО. Слот остаётся занят, монитор "
+                        f"разберётся на следующем тике")
+                    return False   # sentinel НЕ снимаем
+                if not lp:
+                    _forget_symbol(sig.symbol)
+                    return False
+                if lp.get("side") and lp.get("side") != side:
+                    log.critical(
+                        f"{sig.symbol}: на бирже позиция {lp.get('side')}, а мы "
+                        f"входили {side} — чужая позиция, не трогаю")
+                    _forget_symbol(sig.symbol)
+                    return False
+                log.critical(
+                    f"{sig.symbol}: биржа ответила ошибкой ({ret_msg}), но позиция "
+                    f"ЖИВА (size={lp.get('size')}) — оформляю как свою, иначе она "
+                    f"осталась бы без стопа")
+                qty = abs(float(lp.get("size") or qty))
 
         order_id = result.get("result", {}).get("orderId", "")
         pos = Position(
@@ -1097,6 +1127,13 @@ async def monitor_positions(client: BybitClient) -> None:
                         and pos.signal_type != "MANUAL"):
                     real_risk = pos.qty * abs(pos.entry - pos.sl)
                     risk_pct = real_risk / state.balance * 100
+                    # Признак держим АКТУАЛЬНЫМ, а не только в момент
+                    # обнаружения: сократили вручную — строка с экрана
+                    # уходит сама.
+                    if risk_pct > 3.0:
+                        state.over_risk[sym] = round(risk_pct, 2)
+                    else:
+                        state.over_risk.pop(sym, None)
                     if risk_pct > 3.0 and sym not in _RISK_WARNED:
                         _RISK_WARNED.add(sym)
                         log.critical(

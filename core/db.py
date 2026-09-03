@@ -44,8 +44,36 @@ DB_PATH = (os.getenv("DB_PATH") or "").strip() or _DEFAULT_DB
 
 
 def _strategy_id() -> str:
+    """Текущий ярлык, приведённый к нижнему регистру.
+
+    Сравнение в SQLite регистрозависимое, и опечатка вроде VSA-V1 вместо
+    vsa-v1 обнуляла карточку, срезы и прогресс замера ОДНОВРЕМЕННО, а
+    history_span продолжал показывать те же строки: экран говорил «данные
+    есть, статистики нет», и это было неотличимо от «стратегия новая».
+    """
     from core.config import cfg
-    return cfg.STRATEGY_ID
+    return (cfg.STRATEGY_ID or _DEFAULT_STRATEGY).strip().lower()
+
+
+async def foreign_strategy_rows() -> int:
+    """Сколько решённых исходов лежит под ДРУГИМ ярлыком.
+
+    Встречное число к обнулённой статистике: без него «ноль» от смены
+    ярлыка неотличим от «ноль» от отсутствия данных. По стандарту этого
+    проекта одной строки в логе для такого недостаточно.
+    """
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM signals WHERE outcome IS NOT NULL "
+                "AND strategy IS NOT NULL AND strategy NOT IN (?, ?)",
+                _strat_params(),
+            ) as cur:
+                row = await cur.fetchone()
+        return int(row[0] or 0) if row else 0
+    except Exception as e:
+        log.error(f"foreign_strategy_rows error: {e}")
+        return 0
 
 
 # Условие «только текущая стратегия» для запросов статистики.
@@ -57,7 +85,23 @@ def _strategy_id() -> str:
 #
 # NULL считается своим для строк, записанных до появления ярлыка: миграция
 # проставляет им текущий ярлык, но на всякий случай запрос это переживает.
-_CUR_STRAT = "(strategy = ? OR strategy IS NULL)"
+# Ярлык строк, записанных до появления самого механизма ярлыков.
+_LEGACY_STRATEGY = "legacy"
+# Ярлык по умолчанию — им помечены строки, если STRATEGY_ID не задавали.
+_DEFAULT_STRATEGY = "vsa-v1"
+_CUR_STRAT = "(strategy = ? OR strategy IS NULL OR strategy = ?)"
+
+
+def _strat_params() -> tuple:
+    """Параметры для _CUR_STRAT: текущий ярлык и «наследство».
+
+    Старые строки включаются в статистику, только пока ярлык не меняли.
+    Сменили осознанно — старое остаётся в базе, но в новую статистику не
+    попадает: иначе среднее считалось бы по двум разным стратегиям.
+    """
+    cur = _strategy_id()
+    legacy = _LEGACY_STRATEGY if cur == _DEFAULT_STRATEGY else cur
+    return (cur, legacy)
 
 
 def is_ephemeral() -> bool:
@@ -247,14 +291,23 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status, opened_at)")
         await db.commit()
-    # Строки, записанные до появления ярлыка, принадлежат текущей
-    # стратегии — она с тех пор не менялась. Без этого первый же запрос
-    # статистики после обновления показал бы ноль.
+    # Строки, записанные ДО появления ярлыка, помечаются отдельным
+    # значением, а НЕ текущим STRATEGY_ID.
+    #
+    # Здесь стоял текущий ярлык, и естественный сценарий использования
+    # фичи — «перехожу на новую стратегию, ставлю новый STRATEGY_ID» —
+    # проставлял новый ярлык всей ПРЕДЫДУЩЕЙ истории. Откатить было
+    # нельзя: NULL уже не осталось. То есть механизм, написанный ради
+    # разделения статистик, их необратимо смешивал.
+    #
+    # _LEGACY_STRATEGY входит в выборку наравне с текущим ярлыком только
+    # тогда, когда текущий равен дефолту: если ярлык сменили осознанно,
+    # старая история в новую статистику не попадает, но и не пропадает.
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "UPDATE signals SET strategy = ? WHERE strategy IS NULL",
-                (_strategy_id(),))
+                (_LEGACY_STRATEGY,))
             await db.commit()
     except Exception as e:
         log.error(f"strategy backfill error: {e}")
@@ -674,7 +727,7 @@ async def get_outcome_stats(days: int = 7) -> Dict:
                     WHERE ts >= ? AND outcome IN ('WIN','LOSS','BE')
                       AND sl_pct IS NOT NULL AND sl_pct > 0
                       AND {_CUR_STRAT}""",
-                (cutoff, _strategy_id()),
+                (cutoff, *_strat_params()),
             ) as cur_sl:
                 row_sl = await cur_sl.fetchone()
             # AVG(1/sl), а не 1/AVG(sl): усреднение обратной величины —
@@ -693,7 +746,7 @@ async def get_outcome_stats(days: int = 7) -> Dict:
                       AND sl_pct IS NOT NULL AND sl_pct > 0
                       AND funding IS NOT NULL
                       AND {_CUR_STRAT}""",
-                (FUNDING_SETTLEMENTS, cutoff, _strategy_id()),
+                (FUNDING_SETTLEMENTS, cutoff, *_strat_params()),
             ) as cur_fd:
                 row_fd = await cur_fd.fetchone()
             avg_fund = float(row_fd[0]) if (row_fd and row_fd[0] is not None) else None
@@ -701,7 +754,7 @@ async def get_outcome_stats(days: int = 7) -> Dict:
                 f"""SELECT COALESCE(outcome, 'OPEN') o, COUNT(*) c
                     FROM signals
                     WHERE ts >= ? AND {_CUR_STRAT} GROUP BY o""",
-                (cutoff, _strategy_id()),
+                (cutoff, *_strat_params()),
             ) as cur:
                 for o, c in await cur.fetchall():
                     if o == "WIN":       stats["win"] = c
@@ -836,7 +889,7 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
                    FROM signals WHERE outcome IS NOT NULL AND ts >= ?
                      AND """ + _CUR_STRAT + """
                    ORDER BY ts DESC""",
-                (cutoff, _strategy_id()),
+                (cutoff, *_strat_params()),
             ) as cur:
                 rows = await cur.fetchall()
 
@@ -961,6 +1014,63 @@ async def get_open_trades() -> List[Dict]:
     return [dict(r) for r in rows]
 
 
+# Сколько ждём подтверждения закрытия, прежде чем признать его безнадёжным.
+# Повтор без ограничения — это залипший слот навсегда: три таких символа
+# тихо выключают автоторговлю.
+SETTLE_GIVE_UP_HOURS = 72
+
+
+async def get_unsettled_trades() -> List[Dict]:
+    """Сделки, учёт которых НЕ ЗАВЕРШЁН: строка есть, PnL не записан.
+
+    Берём и 'open', и 'stale'. Раньше блок добора читал только 'open', а
+    close_stale_open_trades в ТОМ ЖЕ тике помечала строку 'stale' — и
+    обещанного «повтора на следующем тике» не случалось никогда:
+    следующий тик её просто не видел, а реализованный убыток навсегда
+    выпадал из дневного предохранителя. Самоисцеление в save_trade_close
+    (status IN ('open','stale')) существовало, но было недостижимо.
+
+    'abandoned' сюда НЕ входит: это терминальное состояние для закрытий,
+    которых биржа так и не подтвердила.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM trades WHERE status IN ('open','stale') "
+            "AND pnl IS NULL ORDER BY opened_at DESC"
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def abandon_trade(symbol: str, order_id: str = "") -> bool:
+    """Признать закрытие неподтверждаемым и прекратить попытки.
+
+    Отдельный статус, а НЕ 'closed' с pnl=0: нулевой PnL попал бы в
+    статистику как безубыточная сделка и исказил бы и винрейт, и дневной
+    предохранитель. 'abandoned' честно говорит «результат неизвестен».
+    """
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            if order_id:
+                cur = await db.execute(
+                    "UPDATE trades SET status='abandoned', closed_at=? "
+                    "WHERE order_id=? AND status IN ('open','stale') "
+                    "AND pnl IS NULL",
+                    (datetime.utcnow().isoformat(), order_id))
+            else:
+                cur = await db.execute(
+                    "UPDATE trades SET status='abandoned', closed_at=? "
+                    "WHERE symbol=? AND status IN ('open','stale') "
+                    "AND pnl IS NULL",
+                    (datetime.utcnow().isoformat(), symbol))
+            await db.commit()
+            return cur.rowcount > 0
+    except Exception as e:
+        log.error(f"abandon_trade error: {e}")
+        return False
+
+
 async def close_stale_open_trades(live_symbols: List[str], older_than_hours: int = 24) -> int:
     """Закрывает "зависшие" open-строки: сделка старше суток, а позиции с таким
     символом на бирже нет. Без этого строка оставалась open навсегда и при
@@ -1034,6 +1144,13 @@ _EVAL_REACH_HOURS = 144
 # можно и нужно — в отличие от самих исходов по потоку, на которые смотрят
 # ОДИН раз в конце.
 FLOW_TARGET_N = 130
+# Порог торгуемости ДЛЯ ЗАМЕРА — отдельная константа, а не текущее значение
+# ползунка. cfg.TRADE_MIN_SCORE меняется в рантайме через /api/settings, и
+# счётчик замера от этого переписывал уже собранное задним числом, а после
+# рестарта откатывался к значению переменной окружения. Правило остановки
+# задано ЧИСЛОМ исходов (130), поэтому счётчик обязан быть монотонным и
+# зависеть только от поступления данных.
+FLOW_MIN_SCORE = 45
 
 
 async def flow_progress() -> Dict:
@@ -1069,7 +1186,7 @@ async def flow_progress() -> Dict:
                    FROM signals
                    WHERE outcome IN ('WIN','LOSS','BE')
                      AND score >= ?
-                     AND """ + _CUR_STRAT, (cfg.TRADE_MIN_SCORE, _strategy_id(),)
+                     AND """ + _CUR_STRAT, (FLOW_MIN_SCORE, *_strat_params(),)
             ) as cur:
                 row = await cur.fetchone()
         if row:
@@ -1132,6 +1249,20 @@ async def cleanup_old_signals(keep_hours: int = 192) -> int:
                 (max(cfg.MAX_SIGNALS_DB, 1),),
             )
             removed += cur2.rowcount
+            # ПОТОЛОК ПО ЧИСЛУ и для нерешённых. После отмены удаления
+            # решённых по возрасту нерешённые чистились только по возрасту
+            # (144 ч), и потолка по числу у них не было вовсе: при стоящем
+            # оценщике база росла до ~14 000 строк при заявленном пределе
+            # MAX_SIGNALS_DB. Заявленный потолок перестал быть потолком.
+            cur4 = await db.execute(
+                """DELETE FROM signals
+                   WHERE outcome IS NULL
+                     AND id NOT IN (SELECT id FROM signals
+                                    WHERE outcome IS NULL
+                                    ORDER BY ts DESC LIMIT ?)""",
+                (max(cfg.MAX_SIGNALS_DB, 1),),
+            )
+            removed += cur4.rowcount
             # Нерешённые старше досягаемости оценщика вердикта уже не
             # получат. Порог не может быть короче 144 ч: оценщик запрашивает
             # нерешённые именно за это окно, и при более короткой чистке

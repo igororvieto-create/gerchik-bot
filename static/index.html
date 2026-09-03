@@ -870,6 +870,11 @@ function renderStrategyTag(d){
   const s=d && d.strategy_id;
   if(!s){ el.style.display='none'; return; }
   el.style.display=''; el.textContent='стратегия: '+s;
+  // Если статистика пуста, а под другим ярлыком лежат исходы — это смена
+  // ярлыка, а не отсутствие данных. Без встречного числа эти два случая
+  // на экране неотличимы.
+  const other=d.foreign_strategy_rows||0;
+  if(other>0) el.textContent+=` · под другими ярлыками: ${other} исх.`;
 }
 
 function renderFlowProgress(d){

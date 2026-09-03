@@ -321,7 +321,12 @@ _KNOWN_ENV_NAMES = frozenset(
         # читаются напрямую, минуя Config
         "DASHBOARD_TOKEN", "DB_PATH", "PORT", "AUTO_TRADE", "BOT_MODE",
         "STRATEGY_ID",
-        "PROXY_URL", "PROXY_LIST",
+        # Прокси и адрес биржи. Опечатка ИМЕННО ЗДЕСЬ самая дорогая: нет
+        # прокси -> прямое соединение с IP Railway -> гео-блок Bybit ->
+        # get_positions() = None -> непрерывная проверка наличия стопа
+        # прекращается, то есть рецидивирующий баг №1. Детектор, написанный
+        # после инцидента с " DASHBOARD_TOKEN", был слеп ровно к ним.
+        "WEBSHARE_API_TOKEN", "BYBIT_PROXY", "BYBIT_PROXY_2", "BYBIT_BASE_URL",
     ]
 )
 

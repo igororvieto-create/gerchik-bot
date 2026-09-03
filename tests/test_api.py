@@ -467,3 +467,27 @@ def test_slider_bounds_match_server_validation():
     # синхронно с обеих сторон и не заметить.
     assert server["risk_per_trade"][1] <= 3.0, "потолок риска выше 3%"
     assert server["leverage"][1] <= 5, "плечо выше 5x"
+
+
+def test_typo_detector_knows_the_proxy_variables():
+    """Опечатка в токене прокси — самая дорогая: нет прокси -> прямое
+    соединение с IP Railway -> гео-блок Bybit -> get_positions() = None ->
+    непрерывная проверка наличия стопа прекращается. Детектор, написанный
+    после инцидента с ' DASHBOARD_TOKEN', был слеп ровно к этим именам, но
+    охранял PROXY_URL и PROXY_LIST, которых в коде нет вовсе."""
+    from core.config import _KNOWN_ENV_NAMES
+    for name in ("WEBSHARE_API_TOKEN", "BYBIT_PROXY", "BYBIT_PROXY_2",
+                 "BYBIT_BASE_URL"):
+        assert name in _KNOWN_ENV_NAMES, f"{name} не под охраной детектора"
+    for ghost in ("PROXY_URL", "PROXY_LIST"):
+        assert ghost not in _KNOWN_ENV_NAMES, (
+            f"{ghost} охраняется, хотя в коде не читается — ложная тревога "
+            f"обесценивает предупреждения")
+
+
+def test_typo_in_the_proxy_token_is_reported(monkeypatch):
+    from core.config import env_name_typos
+    monkeypatch.setenv("webshare_api_token", "x")
+    found = env_name_typos()
+    assert any("WEBSHARE_API_TOKEN" in f for f in found), \
+        f"опечатка в токене прокси не замечена: {found}"

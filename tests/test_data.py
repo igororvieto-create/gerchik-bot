@@ -934,17 +934,16 @@ async def test_statistics_ignore_signals_of_another_strategy(tmp_path, monkeypat
     assert p["decided_total"] == 4, "прогресс замера считает чужие исходы"
 
 
-async def test_old_rows_without_a_tag_are_adopted_by_migration(tmp_path,
-                                                               monkeypatch):
-    """Строки, записанные до появления ярлыка, принадлежат текущей стратегии.
-    Без переноса первый же запрос после обновления показал бы ноль — то есть
-    обновление выглядело бы как потеря всей истории."""
+async def test_old_rows_stay_visible_while_the_tag_is_unchanged(tmp_path,
+                                                                monkeypatch):
+    """Строки, записанные ДО появления ярлыка, не должны пропасть с экрана
+    от одного лишь обновления кода."""
     import aiosqlite
     import core.db as d
     from core.config import cfg
     from datetime import datetime
     monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "m.db"))
-    monkeypatch.setattr(cfg, "STRATEGY_ID", "vsa-v1")
+    monkeypatch.setattr(cfg, "STRATEGY_ID", d._DEFAULT_STRATEGY)
     await d.init_db()
     async with aiosqlite.connect(d.DB_PATH) as db:
         await db.execute(
@@ -954,12 +953,42 @@ async def test_old_rows_without_a_tag_are_adopted_by_migration(tmp_path,
             (datetime.utcnow().isoformat(),))
         await db.commit()
     await d.init_db()          # повторный старт выполняет перенос
+    st = await d.get_outcome_stats(days=7)
+    assert st["win"] == 1, "история пропала после обновления"
+
+
+async def test_changing_the_tag_does_not_rebrand_past_history(tmp_path,
+                                                              monkeypatch):
+    """ГЛАВНОЕ. Здесь миграция проставляла ТЕКУЩИЙ ярлык, и естественный
+    сценарий «перехожу на новую стратегию, ставлю новый STRATEGY_ID»
+    помечал новым ярлыком всю ПРЕДЫДУЩУЮ историю. Откатить было нельзя:
+    NULL уже не осталось. Механизм, написанный ради разделения статистик,
+    их необратимо смешивал."""
+    import aiosqlite
+    import core.db as d
+    from core.config import cfg
+    from datetime import datetime
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "m2.db"))
+    monkeypatch.setattr(cfg, "STRATEGY_ID", "new-v2")     # сразу НОВЫЙ ярлык
+    await d.init_db()
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        for i in range(5):
+            await db.execute(
+                """INSERT INTO signals (symbol, signal_type, direction, score,
+                                        price, ts, outcome, sl_pct)
+                   VALUES (?,'VSA_CLIMAX','LONG',55,1.0,?, 'WIN', 4.0)""",
+                (f"OLD{i}", datetime.utcnow().isoformat()))
+        await db.commit()
+    await d.init_db()
+    st = await d.get_outcome_stats(days=7)
+    assert st["win"] == 0, (
+        f"исходы прошлой стратегии засчитаны новой: {st}")
     async with aiosqlite.connect(d.DB_PATH) as db:
         async with db.execute(
-                "SELECT strategy FROM signals WHERE symbol='LEGACY'") as c:
-            assert (await c.fetchone())[0] == "vsa-v1", "ярлык не проставлен"
-    st = await d.get_outcome_stats(days=7)
-    assert st["win"] == 1, "история потерялась после обновления"
+                "SELECT DISTINCT strategy FROM signals") as c:
+            tags = {r[0] for r in await c.fetchall()}
+    assert tags == {d._LEGACY_STRATEGY}, \
+        f"история переклеймена: {tags}"
 
 
 async def test_saved_signal_carries_the_current_strategy_tag(tmp_path,
@@ -1099,3 +1128,162 @@ async def test_init_db_accepts_a_real_path(tmp_path, monkeypatch):
     monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "ok.db"))
     await d.init_db()
     await d.init_db()          # идемпотентность
+
+
+# ── Отложенный учёт закрытия обязан оставаться достижимым ─────────────────
+
+async def test_stale_rows_stay_reachable_for_settlement(tmp_path, monkeypatch):
+    """Блок добора читал только status='open', а сторож зависших в ТОМ ЖЕ
+    тике помечал строку 'stale'. Обещанного «повтора на следующем тике» не
+    случалось никогда: следующий тик её не видел, и реализованный убыток
+    навсегда выпадал из дневного предохранителя."""
+    import core.db as d
+    from core.state import Position
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "st.db"))
+    await d.init_db()
+    p = Position(symbol="AAAUSDT", side="Buy", entry=100.0, sl=95.0, tp1=0.0,
+                 tp2=0.0, tp3=0.0, qty=1.0, qty_opened=1.0, score=50,
+                 signal_type="X", order_id="o1")
+    assert await d.save_trade_open(p)
+    assert await d.close_stale_open_trades([], older_than_hours=0) == 1
+    assert [r["symbol"] for r in await d.get_open_trades()] == [], \
+        "заготовка не воспроизводит случай: строка осталась open"
+    rows = await d.get_unsettled_trades()
+    assert [r["symbol"] for r in rows] == ["AAAUSDT"], \
+        "помеченная stale строка потеряна для учёта навсегда"
+    # и учёт по ней всё ещё проходит
+    assert await d.save_trade_close(p, exit_price=98.0, pnl=-2.0) == d.CLOSE_OK
+
+
+async def test_abandoned_trade_is_not_counted_as_a_flat_result(tmp_path,
+                                                               monkeypatch):
+    """Неподтверждаемое закрытие получает ОТДЕЛЬНЫЙ статус, а не 'closed' с
+    нулём: нулевой PnL попал бы в статистику безубыточной сделкой и исказил
+    бы и винрейт, и дневной предохранитель."""
+    import core.db as d
+    from core.state import Position
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "ab.db"))
+    await d.init_db()
+    p = Position(symbol="BBBUSDT", side="Buy", entry=100.0, sl=95.0, tp1=0.0,
+                 tp2=0.0, tp3=0.0, qty=1.0, qty_opened=1.0, score=50,
+                 signal_type="X", order_id="o2")
+    assert await d.save_trade_open(p)
+    assert await d.abandon_trade("BBBUSDT", "o2") is True
+    assert await d.get_unsettled_trades() == [], \
+        "брошенная строка снова попала в очередь повторов"
+    assert await d.get_open_trades() == [], "брошенная строка считается открытой"
+    assert await d.get_realized_pnl_since("1970-01-01T00:00:00") == 0.0
+    # повторный вызов ничего не находит — идемпотентность
+    assert await d.abandon_trade("BBBUSDT", "o2") is False
+
+
+async def test_abandon_without_order_id_uses_a_separate_status(tmp_path,
+                                                               monkeypatch):
+    """Ветка без order_id (восстановленные позиции, реконсиляция дубликата)
+    обязана вести себя так же. Проверяем СТАТУС напрямую: 'closed' с pnl=0
+    выглядел бы в сумме реализованного как ноль и прошёл бы проверку по
+    сумме незамеченным."""
+    import aiosqlite
+    import core.db as d
+    from core.state import Position
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "ab2.db"))
+    await d.init_db()
+    p = Position(symbol="CCCUSDT", side="Buy", entry=100.0, sl=95.0, tp1=0.0,
+                 tp2=0.0, tp3=0.0, qty=1.0, qty_opened=1.0, score=50,
+                 signal_type="X")           # order_id пустой
+    assert await d.save_trade_open(p)
+    assert await d.abandon_trade("CCCUSDT", "") is True
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        async with db.execute(
+                "SELECT status, pnl FROM trades WHERE symbol='CCCUSDT'") as c:
+            status, pnl = await c.fetchone()
+    assert status == "abandoned", f"неподтверждённое закрытие помечено {status!r}"
+    assert pnl is None, "результату приписан ноль, которого никто не измерял"
+    assert await d.get_unsettled_trades() == []
+
+
+async def test_tag_comparison_is_case_insensitive(tmp_path, monkeypatch):
+    """Сравнение в SQLite регистрозависимое. Опечатка в регистре обнуляла
+    карточку, срезы и прогресс замера ОДНОВРЕМЕННО, а history_span
+    продолжал показывать те же строки: «данные есть, статистики нет» —
+    неотличимо от «стратегия новая»."""
+    import core.db as d
+    from core.config import cfg
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "case.db"))
+    monkeypatch.setattr(cfg, "STRATEGY_ID", "vsa-v1")
+    await d.init_db()
+    for i in range(4):
+        await _mk_tagged(d, f"S{i}", "WIN", "vsa-v1")
+    monkeypatch.setattr(cfg, "STRATEGY_ID", "VSA-V1")     # тот же, но капсом
+    st = await d.get_outcome_stats(days=7)
+    assert st["win"] == 4, f"регистр ярлыка обнулил статистику: {st}"
+
+
+async def test_foreign_rows_are_reported_when_statistics_are_empty(
+        tmp_path, monkeypatch):
+    """Встречное число: «ноль исходов» от смены ярлыка обязан отличаться от
+    «ноль исходов» от отсутствия данных."""
+    import core.db as d
+    from core.config import cfg
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "fr.db"))
+    monkeypatch.setattr(cfg, "STRATEGY_ID", "new-v2")
+    await d.init_db()
+    for i in range(6):
+        await _mk_tagged(d, f"OLD{i}", "WIN", "vsa-v1")
+    st = await d.get_outcome_stats(days=7)
+    assert st["win"] == 0, "заготовка не воспроизводит случай"
+    assert await d.foreign_strategy_rows() == 6, \
+        "пустая статистика не отличается от отсутствия данных"
+
+
+async def test_flow_progress_does_not_move_with_the_runtime_slider(
+        tmp_path, monkeypatch):
+    """Правило остановки задано ЧИСЛОМ исходов (130), значит счётчик обязан
+    быть монотонным. Фильтр брал cfg.TRADE_MIN_SCORE на момент ЗАПРОСА, а
+    порог меняется в рантайме через /api/settings: один сдвиг ползунка
+    переписывал уже собранное задним числом, а рестарт откатывал счётчик
+    обратно к значению переменной окружения."""
+    import core.db as d
+    from core.config import cfg
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "fp.db"))
+    await d.init_db()
+    for i in range(6):
+        await _mk_flow_signal(d, f"HI{i}", "WIN", 0.3, 5.0, score=55)
+    for i in range(4):
+        await _mk_flow_signal(d, f"LO{i}", "LOSS", 0.3, 5.0, score=30)
+    monkeypatch.setattr(cfg, "TRADE_MIN_SCORE", 45)
+    before = await d.flow_progress()
+    monkeypatch.setattr(cfg, "TRADE_MIN_SCORE", 20)   # сдвинули ползунок
+    after = await d.flow_progress()
+    assert after["usable"] == before["usable"], (
+        f"счётчик замера поехал от ползунка: {before['usable']} -> "
+        f"{after['usable']}")
+    monkeypatch.setattr(cfg, "TRADE_MIN_SCORE", 90)
+    assert (await d.flow_progress())["usable"] == before["usable"]
+
+
+async def test_row_cap_also_bounds_undecided_signals(tmp_path, monkeypatch):
+    """После отмены удаления решённых по возрасту нерешённые чистились
+    только по возрасту, и потолка по числу у них не было: при стоящем
+    оценщике база росла втрое выше заявленного MAX_SIGNALS_DB."""
+    import aiosqlite
+    import core.db as d
+    from core.config import cfg
+    from datetime import datetime
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "cap.db"))
+    monkeypatch.setattr(cfg, "MAX_SIGNALS_DB", 10)
+    await d.init_db()
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        for i in range(40):
+            await db.execute(
+                """INSERT INTO signals (symbol, signal_type, direction, score,
+                                        price, ts, sl_pct)
+                   VALUES (?,'X','LONG',50,1.0,?,4.0)""",
+                (f"U{i}", datetime.utcnow().isoformat()))
+        await db.commit()
+    await d.cleanup_old_signals(keep_hours=192)
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        async with db.execute(
+                "SELECT COUNT(*) FROM signals WHERE outcome IS NULL") as c:
+            left = (await c.fetchone())[0]
+    assert left == 10, f"потолок по числу не применён к нерешённым: {left}"

@@ -805,6 +805,15 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
                 f"or propagation lag) — keeping position tracked, monitor re-checks SL"
             )
 
+        if qty <= 0:
+            # Сокращение риск-гардом закрыло позицию целиком. Рапортовать
+            # «Opened ... qty=0.0» и возвращать True значило бы сообщать об
+            # открытии позиции, которой на бирже уже нет.
+            log.warning(f"{sig.symbol}: позиция закрылась целиком при "
+                        f"сокращении — входа нет")
+            await db.abandon_trade(sig.symbol, pos.order_id if pos else "")
+            _forget_symbol(sig.symbol)
+            return False
         log.info(
             f"Opened {side} {sig.symbol} qty={qty} "
             f"entry={pos.entry:.8f} SL={sl_px:.8f} TP={tp_px:.8f} "
@@ -1015,6 +1024,23 @@ async def monitor_positions(client: BybitClient) -> None:
                     # неподтверждённое закрытие теряет убыток навсегда, а
                     # неудачная запись даёт двойной счёт через блок простоя.
                     if not await _settle_closed_position(client, pos, attempts=4):
+                        # Повтор ОГРАНИЧЕН по возрасту позиции. Запись
+                        # closed-pnl может не появиться никогда: ордер не
+                        # залился (IOC без встречной ликвидности), либо
+                        # эндпоинт закрыт гео-блоком. Бесконечный повтор
+                        # держал слот из MAX_POSITIONS вечно — три таких
+                        # символа тихо выключают автоторговлю, — и каждый
+                        # тик тратил секунды на четыре попытки.
+                        age_h = (datetime.now(timezone.utc)
+                                 - pos.ts.replace(tzinfo=timezone.utc)
+                                 ).total_seconds() / 3600
+                        if age_h >= db.SETTLE_GIVE_UP_HOURS:
+                            await db.abandon_trade(sym, pos.order_id)
+                            log.critical(
+                                f"{sym}: закрытие не подтверждено биржей за "
+                                f"{age_h:.0f} ч — слот освобождён, РЕЗУЛЬТАТ "
+                                f"СДЕЛКИ НЕИЗВЕСТЕН и в статистику не войдёт")
+                            _forget_symbol(sym)
                         continue
                     _forget_symbol(sym)
             else:
@@ -1258,7 +1284,10 @@ async def monitor_positions(client: BybitClient) -> None:
         # терялась насовсем. При деплое после каждого пуша это штатная
         # ситуация, а не экзотика.
         try:
-            for row in await db.get_open_trades():
+            # get_unsettled_trades, а не get_open_trades: строку мог
+            # пометить 'stale' сторож зависших в ЭТОМ ЖЕ тике, и обещанный
+            # «повтор на следующем тике» не случался никогда.
+            for row in await db.get_unsettled_trades():
                 sym_r = row["symbol"]
                 if sym_r in live_map or sym_r in state.positions:
                     continue
@@ -1289,8 +1318,21 @@ async def monitor_positions(client: BybitClient) -> None:
                     # open, следующий тик её не увидит, и убыток потеряется
                     # НАВСЕГДА — ровно то, что этот блок и должен был
                     # починить. Оставляем как есть, повторим на след. тике.
+                    # Повтор ОГРАНИЧЕН: запись closed-pnl может не
+                    # появиться никогда (ордер не залился, гео-блок
+                    # эндпоинта). Бесконечный повтор держал бы слот вечно.
+                    age_h = (now_utc - op_ts).total_seconds() / 3600
+                    if age_h >= db.SETTLE_GIVE_UP_HOURS:
+                        if await db.abandon_trade(sym_r, row["order_id"] or ""):
+                            log.critical(
+                                f"{sym_r}: закрытие не подтверждено биржей за "
+                                f"{age_h:.0f} ч — строка помечена abandoned, "
+                                f"РЕЗУЛЬТАТ СДЕЛКИ НЕИЗВЕСТЕН и в статистику "
+                                f"не войдёт")
+                        continue
                     log.warning(f"{sym_r}: закрытие во время простоя не подтверждено "
-                                f"биржей — повтор на следующем тике")
+                                f"биржей — повтор на следующем тике "
+                                f"(прошло {age_h:.1f} ч из {db.SETTLE_GIVE_UP_HOURS})")
                     continue
                 # PnL идёт в предохранитель ТОЛЬКО после успешной записи:
                 # save_trade_close глушит свои исключения, и при

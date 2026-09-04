@@ -1116,7 +1116,11 @@ async def test_init_db_refuses_a_path_that_does_not_persist(tmp_path,
     # Путь, на котором таблицы СОЗДАЮТСЯ успешно, но не переживают закрытие
     # соединения. /dev/null не годится: там падает уже создание, и тест
     # проходил бы, даже если самопроверку убрать (мутация это показала).
-    for path in ("", ":memory:"):
+    # Только ":memory:". Пустой путь здесь не нужен — его перехватывает
+    # подстановка на уровне модуля (отдельный тест через subprocess), а
+    # подсовывание "" в обход неё оставляло за собой оборванное соединение
+    # aiosqlite и предупреждение в наборе.
+    for path in (":memory:",):
         monkeypatch.setattr(d, "DB_PATH", path)
         with pytest.raises(Exception, match="не сохраняет данные"):
             await d.init_db()
@@ -1273,17 +1277,34 @@ async def test_row_cap_also_bounds_undecided_signals(tmp_path, monkeypatch):
     monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "cap.db"))
     monkeypatch.setattr(cfg, "MAX_SIGNALS_DB", 10)
     await d.init_db()
+    from datetime import timedelta
+    now = datetime.utcnow()
     async with aiosqlite.connect(d.DB_PATH) as db:
+        # 40 СТАРЫХ (оценщик до них уже не дотянется) — их потолок режет
         for i in range(40):
             await db.execute(
                 """INSERT INTO signals (symbol, signal_type, direction, score,
                                         price, ts, sl_pct)
                    VALUES (?,'X','LONG',50,1.0,?,4.0)""",
-                (f"U{i}", datetime.utcnow().isoformat()))
+                (f"OLD{i}", (now - timedelta(hours=60 + i)).isoformat()))
+        # 20 СВЕЖИХ, внутри окна оценки — их трогать нельзя
+        for i in range(20):
+            await db.execute(
+                """INSERT INTO signals (symbol, signal_type, direction, score,
+                                        price, ts, sl_pct)
+                   VALUES (?,'X','LONG',50,1.0,?,4.0)""",
+                (f"NEW{i}", (now - timedelta(hours=i)).isoformat()))
         await db.commit()
     await d.cleanup_old_signals(keep_hours=192)
     async with aiosqlite.connect(d.DB_PATH) as db:
         async with db.execute(
-                "SELECT COUNT(*) FROM signals WHERE outcome IS NULL") as c:
-            left = (await c.fetchone())[0]
-    assert left == 10, f"потолок по числу не применён к нерешённым: {left}"
+                "SELECT symbol FROM signals WHERE outcome IS NULL") as c:
+            left = {r[0] for r in await c.fetchall()}
+    fresh = {s for s in left if s.startswith("NEW")}
+    old_left = {s for s in left if s.startswith("OLD")}
+    assert len(fresh) == 20, (
+        f"потолок съел сигналы ВНУТРИ окна оценки ({20 - len(fresh)} шт). "
+        f"Стопы разрешаются быстрее целей, поэтому теряются преимущественно "
+        f"будущие ПОБЕДЫ, и винрейт занижается систематически")
+    assert len(old_left) == 10, \
+        f"потолок по числу не применён к старым нерешённым: {len(old_left)}"

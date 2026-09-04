@@ -700,6 +700,21 @@ def _calc_levels(price: float, atr: float, direction: str,
     }
 
 
+# Счётчик символов, по которым анализ не состоялся ИЗ-ЗА ДАННЫХ, а не
+# из-за отсутствия сетапа. Без него «скан прошёл, находок нет» и «скан не
+# смог получить данные по всем ста символам» выглядят на дашборде
+# одинаково зелёными, и бот может быть мёртв сутками.
+#
+# Обычный int безопасен: батч исполняется в одном цикле событий, между
+# чтением и записью нет await.
+_SCAN_HEALTH: Dict[str, int] = {"data_fail": 0}
+
+
+def _data_fail(symbol: str, why: str) -> None:
+    _SCAN_HEALTH["data_fail"] += 1
+    log.warning(f"{symbol}: {why}")
+
+
 async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]:
     symbol = ticker.get("symbol", "")
     if symbol in cfg.BLACKLIST:
@@ -772,13 +787,27 @@ async def _analyze_symbol(client: BybitClient, ticker: dict) -> Optional[Signal]
         for _name, _val in (("oi_hist", oi_hist), ("klines", klines),
                             ("ob", ob), ("klines_1h", klines_1h)):
             if isinstance(_val, BaseException):
-                log.warning(f"{symbol}: {_name} — {_val}")
+                _data_fail(symbol, f"{_name} — {_val}")
                 return None
+        # Стакан НЕ ОТВЕТИЛ — символ пропускаем, а не работаем «нейтрально».
+        # Пустая книга и отказ эндпоинта раньше были неразличимы, и отказ
+        # переворачивал сторону сделки, попутно ослабляя confluence-кап
+        # (confidence росла с 0.0 до 0.4, кап с 35 до 55). Лучше не выдать
+        # сигнал, чем выдать его не в ту сторону с завышенной уверенностью.
+        #
+        # None приходит только от боевого клиента. Прогон по истории отдаёт
+        # ЯВНО пустую книгу: исторических снапшотов Bybit не даёт, там
+        # фактор осознанно не участвует, и это написано в шапке прогона.
+        if ob is None:
+            _data_fail(symbol, "стакан недоступен — символ пропущен")
+            return None
 
         if not oi_hist or not klines:
-            log.warning(f"{symbol}: partial data — oi_hist={len(oi_hist)} klines={len(klines)}")
             if not klines:
+                _data_fail(symbol,
+                           f"нет свечей — oi_hist={len(oi_hist)} klines=0")
                 return None
+            log.warning(f"{symbol}: partial data — oi_hist={len(oi_hist)} klines={len(klines)}")
 
         # Базлайн OI — ПРЕДЫДУЩИЙ 4h-снапшот (oi_hist[0]), а не свежайший:
         # список отсортирован по возрастанию времени, и oi_hist[-1] — это
@@ -1083,6 +1112,7 @@ async def scan_all(client: BybitClient) -> List[Signal]:
         # уменьши SCAN_BATCH_SIZE / TOP_N_PAIRS.
         batch_size = cfg.SCAN_BATCH_SIZE
         errors = 0
+        _SCAN_HEALTH["data_fail"] = 0
         for i in range(0, len(tickers), batch_size):
             batch = tickers[i : i + batch_size]
             results = await asyncio.gather(
@@ -1111,7 +1141,19 @@ async def scan_all(client: BybitClient) -> List[Signal]:
         state.scan_count += 1
         state.total_signals += len(signals)
         state.last_scan_found = len(signals)
-        state.last_scan_error = ""
+        # «Находок нет» и «данные не пришли» обязаны различаться на экране.
+        # Раньше отказ ПОСИМВОЛЬНЫХ эндпоинтов (типичный rate-limit) не
+        # ловил никто: last_scan_error оставался пустым, и мёртвый скан
+        # выглядел здоровым. Ветка «0 символов» ловит только полный отказ
+        # get_tickers.
+        failed = _SCAN_HEALTH["data_fail"] + errors
+        if tickers and failed >= len(tickers) * 0.5:
+            state.last_scan_error = (
+                f"данные не получены по {failed} из {len(tickers)} символов "
+                f"— скан недостоверен")
+            log.error(f"scan_all: {state.last_scan_error}")
+        else:
+            state.last_scan_error = ""
 
         log.info(f"scan_all: found {len(signals)} signals (scan #{state.scan_count})")
         if signals:

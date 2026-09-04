@@ -418,3 +418,133 @@ def test_missing_tape_is_not_reported_as_balanced_flow():
     from strategy.scanner import _EMPTY_FLOW, _trade_flow
     assert _EMPTY_FLOW["delta"] is None
     assert _trade_flow([])["delta"] is None
+
+
+# ── Отсутствие данных не имеет права давать больше уверенности ─────────────
+
+async def test_orderbook_failure_skips_the_symbol():
+    """Отказ эндпоинта стакана и реально пустая книга раньше были
+    неразличимы. Последствие серьёзнее потери фактора: без голоса стакана
+    _direction уходит в запасную ветку, сторону задаёт знак изменения цены,
+    а список независимых голосов пустеет — confidence РАСТЁТ с 0.0 до 0.4 и
+    confluence-кап поднимается с 35 до 55. То есть отказ переворачивал
+    сторону сделки И ослаблял защиту против рецидива №2."""
+    import strategy.scanner as scanner
+    calls = {"ob": 0}
+
+    class C:
+        async def get_klines(self, symbol, interval="240", limit=25):
+            base = 100.0
+            return [{"ts": i * 14400000, "open": base, "high": base * 1.01,
+                     "low": base * 0.99, "close": base, "volume": 1000.0}
+                    for i in range(30)]
+
+        async def get_open_interest(self, symbol, interval="4h", limit=12):
+            return [{"ts": 0, "oi": 100.0}, {"ts": 1, "oi": 110.0}]
+
+        async def get_orderbook(self, symbol, limit=20):
+            calls["ob"] += 1
+            return None                     # эндпоинт НЕ ОТВЕТИЛ
+
+        async def get_recent_trades(self, symbol, limit=500):
+            return []
+
+        async def get_instrument_info(self, symbol):
+            return {"launchTime": 0}
+
+    scanner._LISTING_AGE_CACHE.clear()
+    scanner._SCAN_HEALTH["data_fail"] = 0
+    res = await scanner._analyze_symbol(C(), {
+        # изменение цены выше PRICE_CHANGE_MIN, иначе символ отсекается
+        # ранним гейтом и до запроса стакана дело не доходит
+        "symbol": "OBFAILUSDT", "lastPrice": "100", "price24hPcnt": "0.05",
+        # объём выше MIN_VOL_24H (2 млн), иначе символ отсекается раньше
+        "fundingRate": "0.0", "volume24h": "50000000",
+        "openInterestValue": "11000"})
+    assert calls["ob"] == 1, "заготовка не дошла до запроса стакана"
+    assert res is None, (
+        "символ с недоступным стаканом дал сигнал — сторона выбрана без "
+        "данных, а confluence-кап при этом ослаблен")
+    # None само по себе ничего не доказывает: без охраны анализ падает
+    # дальше на AttributeError, общий except его глотает и тоже возвращает
+    # None. Отличаем штатный выход от пойманного исключения по счётчику —
+    # его увеличивает только охрана (REVIEW §0-Б п.2).
+    assert scanner._SCAN_HEALTH["data_fail"] == 1, (
+        "символ отсеян не охраной, а проглоченным исключением — "
+        "и в счётчик здоровья скана это не попало")
+
+
+async def test_empty_orderbook_is_still_allowed():
+    """Обратная сторона: ЯВНО пустая книга — это не отказ. Прогон по
+    истории отдаёт именно её (снапшотов Bybit не даёт), и запрет уронил бы
+    весь замер."""
+    from strategy.scanner import _ob_imbalance
+    ratio, bias = _ob_imbalance({"bids": [], "asks": []})
+    assert ratio == 0.0 and bias == "NEUTRAL"
+
+
+async def test_scan_reports_data_failure_instead_of_looking_healthy():
+    """Отказ ПОСИМВОЛЬНЫХ эндпоинтов (типичный rate-limit) не ловил никто:
+    last_scan_error оставался пустым, и «скан прошёл, находок нет» было
+    неотличимо от «данные не пришли ни по одному символу». Бот мог быть
+    мёртв сутками при зелёном дашборде."""
+    import strategy.scanner as scanner
+    from core.state import state
+
+    class Dead:
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": f"S{i}USDT", "lastPrice": "1",
+                     "price24hPcnt": "0.01", "fundingRate": "0",
+                     "volume24h": "10000000", "openInterestValue": "100000",
+                     "turnover24h": "10000000"} for i in range(20)]
+
+        async def get_klines(self, symbol, interval="240", limit=25):
+            return []                      # rate-limit: пусто, без исключения
+
+        async def get_open_interest(self, symbol, interval="4h", limit=12):
+            return []
+
+        async def get_orderbook(self, symbol, limit=20):
+            return {"bids": [], "asks": []}
+
+        async def get_recent_trades(self, symbol, limit=500):
+            return []
+
+        async def get_instrument_info(self, symbol):
+            return {"launchTime": 0}
+
+    state.last_scan_error = ""
+    scanner._LISTING_AGE_CACHE.clear()
+    await scanner.scan_all(Dead())
+    assert state.last_scan_error, (
+        "скан не получил данных ни по одному символу, но отчитался как "
+        "здоровый — на дашборде это зелёный пульс при мёртвом боте")
+    assert "данные не получены" in state.last_scan_error
+
+
+async def test_client_marks_a_failed_orderbook_request_as_no_data():
+    """Сам клиент обязан различать отказ и пустую книгу: при отказе _get
+    отдаёт {} или тело с retCode != 0, и оба раньше превращались в
+    {"bids": [], "asks": []} — неотличимо от честно пустого стакана."""
+    from exchange.bybit import BybitClient
+    c = BybitClient()
+    try:
+        async def dead(path, params=None, auth=False):
+            return {}                       # три попытки исчерпаны
+        c._get = dead
+        assert await c.get_orderbook("XUSDT") is None, \
+            "отказ эндпоинта выдан за пустую книгу"
+
+        async def rate_limited(path, params=None, auth=False):
+            return {"retCode": 10006, "retMsg": "too many visits"}
+        c._get = rate_limited
+        assert await c.get_orderbook("XUSDT") is None, \
+            "rate-limit выдан за пустую книгу"
+
+        async def alive(path, params=None, auth=False):
+            return {"retCode": 0, "result": {"b": [["1", "2"]], "a": [["3", "4"]]}}
+        c._get = alive
+        ob = await c.get_orderbook("XUSDT")
+        assert ob == {"bids": [[1.0, 2.0]], "asks": [[3.0, 4.0]]}
+    finally:
+        await c.close()

@@ -331,11 +331,29 @@ class BybitClient:
         }, auth=True)
         return data.get("result", {}).get("list", [])
 
-    async def get_orderbook(self, symbol: str, limit: int = 20) -> Dict:
+    async def get_orderbook(self, symbol: str, limit: int = 20) -> Optional[Dict]:
+        """None = запрос НЕ УДАЛСЯ. Пустой словарь = книга действительно пуста.
+
+        Раньше оба случая давали {"bids": [], "asks": []}, и различить их было
+        нельзя. Последствие серьёзнее, чем потеря фактора: без голоса стакана
+        _direction уходит в запасную ветку, сторону задаёт знак изменения
+        цены, а список независимых голосов пустеет — и confidence РАСТЁТ с
+        0.0 до 0.4, снимая confluence-кап с 35 до 55. То есть отсутствие
+        данных переворачивало сторону сделки И ослабляло защиту, написанную
+        против рецидива №2. Меньше информации не имеет права давать больше
+        уверенности.
+
+        Тот же принцип, что уже применён к ленте сделок: delta=None вместо
+        0.0, потому что ноль означал бы «поток сбалансирован».
+        """
         data = await self._get("/v5/market/orderbook", {
             "category": "linear", "symbol": symbol, "limit": limit,
         })
-        result = data.get("result", {})
+        if not data or "result" not in data:
+            return None
+        result = data.get("result") or {}
+        if "b" not in result and "a" not in result:
+            return None
         bids = [[float(p), float(q)] for p, q in result.get("b", [])]
         asks = [[float(p), float(q)] for p, q in result.get("a", [])]
         return {"bids": bids, "asks": asks}

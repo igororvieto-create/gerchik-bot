@@ -747,7 +747,15 @@ async function refreshStats(){
       // Критерий — матожидание, а не процент побед: с переносом стопа в
       // безубыток исход BE даёт ~0R и в винрейт не входит, но забирает
       // сделки, которые раньше были полным убытком.
-      $('s-wr').className='stat-value '+(oc.ev_r==null?'':oc.ev_r>0?'v-green':'v-red');
+      // Тот же порог выборки, что и в модалке. Иначе одно и то же число
+      // из одного и того же запроса получало два противоположных вердикта:
+      // карточка зелёная и без оговорок, а в разбивке та же цифра серая с
+      // пометкой «мало данных». Решение включать реальные деньги
+      // принимается по цвету на карточке.
+      const _dec=(oc.win??0)+(oc.loss??0);
+      $('s-wr').className='stat-value '+(
+        (oc.ev_r==null || _dec<MIN_DECIDED_FOR_COLOR) ? ''
+        : (oc.ev_r>0?'v-green':'v-red'));
       $('s-wr-sub').textContent=`${oc.win}W · ${oc.loss}L · ${oc.be??0}БУ · `
         +`${oc.winrate!=null?oc.winrate+'%':'—'} · ${oc.open} ждут`;
     }
@@ -756,6 +764,23 @@ async function refreshStats(){
     // scan_error, то есть молчал ровно тогда, когда нужен: сразу после
     // деплоя (скана ещё не было) и при падающих сканах — а это и есть
     // моменты, когда данные теряются.
+    // Охрана СТОИТ ПЕРЕД рендерерами, а не после.
+    //
+    // 401 отдаёт валидный JSON {"error":"unauthorized"} — r.json() не
+    // бросает. Рендереры, стоявшие выше, видели пустые поля и ГАСИЛИ
+    // предупреждения: «риск выше 3%» и «монитор не отрабатывал» исчезали
+    // с экрана ровно тогда, когда владелец терял доступ, — то есть когда
+    // проверить состояние он уже не мог.
+    if(d.error || d.trading_halted===undefined){
+
+      // 401 отдаёт валидный JSON {"error":"unauthorized"} — r.json() не
+      // бросает, catch{} не срабатывает, и прежняя ветка else ГАСИЛА
+      // баннер стоп-дня, попутно рисуя «🤖 Авто». То есть ровно та ложь,
+      // ради устранения которой поле trading_halted и вводилось.
+      // «Не знаю» обязано отличаться от «стоп-дня нет».
+      $('s-trade').textContent='🔒 нет доступа';
+      return;
+    }
     renderDbState(d);
     renderEnvTypos(d);
     renderMonitorState(d);
@@ -783,20 +808,18 @@ async function refreshStats(){
     }
     // Дневной предохранитель: бот остановлен, а карточка показывала «🤖 Авто»,
     // и пользователь считал его вооружённым, пока сигналы шли мимо.
-    if(d.error || d.trading_halted===undefined){
-      // 401 отдаёт валидный JSON {"error":"unauthorized"} — r.json() не
-      // бросает, catch{} не срабатывает, и прежняя ветка else ГАСИЛА
-      // баннер стоп-дня, попутно рисуя «🤖 Авто». То есть ровно та ложь,
-      // ради устранения которой поле trading_halted и вводилось.
-      // «Не знаю» обязано отличаться от «стоп-дня нет».
-      $('s-trade').textContent='🔒 нет доступа';
-      return;
-    }
     if(d.trading_halted){
       $('s-trade').textContent='⛔ Стоп-день';
-      showAlert(d.halt_reason==='db_error'
-        ? '⛔ Торговля приостановлена: не удалось прочитать дневной PnL из базы'
-        : `⛔ Дневной лимит убытка достигнут (${d.daily_realized_pnl??'?'} USDT) — новые сделки до 00:00 UTC`,
+      // Причины требуют РАЗНЫХ действий, и путать их дорого: «жди
+      // полуночи» при неисправной базе — совет в никуда, потому что халт
+      // по такой причине суточным ролловером не снимается вовсе.
+      const HALT_MSG = {
+        daily_loss: `⛔ Дневной лимит убытка достигнут (${d.daily_realized_pnl??'?'} USDT) — новые сделки до 00:00 UTC`,
+        db_init_failed: '⛔ Торговля остановлена: база не поднялась (миграция не прошла). Полуночью НЕ лечится — смотри логи старта',
+        daily_pnl_unreadable: '⛔ Торговля приостановлена: не удалось прочитать дневной PnL из базы',
+      };
+      showAlert(HALT_MSG[d.halt_reason]
+        || `⛔ Торговля остановлена${d.halt_reason?' ('+d.halt_reason+')':''}`,
         'halt');
     } else {
       // Без ветки else «⛔ Стоп-день» висел и после сброса лимита в 00:00 UTC:
@@ -935,15 +958,22 @@ function renderDbState(d){
   // большинстве конфигураций: DB_PATH=/app/... без тома даёт False при
   // эфемерной базе. Поэтому решение принимается по ДВУМ числам.
   const h=d.db_history, up=d.uptime_hours;
-  if(h && h.rows>=0){
-    const a=h.age_hours;
-    $('db-info').textContent=`история: ${h.rows} сигн.`
-      +(a!=null?`, старейший ${a<48?Math.round(a)+' ч':Math.round(a/24)+' сут'} назад`:'');
-  } else if(h && h.rows===-1){
+  if(h && h.rows===-1){
     // rows=-1 — база НЕ ЧИТАЕТСЯ. Это не «данных нет», и путать нельзя.
     $('db-info').textContent='база не читается';
     showAlert('⚠ База не читается — статистика и защита позиций под вопросом','dbvol');
     return;
+  }
+  if(h && h.rows>=0){
+    // База ЧИТАЕТСЯ — снимаем баннер, поставленный при разовой блокировке
+    // SQLite. Без этого «⚠ База не читается» висел рядом со строкой
+    // «история: 0 сигн.» до перезагрузки страницы: два взаимоисключающих
+    // утверждения на одном экране. Ветки ниже поднимут баннер заново, если
+    // причина настоящая.
+    clearAlert('dbvol');
+    const a=h.age_hours;
+    $('db-info').textContent=`история: ${h.rows} сигн.`
+      +(a!=null?`, старейший ${a<48?Math.round(a)+' ч':Math.round(a/24)+' сут'} назад`:'');
   } else {
     $('db-info').textContent='';
   }
@@ -967,6 +997,27 @@ function renderDbState(d){
 
 /* ── Positions refresh ── */
 let _posRefreshInFlight=false;
+// Пометка «данные устарели» на панели позиций. Отдельная функция, а не
+// правка вёрстки на месте: панель обновляется из двух путей, и признак
+// обязан сниматься автоматически при первом же удачном ответе.
+function markPositionsStale(stale){
+  const p=$('pos-panel'); if(!p) return;
+  p.style.opacity = stale ? '0.45' : '';
+  let b=$('pos-stale');
+  if(stale){
+    if(!b){
+      b=document.createElement('div');
+      b.id='pos-stale';
+      b.style.cssText='color:var(--red);font-size:12px;margin:4px 0';
+      p.prepend(b);
+    }
+    b.textContent='⚠ данные позиций устарели — ответ биржи не получен';
+  } else if(b){
+    b.remove();
+  }
+  document.querySelectorAll('[id^="cbtn-"]').forEach(el=>{ el.disabled = !!stale; });
+}
+
 async function refreshPositions(){
   if(_posRefreshInFlight) return;
   _posRefreshInFlight=true;
@@ -978,8 +1029,14 @@ async function refreshPositions(){
     // лечили в refreshStats; здесь проверки не было.
     if(d.error||!Array.isArray(d.positions)){
       $('s-pos').textContent='—';
-      return;   // панель не трогаем: пусть остаётся то, что было видно
+      // Панель НЕ стираем — пропажа карточек хуже устаревших, — но и
+      // выдавать старые числа за живые нельзя: PnL и стоп минутной
+      // давности набраны тем же шрифтом, что и настоящие, а кнопка
+      // «Закрыть» остаётся активной. Помечаем панель устаревшей.
+      markPositionsStale(true);
+      return;
     }
+    markPositionsStale(false);
     const pos=d.positions.filter(Boolean);
     $('s-pos').textContent=pos.length;
     const panel=$('pos-panel');
@@ -1005,7 +1062,7 @@ async function refreshPositions(){
         </div>`;
       }).join('');
     } else panel.style.display='none';
-  }catch{}
+  }catch{ markPositionsStale(true); }
   finally{ _posRefreshInFlight=false; }
 }
 
@@ -1031,6 +1088,13 @@ async function closePos(symbol){
         showAlert('⚠ '+symbol+': позиция закрыта на бирже, но результат ещё не '
                  +'подтверждён — учёт досчитается на ближайшем тике монитора',
                  'close-'+symbol);
+        // Гасим по таймеру: причина исчезает сама на ближайшем тике
+        // монитора (30 с), а вручную снять баннер было нечем — ни одного
+        // clearAlert на этот ключ не существовало, и плашка висела до
+        // перезагрузки страницы, вытесняя настоящие предупреждения.
+        setTimeout(()=>clearAlert('close-'+symbol), 60000);
+      } else {
+        clearAlert('close-'+symbol);
       }
       await refreshPositions();
     } else {

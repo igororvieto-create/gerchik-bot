@@ -39,6 +39,34 @@ def _require_token(request: Request) -> Optional[JSONResponse]:
     предупреждение, чтобы это не осталось незамеченным.
     """
     token = os.getenv("DASHBOARD_TOKEN", "").strip()
+
+    # МУТИРУЮЩИЕ запросы без заданного токена ЗАПРЕЩЕНЫ.
+    #
+    # Раньше отсутствие токена делало проверку пустой, и это была
+    # единственная линия обороны. Starlette читает тело без проверки
+    # Content-Type, поэтому чужая страница могла послать CORS-simple POST
+    # (без preflight) на /api/settings и /api/close: включить автоторговлю,
+    # поднять риск до потолка, закрыть живую позицию. Ответ она не
+    # прочитает, но ДЕЙСТВИЕ выполнится, и владелец увидит только результат.
+    #
+    # Отказ, а не предупреждение: у бота ключи биржи, и «работаем как
+    # раньше» здесь означает «доступны всем». Чтения оставляем открытыми —
+    # они не действуют, а закрыв их, мы ослепили бы владельца, не защитив
+    # ничего.
+    #
+    # /api/scan назван явно: это GET, но с побочными эффектами (пишет
+    # сигналы, шлёт push, двигает счётчик), то есть по методу его не
+    # опознать.
+    mutating = (request.method not in ("GET", "HEAD")
+                or request.url.path.startswith("/api/scan"))
+    if not token and mutating:
+        log.error(f"ОТКАЗ {request.url.path}: DASHBOARD_TOKEN не задан, "
+                  f"мутирующие запросы запрещены")
+        return JSONResponse(
+            {"error": "DASHBOARD_TOKEN не задан — действие запрещено. "
+                      "Задай переменную в настройках сервиса."},
+            status_code=503)
+
     if not token:
         # Раньше здесь стоял молчаливый return: докстринг обещал
         # предупреждение, а в логах не было ни строки, и оператор считал
@@ -52,8 +80,16 @@ def _require_token(request: Request) -> Optional[JSONResponse]:
                 "кто знает адрес. Задай переменную в Railway."
             )
         return None
-    got = (request.headers.get("X-Dashboard-Token")
-           or request.query_params.get("token") or "")
+    from_header = request.headers.get("X-Dashboard-Token") or ""
+    from_query = request.query_params.get("token") or ""
+    if from_query:
+        # Форма ?token= уезжает в журнал доступа открытым текстом. Фронтенд
+        # от неё ушёл (принимает #token=, фрагмент на сервер не идёт), но
+        # сервер её принимает ради старых закладок. Молчать нельзя:
+        # засветившийся токен надо менять.
+        log.warning(f"токен пришёл query-параметром на {request.url.path} — "
+                    f"он попадает в журнал доступа, смени его")
+    got = from_header or from_query
     # compare_digest, а не ==: обычное сравнение строк выходит на первом
     # различающемся байте и по времени ответа выдаёт префикс токена.
     # Сравниваем БАЙТЫ: строковая форма бросает TypeError на не-ASCII, и

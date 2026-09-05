@@ -790,6 +790,7 @@ async def test_stats_exposes_monitor_staleness(monkeypatch):
     class _Req:
         headers: dict = {}
         query_params: dict = {}
+        method = "GET"
         url = type("U", (), {"path": "/api/stats"})()
 
     body = _j.loads(bytes((await R.get_stats(_Req())).body).decode())

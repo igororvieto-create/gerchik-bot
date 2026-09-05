@@ -15,10 +15,14 @@ from core.config import cfg
 
 
 class FakeRequest:
-    def __init__(self, token=None, body=None, path="/test"):
+    def __init__(self, token=None, body=None, path="/test", method="GET"):
         self.headers = {"X-Dashboard-Token": token} if token else {}
         self.query_params = {}
         self.url = type("U", (), {"path": path})()
+        # Метод обязателен: охрана запрещает МУТИРУЮЩИЕ запросы при
+        # незаданном токене, а по умолчанию заглушка изображает запись —
+        # это опаснее чтения, и проверять надо именно её.
+        self.method = method
         self._body = body if body is not None else {}
 
     async def json(self):
@@ -53,52 +57,52 @@ def with_token(monkeypatch):
     ("risk_per_trade", 0.0),
     ("max_positions", 999),
 ])
-async def test_settings_rejects_invariant_violations(no_token, field, value):
+async def test_settings_rejects_invariant_violations(no_token, field, value, with_token):
     before = {f: getattr(cfg, f.upper()) for f in
               ("leverage", "risk_per_trade", "max_positions")}
-    resp = await R.update_settings(FakeRequest(body={field: value}))
+    resp = await R.update_settings(FakeRequest(with_token, body={field: value}, method="POST"))
     assert _code(resp) == 400, f"{field}={value} принято"
     for f, old in before.items():
         assert getattr(cfg, f.upper()) == old, f"{f} изменился несмотря на отказ"
 
 
-async def test_settings_is_atomic(no_token):
+async def test_settings_is_atomic(no_token, with_token):
     """Частичное сохранение хуже отказа: раньше ранние поля применялись,
     а UI показывал «не сохранено»."""
     saved = cfg.AUTO_TRADE
     cfg.AUTO_TRADE = False
     try:
         resp = await R.update_settings(
-            FakeRequest(body={"auto_trade": True, "leverage": 10}))
+            FakeRequest(with_token, body={"auto_trade": True, "leverage": 10}, method="POST"))
         assert _code(resp) == 400
         assert cfg.AUTO_TRADE is False, "auto_trade применился при отказе тела"
     finally:
         cfg.AUTO_TRADE = saved
 
 
-async def test_settings_string_false_does_not_enable_trading(no_token):
+async def test_settings_string_false_does_not_enable_trading(no_token, with_token):
     """bool("false") is True — строка "false" ВКЛЮЧАЛА реальную торговлю."""
     saved = cfg.AUTO_TRADE
     cfg.AUTO_TRADE = False
     try:
-        resp = await R.update_settings(FakeRequest(body={"auto_trade": "false"}))
+        resp = await R.update_settings(FakeRequest(with_token, body={"auto_trade": "false"}, method="POST"))
         assert _code(resp) == 200
         assert cfg.AUTO_TRADE is False
-        bad = await R.update_settings(FakeRequest(body={"auto_trade": "мусор"}))
+        bad = await R.update_settings(FakeRequest(with_token, body={"auto_trade": "мусор"}, method="POST"))
         assert _code(bad) == 400
         assert cfg.AUTO_TRADE is False
     finally:
         cfg.AUTO_TRADE = saved
 
 
-async def test_settings_cross_relations_enforced(no_token):
+async def test_settings_cross_relations_enforced(no_token, with_token):
     """Поштучные диапазоны не ловят связки: риск 3% × 20 позиций = 60%
     одновременного риска при дневном лимите 6%."""
     resp = await R.update_settings(
-        FakeRequest(body={"risk_per_trade": 3.0, "max_positions": 20}))
+        FakeRequest(with_token, body={"risk_per_trade": 3.0, "max_positions": 20}, method="POST"))
     assert _code(resp) == 400
     resp2 = await R.update_settings(
-        FakeRequest(body={"min_score": 60, "trade_min_score": 45}))
+        FakeRequest(with_token, body={"min_score": 60, "trade_min_score": 45}, method="POST"))
     assert _code(resp2) == 400, "порог показа выше торгового делает торговый фиктивным"
 
 
@@ -120,9 +124,39 @@ async def test_cyrillic_token_does_not_crash(monkeypatch):
     assert _code(await R.get_positions(FakeRequest("секретный-токен"))) == 200
 
 
-async def test_no_token_configured_keeps_everything_open(no_token):
-    """Без DASHBOARD_TOKEN интерфейс обязан работать как раньше."""
-    assert _code(await R.get_positions(FakeRequest())) == 200
+async def test_without_a_token_reads_work_but_writes_are_refused(no_token):
+    """Без DASHBOARD_TOKEN ЧТЕНИЯ работают, ЗАПИСИ запрещены.
+
+    Раньше отсутствие токена делало проверку пустой, и это была
+    единственная линия обороны. Starlette читает тело без проверки
+    Content-Type, поэтому чужая страница могла послать CORS-simple POST
+    (без preflight) на /api/settings и /api/close: включить автоторговлю,
+    поднять риск до потолка, закрыть живую позицию. Ответ она не
+    прочитает, но ДЕЙСТВИЕ выполнится.
+
+    Чтения оставлены открытыми намеренно: они не действуют, а закрыв их,
+    мы ослепили бы владельца, ничего не защитив.
+    """
+    assert _code(await R.get_positions(FakeRequest())) == 200, \
+        "чтение закрыто — владелец ослеп, а защищать тут нечего"
+    deny = await R.update_settings(
+        FakeRequest(body={"auto_trade": True}, method="POST"))
+    assert _code(deny) == 503, (
+        "запись без заданного токена принята — чужой сайт может включить "
+        "автоторговлю одним CORS-simple запросом")
+    assert "DASHBOARD_TOKEN" in _body(deny).get("error", "")
+
+
+async def test_scan_is_treated_as_a_write_despite_being_a_get(no_token):
+    """GET /api/scan пишет сигналы, шлёт push и двигает счётчик — по методу
+    его не опознать, поэтому он назван явно. Иначе предзагрузчик браузера
+    и превью-бот мессенджера дёргают полный скан по ста символам."""
+    deny = await R.trigger_scan(FakeRequest(path="/api/scan", method="GET"))
+    # Код 503 сам по себе ничего не доказывает: без охраны обработчик
+    # возвращает ТОТ ЖЕ 503 по другой причине («клиент не инициализирован»).
+    # Проверяем ПРИЧИНУ отказа (REVIEW §0-Б п.2).
+    assert "DASHBOARD_TOKEN" in _body(deny).get("error", ""), (
+        f"скан с побочными эффектами доступен без токена: {_body(deny)}")
 
 
 # ── Контракт с фронтендом ────────────────────────────────────────────────────

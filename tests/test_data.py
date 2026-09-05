@@ -1308,3 +1308,61 @@ async def test_row_cap_also_bounds_undecided_signals(tmp_path, monkeypatch):
         f"будущие ПОБЕДЫ, и винрейт занижается систематически")
     assert len(old_left) == 10, \
         f"потолок по числу не применён к старым нерешённым: {len(old_left)}"
+
+
+# ── Оценщик не судит по обрубленному окну ─────────────────────────────────
+
+def test_mfe_refuses_an_unknown_direction():
+    """Рядом, в _judge, защита стоит явно: «раньше всё, кроме LONG, молча
+    трактовалось как SHORT». В _mfe её не было, и мусорное направление
+    считалось по шортовой формуле — порча колонки mfe_r, той самой, по
+    которой меряют пороги."""
+    from strategy.evaluator import _mfe
+    kl = [{"ts": 0, "high": 110.0, "low": 90.0, "close": 100.0}]
+    assert _mfe("LONG", 100.0, 95.0, kl) == pytest.approx(2.0)
+    assert _mfe("SHORT", 100.0, 105.0, kl) == pytest.approx(2.0)
+    for junk in ("NEUTRAL", "", "long", None):
+        assert _mfe(junk, 100.0, 95.0, kl) == 0.0, (
+            f"направление {junk!r} посчитано по шортовой формуле")
+
+
+async def test_evaluator_waits_instead_of_judging_a_truncated_window(
+        tmp_path, monkeypatch):
+    """Защита срабатывала ТОЛЬКО когда окно невосстановимо. Иначе
+    выполнение проваливалось дальше и выносило вердикт ровно по тому
+    неполному окну, которое комментарий выше объявил недопустимым:
+    неизвестно, был ли стоп задет раньше, значит винрейт форвард-теста
+    завышается — а он единственное основание включать автоторговлю."""
+    from datetime import datetime, timedelta
+    import aiosqlite
+    import core.db as d
+    import strategy.evaluator as ev
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "ev.db"))
+    monkeypatch.setattr(ev, "db", d)
+    await d.init_db()
+    sig_ts = datetime.utcnow() - timedelta(hours=10)      # моложе окна 48ч
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO signals (symbol, signal_type, direction, score,
+                                    price, ts, entry, sl, tp2, sl_pct)
+               VALUES ('TRUNCUSDT','X','LONG',55,100.0,?,100.0,95.0,110.0,5.0)""",
+            (sig_ts.isoformat(),))
+        await db.commit()
+    sig_ms = int(sig_ts.timestamp() * 1000)
+
+    class C:
+        # биржа отдала только ПОСЛЕДНИЕ два часа: начало окна не покрыто
+        async def get_klines(self, symbol, interval="15", limit=200):
+            base = sig_ms + 8 * 3600 * 1000
+            return [{"ts": base + i * 900000, "open": 100.0, "high": 111.0,
+                     "low": 99.0, "close": 110.0, "volume": 1.0}
+                    for i in range(8)]
+
+    await ev.evaluate_signal_outcomes(C())
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        async with db.execute(
+                "SELECT outcome FROM signals WHERE symbol='TRUNCUSDT'") as c:
+            outcome = (await c.fetchone())[0]
+    assert outcome is None, (
+        f"вердикт {outcome!r} вынесен по окну с необеспеченным началом — "
+        f"неизвестно, был ли стоп задет раньше")

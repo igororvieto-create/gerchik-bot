@@ -548,3 +548,77 @@ async def test_client_marks_a_failed_orderbook_request_as_no_data():
         assert ob == {"bids": [[1.0, 2.0]], "asks": [[3.0, 4.0]]}
     finally:
         await c.close()
+
+
+def test_concurrent_scans_are_blocked_server_side():
+    """Ручной скан с дашборда, автоскан через 4 с после загрузки страницы и
+    плановый проход — три независимых источника. Флаг scanBusy живёт во
+    вкладке браузера и от параллельных вкладок не спасает; серверная
+    защита обязана быть, иначе параллельные проходы выжигают rate-limit
+    ключа, дальше перебор прокси и гео-блок — то есть проверка наличия
+    стопа прекращается.
+
+    Защита есть под именем _SCANNING. Тест её ЗАКРЕПЛЯЕТ: ревью уже один
+    раз объявило её отсутствующей, потому что искало по другому имени."""
+    import inspect
+    import strategy.scanner as scanner
+    src = inspect.getsource(scanner.scan_all)
+    assert "if _SCANNING" in src, "серверная защита от параллельных сканов снята"
+    assert "_SCANNING = True" in src
+    assert "finally:" in src and "_SCANNING = False" in src, (
+        "флаг не сбрасывается в finally — одно исключение, и скан "
+        "заблокирован навсегда")
+    # между проверкой и установкой не должно быть await: иначе два
+    # параллельных вызова оба увидят False
+    head = src[src.index("if _SCANNING"):src.index("_SCANNING = True")]
+    assert "await" not in head, "между проверкой и установкой флага есть await"
+
+
+async def test_reversal_guards_apply_even_without_the_level_exemption():
+    """Ограничители разворота жили ВНУТРИ ветки освобождения от гейта
+    уровня, и выключение VSA_LEVEL_EXEMPT снимало вместе с ним ещё два
+    ЧУЖИХ ограничителя — снос и запрет входа за экстремум сигнальной
+    свечи. «Строгий» вариант оказывался не строже, а иначе дырявее, и
+    варианты strict/strict_nf в прошлых замерах меряли не то, что
+    заявлено (REVIEW §2 требует у разворота собственного ограничителя)."""
+    import inspect
+    import strategy.scanner as scanner
+    src = inspect.getsource(scanner._analyze_symbol)
+    guard = src.index("if is_vsa_reversal:")
+    exempt = src.index("level_exempt = is_vsa_reversal and cfg.VSA_LEVEL_EXEMPT")
+    assert guard < exempt, (
+        "ограничители разворота снова стоят ПОСЛЕ вычисления освобождения — "
+        "значит могут от него зависеть")
+    block = src[guard:exempt]
+    assert "REVERSAL_MAX_DRIFT_ATR" in block, "снос не проверяется вне освобождения"
+    assert '_sig_c["low"]' in block and '_sig_c["high"]' in block, \
+        "запрет входа за экстремум сигнальной свечи не проверяется"
+    assert "VSA_LEVEL_EXEMPT" not in block, \
+        "ограничители разворота снова зависят от флага освобождения"
+
+
+def test_funding_vote_off_removes_funding_from_direction_entirely():
+    """Флаг обязан значить то, что называется. При FUNDING_VOTE=false
+    фандинг голоса не подавал, но сторону задавал по-прежнему — а снятие
+    «тавтологического» голоса удаляло ОДИН голос, равный primary, то есть
+    ЧУЖОЙ голос цены или стакана. Вариант «фандинг не голосует» на деле
+    означал «фандинг всё так же выбирает сторону, плюс у сигнала отнят
+    честный голос и ужесточён кап»."""
+    from core.config import cfg
+    import strategy.scanner as scanner
+    prev = cfg.FUNDING_VOTE
+    try:
+        # фандинг +0.05 -> SHORT, стакан BUY -> LONG, цена -0.5% -> SHORT
+        cfg.FUNDING_VOTE = True
+        d_on, c_on = scanner._direction("FUNDING_EXTREME", -0.5, "BUY", 0.05,
+                                        vsa_bias="NEUTRAL")
+        assert d_on == "SHORT", "при включённом голосе сторону задаёт фандинг"
+
+        cfg.FUNDING_VOTE = False
+        d_off, c_off = scanner._direction("FUNDING_EXTREME", -0.5, "BUY", 0.05,
+                                          vsa_bias="NEUTRAL")
+        assert d_off != d_on, (
+            "при выключенном голосе фандинг ВСЁ РАВНО задал сторону — "
+            "вариант меряет не то, что заявлено")
+    finally:
+        cfg.FUNDING_VOTE = prev

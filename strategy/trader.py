@@ -1143,6 +1143,38 @@ async def monitor_positions(client: BybitClient) -> None:
                             f"автоматически не трогаю."
                         )
 
+                # ── ВЫХОД ПО ВРЕМЕНИ ──────────────────────────────────
+                # Замер судит исход в окне 48 часов и закрывает недошедшую
+                # сделку по последней цене. У живых позиций ограничения не
+                # было вовсе: сделка могла висеть неделю. Такая сделка в
+                # измеренную популяцию НЕ ВХОДИТ, и переносить на неё вывод
+                # замера нельзя — то есть бот работал не по той
+                # спецификации, которую я проверял.
+                #
+                # Ручные позиции не трогаем: они не наши.
+                if (cfg.MAX_POSITION_AGE_HOURS and pos.signal_type != "MANUAL"
+                        and pos.qty > 0):
+                    age_h = (datetime.now(timezone.utc)
+                             - pos.ts.replace(tzinfo=timezone.utc)
+                             ).total_seconds() / 3600
+                    if age_h >= cfg.MAX_POSITION_AGE_HOURS:
+                        log.warning(
+                            f"{sym}: позиция живёт {age_h:.0f} ч при пределе "
+                            f"{cfg.MAX_POSITION_AGE_HOURS} — закрываю по рынку "
+                            f"(за окном, в котором измерена стратегия)")
+                        side_close = "Sell" if pos.side == "Buy" else "Buy"
+                        done, remaining = await close_and_verify(
+                            client, sym, side_close, pos.qty)
+                        if done:
+                            if await _settle_closed_position(client, pos,
+                                                             attempts=4):
+                                _forget_symbol(sym)
+                            continue
+                        # Не закрылось — оставляем под наблюдением, повторим
+                        # на следующем тике. Позиция под своим стопом.
+                        log.error(f"{sym}: выход по времени не прошёл, "
+                                  f"остаток {remaining} — повтор на след. тике")
+
                 # Continuous SL verification — the "monitor re-checks" that
                 # enter_trade's unverified path relies on. A live position
                 # without a stop-loss is the recurring bug #1 made real.

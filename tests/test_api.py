@@ -525,3 +525,31 @@ def test_typo_in_the_proxy_token_is_reported(monkeypatch):
     found = env_name_typos()
     assert any("WEBSHARE_API_TOKEN" in f for f in found), \
         f"опечатка в токене прокси не замечена: {found}"
+
+
+def test_position_age_limit_cannot_be_shorter_than_the_judging_window():
+    """Предел возраста позиции короче окна оценки закрывал бы сделки
+    раньше, чем оценщик успевает вынести по ним вердикт: исход остался бы
+    неизвестным, а измеренная популяция — другой. Ноль отключает правило
+    осознанно, но промежуточных «полчаса» быть не должно."""
+    import json as _j
+    import os as _os
+    import subprocess
+    import sys as _sys
+    code = "import json; from core.config import cfg; print(json.dumps(cfg.MAX_POSITION_AGE_HOURS))"
+    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    for given, expect_at_least in (("1", 4), ("2", 4), ("48", 48)):
+        env = {**_os.environ, "MAX_POSITION_AGE_HOURS": given}
+        out = subprocess.run([_sys.executable, "-c", code], env=env,
+                             capture_output=True, text=True, cwd=root)
+        assert out.returncode == 0, out.stderr
+        got = _j.loads(out.stdout.strip().splitlines()[-1])
+        assert got >= expect_at_least, (
+            f"MAX_POSITION_AGE_HOURS={given} принят как {got} — бот закроет "
+            f"сделку раньше, чем оценщик вынесет вердикт")
+    # 0 — осознанное отключение, обязано проходить как есть
+    env = {**_os.environ, "MAX_POSITION_AGE_HOURS": "0"}
+    out = subprocess.run([_sys.executable, "-c", code], env=env,
+                         capture_output=True, text=True, cwd=root)
+    assert _j.loads(out.stdout.strip().splitlines()[-1]) == 0, \
+        "отключение правила сломано"

@@ -1107,3 +1107,137 @@ async def test_over_risk_clears_when_the_position_is_reduced(monkeypatch):
     await tr.monitor_positions(C())
     assert "RISKUSDT" not in state.over_risk, \
         "предупреждение висит после сокращения позиции"
+
+
+# ── Выход по времени: живой бот обязан работать по измеренной спецификации ──
+
+async def test_position_older_than_the_measured_window_is_closed(monkeypatch):
+    """Замер судит исход в окне 48 часов и закрывает недошедшую сделку по
+    последней цене. У живых позиций ограничения по времени НЕ БЫЛО вовсе:
+    сделка могла висеть неделю. Такая сделка в измеренную популяцию не
+    входит, и переносить на неё вывод замера нельзя — то есть бот работал
+    не по той спецификации, которую проверяли."""
+    from datetime import datetime, timedelta, timezone
+    import strategy.trader as tr
+    from core.config import cfg
+    from core.state import state, Position
+    monkeypatch.setattr(cfg, "MAX_POSITION_AGE_HOURS", 48)
+    closed = []
+
+    pos = Position(symbol="OLDUSDT", side="Buy", entry=100.0, sl=95.0,
+                   tp1=0.0, tp2=110.0, tp3=0.0, qty=1.0, qty_opened=1.0,
+                   score=50, signal_type="VSA_CLIMAX", order_id="o1")
+    pos.ts = datetime.utcnow() - timedelta(hours=60)
+    state.positions.clear()
+    state.positions["OLDUSDT"] = pos
+    state.balance = 1000.0
+
+    async def fake_close(client, symbol, side, qty):
+        closed.append((symbol, side, qty))
+        return True, 0.0
+    monkeypatch.setattr(tr, "close_and_verify", fake_close)
+
+    async def settled(client, p, attempts=4):
+        return True
+    monkeypatch.setattr(tr, "_settle_closed_position", settled)
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_positions(self):
+            return [{"symbol": "OLDUSDT", "side": "Buy", "size": "1",
+                     "avgPrice": "100.0", "stopLoss": "95.0",
+                     "takeProfit": "110.0", "unrealisedPnl": "0"}]
+
+        async def get_balance(self):
+            return 1000.0
+
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "OLDUSDT", "lastPrice": "100"}]
+
+    await tr.monitor_positions(C())
+    assert closed, ("позиция старше окна замера не закрыта — бот работает "
+                    "не по той спецификации, которую измеряли")
+    assert closed[0][0] == "OLDUSDT" and closed[0][1] == "Sell"
+
+
+async def test_fresh_position_is_not_closed_by_the_age_rule(monkeypatch):
+    """Обратная сторона: свежую позицию правило трогать не смеет."""
+    from datetime import datetime, timedelta
+    import strategy.trader as tr
+    from core.config import cfg
+    from core.state import state, Position
+    monkeypatch.setattr(cfg, "MAX_POSITION_AGE_HOURS", 48)
+    closed = []
+    pos = Position(symbol="NEWUSDT", side="Buy", entry=100.0, sl=95.0,
+                   tp1=0.0, tp2=110.0, tp3=0.0, qty=1.0, qty_opened=1.0,
+                   score=50, signal_type="VSA_CLIMAX", order_id="o2")
+    pos.ts = datetime.utcnow() - timedelta(hours=5)
+    state.positions.clear()
+    state.positions["NEWUSDT"] = pos
+    state.balance = 1000.0
+
+    async def fake_close(client, symbol, side, qty):
+        closed.append(symbol)
+        return True, 0.0
+    monkeypatch.setattr(tr, "close_and_verify", fake_close)
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_positions(self):
+            return [{"symbol": "NEWUSDT", "side": "Buy", "size": "1",
+                     "avgPrice": "100.0", "stopLoss": "95.0",
+                     "takeProfit": "110.0", "unrealisedPnl": "0"}]
+
+        async def get_balance(self):
+            return 1000.0
+
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "NEWUSDT", "lastPrice": "100"}]
+
+    await tr.monitor_positions(C())
+    assert not closed, f"свежая позиция закрыта правилом возраста: {closed}"
+
+
+async def test_age_rule_does_not_touch_manual_positions(monkeypatch):
+    """Ручная сделка пользователя — не наша, и закрывать её по нашему
+    правилу нельзя ни при каком возрасте."""
+    from datetime import datetime, timedelta
+    import strategy.trader as tr
+    from core.config import cfg
+    from core.state import state, Position
+    monkeypatch.setattr(cfg, "MAX_POSITION_AGE_HOURS", 48)
+    closed = []
+    pos = Position(symbol="MANUSDT", side="Buy", entry=100.0, sl=95.0,
+                   tp1=0.0, tp2=0.0, tp3=0.0, qty=1.0, qty_opened=1.0,
+                   score=0, signal_type="MANUAL")
+    pos.ts = datetime.utcnow() - timedelta(hours=200)
+    state.positions.clear()
+    state.positions["MANUSDT"] = pos
+    state.balance = 1000.0
+
+    async def fake_close(client, symbol, side, qty):
+        closed.append(symbol)
+        return True, 0.0
+    monkeypatch.setattr(tr, "close_and_verify", fake_close)
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_positions(self):
+            return [{"symbol": "MANUSDT", "side": "Buy", "size": "1",
+                     "avgPrice": "100.0", "stopLoss": "95.0",
+                     "takeProfit": "0", "unrealisedPnl": "0"}]
+
+        async def get_balance(self):
+            return 1000.0
+
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "MANUSDT", "lastPrice": "100"}]
+
+    await tr.monitor_positions(C())
+    assert not closed, "закрыта ЧУЖАЯ позиция"

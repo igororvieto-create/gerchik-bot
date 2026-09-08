@@ -167,6 +167,15 @@ class Config:
     # покрывают тем меньше времени, чем сильнее всплеск, то есть ровно на
     # климаксе. У отброшенных ATR 9.9% против 4.1%, score 46.8 против 35.8.
     TRADE_FLOW_LIMIT: int = _env_int("TRADE_FLOW_LIMIT", 1000)
+    # Предельный возраст ПОЗИЦИИ. Не подкрутка стратегии, а приведение
+    # реализации к тому, что измерено: замер судит исход в окне 48 часов и
+    # закрывает недошедшую сделку как EXPIRED по последней цене. У живых
+    # позиций ограничения по времени не было вовсе, поэтому сделка, живущая
+    # дольше, в измеренную популяцию НЕ ВХОДИТ — и переносить на неё вывод
+    # замера нельзя. Медиана удержания в замере 7.8 часа.
+    #
+    # 0 отключает выход по времени (тогда бот снова расходится с замером).
+    MAX_POSITION_AGE_HOURS: int = _env_int("MAX_POSITION_AGE_HOURS", 48)
     MAX_LAST_CANDLE_ATR:  float = _env_float("MAX_LAST_CANDLE_ATR", 2.0)
     # Два переключателя структуры стратегии. Значения по умолчанию РАВНЫ
     # сегодняшнему поведению — боевой бот не меняется. Нужны для того,
@@ -280,6 +289,11 @@ cfg.MIN_LISTING_AGE_DAYS = int(_clamp(cfg.MIN_LISTING_AGE_DAYS, 1, 365,
                                       "MIN_LISTING_AGE_DAYS"))
 cfg.MAX_LAST_CANDLE_ATR  = _clamp(cfg.MAX_LAST_CANDLE_ATR, 1.0, 10.0,
                                   "MAX_LAST_CANDLE_ATR")
+# 0 — осознанное отключение; иначе не короче окна оценки, иначе бот закрывал
+# бы сделки раньше, чем замер успевает вынести по ним вердикт.
+if cfg.MAX_POSITION_AGE_HOURS:
+    cfg.MAX_POSITION_AGE_HOURS = int(
+        _clamp(cfg.MAX_POSITION_AGE_HOURS, 4, 720, "MAX_POSITION_AGE_HOURS"))
 cfg.MIN_RR               = _clamp(cfg.MIN_RR, 1.0, 10.0, "MIN_RR")
 cfg.MAX_SL_ATR           = _clamp(cfg.MAX_SL_ATR, 1.0, 10.0, "MAX_SL_ATR")
 

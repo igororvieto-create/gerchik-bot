@@ -141,13 +141,36 @@ def test_score_scale_is_not_degenerate():
 
 # ── Геометрия уровней ────────────────────────────────────────────────────────
 
-def test_levels_grid_is_exactly_1r_2r_3r():
-    lv = s._calc_levels(100.0, 2.0, "LONG", support=97.5, resistance=112.0)
-    assert lv is not None
-    risk = 100.0 - lv["sl"]
-    assert abs(lv["tp1"] - (100.0 + risk)) < 1e-9
-    assert abs(lv["tp2"] - (100.0 + 2 * risk)) < 1e-9
-    assert abs(lv["tp3"] - (100.0 + 3 * risk)) < 1e-9
+def test_levels_grid_follows_the_configured_target():
+    """Лестница целей строится ОТ параметра TP_R_MULT, а не от зашитых
+    1/2/3. tp2 — та цель, в которую сделка реально целится (её бот ставит
+    на биржу), tp1 и tp3 идут пропорционально и служат разметкой.
+
+    При дефолте 2.0 сетка совпадает с прежней 1R/2R/3R — поведение бота не
+    изменилось, изменилась только возможность её задать."""
+    from core.config import cfg
+    prev = cfg.TP_R_MULT
+    try:
+        cfg.TP_R_MULT = 2.0
+        lv = s._calc_levels(100.0, 2.0, "LONG", support=97.5, resistance=112.0)
+        assert lv is not None
+        risk = 100.0 - lv["sl"]
+        assert abs(lv["tp1"] - (100.0 + risk)) < 1e-9
+        assert abs(lv["tp2"] - (100.0 + 2 * risk)) < 1e-9
+        assert abs(lv["tp3"] - (100.0 + 3 * risk)) < 1e-9
+        assert lv["rr"] == 2.0
+
+        # другая цель — другая сетка и другое поле rr
+        cfg.TP_R_MULT = 3.0
+        lv3 = s._calc_levels(100.0, 2.0, "LONG", support=97.5, resistance=112.0)
+        assert lv3 is not None
+        r3 = 100.0 - lv3["sl"]
+        assert abs(lv3["tp2"] - (100.0 + 3 * r3)) < 1e-9, \
+            "цель не следует за параметром — ползунок двигался бы впустую"
+        assert lv3["rr"] == 3.0, "поле rr осталось зашитым"
+        assert abs(lv3["sl"] - lv["sl"]) < 1e-9, "цель не смеет двигать СТОП"
+    finally:
+        cfg.TP_R_MULT = prev
 
 
 def test_open_sky_is_refused():

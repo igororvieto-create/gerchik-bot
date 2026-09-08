@@ -136,6 +136,18 @@ class Config:
     LEVEL_NOISE_ATR:    float = _env_float("LEVEL_NOISE_ATR", 0.5)
     # Потолок ширины стопа в ATR — защита от абсурдно широких стопов
     MAX_SL_ATR:         float = _env_float("MAX_SL_ATR", 3.5)
+    # Основная цель в единицах риска. Была зашита числом 2.0 в двух местах
+    # сразу (расчёт уровней и поле rr), поэтому изменить её можно было
+    # только правкой кода.
+    #
+    # ЧЕСТНО О ТОМ, ЧТО ЭТО ДАЁТ: геометрия задаёт безубыточный винрейт, а
+    # не преимущество. При цели 2R нужно 33.3% побед, при 3R — 25%, при
+    # 1.5R — 40%. Для процесса без сноса ЛЮБАЯ геометрия даёт ровно ноль до
+    # издержек (теорема об остановке, docs/LITERATURE.md §8), поэтому
+    # менять цель, чтобы «стало прибыльно», бессмысленно: меняется и
+    # винрейт, и планка одновременно. Параметр выведен для управления
+    # характером сделок, а не как рычаг доходности.
+    TP_R_MULT:          float = _env_float("TP_R_MULT", 2.0)
     # Разворот должен входить рядом с сетапом, а не через несколько ATR
     REVERSAL_MAX_DRIFT_ATR: float = _env_float("REVERSAL_MAX_DRIFT_ATR", 1.0)
     REQUIRE_MTF_ALIGN:  bool  = _env_bool("REQUIRE_MTF_ALIGN", True)
@@ -298,9 +310,17 @@ cfg.MIN_RR               = _clamp(cfg.MIN_RR, 1.0, 10.0, "MIN_RR")
 cfg.MAX_SL_ATR           = _clamp(cfg.MAX_SL_ATR, 1.0, 10.0, "MAX_SL_ATR")
 
 # Безубыток должен наступать РАНЬШЕ цели, иначе механизм недостижим
-cfg.BREAKEVEN_AT_R    = _clamp(cfg.BREAKEVEN_AT_R,    0.0, 1.9, "BREAKEVEN_AT_R")
+# Безубыток обязан наступать РАНЬШЕ цели, иначе механизм недостижим.
+# Верхняя граница привязана к цели, а не к числу 1.9: при цели 1.5R старый
+# потолок пропускал взвод ПОСЛЕ цели.
+cfg.BREAKEVEN_AT_R    = _clamp(cfg.BREAKEVEN_AT_R, 0.0,
+                               max(0.0, cfg.TP_R_MULT - 0.1), "BREAKEVEN_AT_R")
 cfg.BREAKEVEN_FEE_PCT = _clamp(cfg.BREAKEVEN_FEE_PCT, 0.0, 1.0, "BREAKEVEN_FEE_PCT")
-cfg.MIN_TRADE_HEADROOM_R = _clamp(cfg.MIN_TRADE_HEADROOM_R, cfg.MIN_RR, 10.0,
+cfg.TP_R_MULT = _clamp(cfg.TP_R_MULT, 1.0, 5.0, "TP_R_MULT")
+# Запас до встречного уровня обязан быть НЕ МЕНЬШЕ цели: иначе цель лежит
+# ЗА уровнем, который её остановит, и сделка структурно не может выиграть.
+cfg.MIN_TRADE_HEADROOM_R = _clamp(cfg.MIN_TRADE_HEADROOM_R,
+                                  max(cfg.MIN_RR, cfg.TP_R_MULT), 10.0,
                                   "MIN_TRADE_HEADROOM_R")
 
 # Связь из docs/REVIEW.md §2: полный набор позиций не должен пробивать

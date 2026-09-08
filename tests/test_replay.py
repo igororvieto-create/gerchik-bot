@@ -607,3 +607,37 @@ async def test_flip_is_off_by_default():
     dirs_f = {r["direction"] for r in flipped}
     assert dirs_n and dirs_f
     assert dirs_n != dirs_f or len(dirs_n) > 1, "флаг ничего не изменил"
+
+
+def test_flip_keeps_the_geometry_of_the_signal_it_mirrors():
+    """Разворот обязан отличаться от исходного сигнала ТОЛЬКО стороной.
+    Цель стала настраиваемой, и зашитая двойка сравнивала бы развёрнутую
+    сделку с 2R против боевой с другой целью — разница мерила бы геометрию,
+    а не знак направления, то есть замер IV отвечал бы не на свой вопрос."""
+    from tools.replay import _flip_signal
+    from core.state import Signal
+
+    def mk(rr: float) -> Signal:
+        # LONG, вход 100, стоп 98 -> риск 2. Цели согласованы с rr.
+        return Signal(symbol="X", signal_type="VSA_CLIMAX", direction="LONG",
+                      score=55, price=100.0, oi_change=0.0, vol_ratio=0.0,
+                      funding=0.0, ob_bias="NEUTRAL", atr_pct=2.0, details="",
+                      entry=100.0, sl=98.0,
+                      tp1=100.0 + rr, tp2=100.0 + 2 * rr, tp3=100.0 + 3 * rr,
+                      rr=rr, sl_pct=2.0)
+
+    risk = 2.0
+    for rr in (2.0, 3.0, 1.5):
+        f = _flip_signal(mk(rr))
+        assert f.direction == "SHORT"
+        assert abs(f.sl - (100.0 + risk)) < 1e-9, "ширина стопа изменилась"
+        assert abs(f.tp2 - (100.0 - rr * risk)) < 1e-9, \
+            f"цель развёрнутой сделки не {rr}R — сравнение подменено"
+        assert abs(f.tp1 - (100.0 - rr * 0.5 * risk)) < 1e-9
+        assert abs(f.tp3 - (100.0 - rr * 1.5 * risk)) < 1e-9
+
+    # Старые строки без записанной кратности: 2R — геометрия, при которой
+    # собрана вся имеющаяся история, замер IV обязан воспроизводиться.
+    old = mk(2.0)
+    old.rr = 0.0
+    assert abs(_flip_signal(old).tp2 - (100.0 - 2.0 * risk)) < 1e-9

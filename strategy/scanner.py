@@ -697,16 +697,24 @@ def _calc_levels(price: float, atr: float, direction: str,
     if achievable < cfg.MIN_RR:
         return None  # недостаточно места до цели — не торгуем
 
+    # Лестница целей строится ОТ основной цели, а не от зашитых 1/2/3:
+    # tp2 — та, в которую сделка реально целится (её бот ставит на биржу),
+    # tp1 и tp3 идут пропорционально и служат только разметкой.
+    tp_r = cfg.TP_R_MULT
     if direction == "LONG":
-        tp1, tp2, tp3 = price + risk * 1.0, price + risk * 2.0, price + risk * 3.0
+        tp1 = price + risk * tp_r * 0.5
+        tp2 = price + risk * tp_r
+        tp3 = price + risk * tp_r * 1.5
     else:
-        tp1, tp2, tp3 = price - risk * 1.0, price - risk * 2.0, price - risk * 3.0
+        tp1 = price - risk * tp_r * 0.5
+        tp2 = price - risk * tp_r
+        tp3 = price - risk * tp_r * 1.5
 
     sl_pct = sl_dist / price * 100
 
     return {
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
-        "rr": 2.0,              # сделка целится в TP2 = 2R
+        "rr": tp_r,             # сделка целится в TP2
         "headroom": achievable,  # фактический запас до противоположного уровня, в R
         "sl_pct": sl_pct,
     }

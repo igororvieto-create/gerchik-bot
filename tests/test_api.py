@@ -491,7 +491,8 @@ def test_slider_bounds_match_server_validation():
 
     pairs = {"set-risk": "risk_per_trade", "set-lev": "leverage",
              "set-maxpos": "max_positions", "set-minscore": "min_score",
-             "set-tradescore": "trade_min_score"}
+             "set-tradescore": "trade_min_score",
+             "set-slatr": "max_sl_atr", "set-tpr": "tp_r_mult"}
     for el, key in pairs.items():
         assert el in html, f"поле {el} потеряло границы в HTML"
         assert html[el] == server[key], (
@@ -553,3 +554,102 @@ def test_position_age_limit_cannot_be_shorter_than_the_judging_window():
                          capture_output=True, text=True, cwd=root)
     assert _j.loads(out.stdout.strip().splitlines()[-1]) == 0, \
         "отключение правила сломано"
+
+
+async def test_target_beyond_the_required_headroom_is_refused(with_token):
+    """Цель обязана помещаться в запас до встречного уровня. Иначе она
+    лежит ЗА уровнем, который её остановит, и сделка структурно не может
+    выиграть. Поштучная валидация этого не ловит: 3R и запас 2R оба
+    допустимы по отдельности."""
+    from core.config import cfg
+    resp = await R.update_settings(
+        FakeRequest(with_token, body={"tp_r_mult": 5.0}, method="POST"))
+    assert _code(resp) == 400, "цель дальше запаса принята"
+    body = _body(resp)
+    assert "tp_r_mult" in str(body), body
+
+
+async def test_target_and_stop_width_are_applied(with_token, monkeypatch):
+    """Оба параметра были зашиты: цель числом 2.0 в двух местах сразу,
+    ширина стопа — только переменной окружения.
+
+    monkeypatch на САМИ поля: update_settings пишет в глобальный cfg, и без
+    восстановления значение утекало в соседние тесты — уже поймано падением
+    test_levels_grid_follows_the_configured_target."""
+    from core.config import cfg
+    monkeypatch.setattr(cfg, "MIN_TRADE_HEADROOM_R", 3.0)
+    monkeypatch.setattr(cfg, "TP_R_MULT", cfg.TP_R_MULT)
+    monkeypatch.setattr(cfg, "MAX_SL_ATR", cfg.MAX_SL_ATR)
+    resp = await R.update_settings(
+        FakeRequest(with_token, body={"tp_r_mult": 3.0, "max_sl_atr": 2.5},
+                    method="POST"))
+    assert _code(resp) == 200, _body(resp)
+    assert cfg.TP_R_MULT == 3.0
+    assert cfg.MAX_SL_ATR == 2.5
+
+
+async def test_target_ceiling_shown_on_the_dashboard_matches_the_server(with_token):
+    """Ползунок цели ходит до 5R, а сервер отвергает всё дальше запаса до
+    встречного уровня. Потолок обязан быть виден ДО сохранения, иначе о
+    границе узнают по отказу.
+
+    Тест держит СТЫК: имя поля в ответе сервера и имя, которое читает
+    дашборд. Разъедутся — предупреждение молча исчезнет, а ползунок
+    останется прежним, то есть поломка была бы невидимой."""
+    import os
+    resp = await R.get_settings(FakeRequest(with_token))
+    payload = _body(resp)
+    assert "min_trade_headroom_r" in payload, \
+        "сервер перестал отдавать запас — потолок цели показать нечем"
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    assert "d.min_trade_headroom_r" in html, \
+        "дашборд читает не то поле — потолок не покажется"
+    assert "TP_HEADROOM" in html and "n>TP_HEADROOM" in html, \
+        "сравнение цели с потолком пропало — предупреждение мертво"
+
+
+async def test_changing_the_target_warns_that_history_is_no_longer_comparable(
+        with_token, monkeypatch):
+    """Смена цели меняет спецификацию: оценщик судит каждый сигнал по ЕГО
+    tp2, поэтому после смены винрейт складывается из двух популяций с
+    разным безубытком (33.3% при 2R, 25% при 3R). Ровно этим была находка
+    №30 — бот исполнял не ту стратегию, которую измеряли."""
+    from core.config import cfg
+    monkeypatch.setattr(cfg, "MIN_TRADE_HEADROOM_R", 3.0)
+    monkeypatch.setattr(cfg, "TP_R_MULT", 2.0)
+    monkeypatch.setattr(cfg, "MAX_SL_ATR", cfg.MAX_SL_ATR)
+
+    resp = await R.update_settings(
+        FakeRequest(with_token, body={"tp_r_mult": 3.0}, method="POST"))
+    assert _code(resp) == 200, _body(resp)
+    warns = _body(resp).get("warnings") or []
+    assert warns, "смена цели прошла молча — статистика тихо стала несравнимой"
+    assert "33.3" in warns[0] and "25.0" in warns[0], \
+        f"предупреждение не называет обе планки безубытка: {warns}"
+
+    # Сохранение БЕЗ смены цели предупреждать не должно, иначе оно
+    # обесценится и его перестанут читать.
+    resp2 = await R.update_settings(
+        FakeRequest(with_token, body={"tp_r_mult": 3.0}, method="POST"))
+    assert _code(resp2) == 200, _body(resp2)
+    assert not (_body(resp2).get("warnings") or []), \
+        "предупреждение на неизменившемся значении"
+
+
+def test_dashboard_shows_save_warnings(with_token):
+    """Предупреждение, оставшееся только в логе, для владельца не
+    существует. И окно не должно закрываться само: 1.2 секунды на текст в
+    две строки — это то же молчание."""
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    assert "d.warnings" in html, "дашборд не читает warnings"
+    i = html.index("d.warnings")
+    tail = html[i:i + 700]
+    assert "closeModal" in tail, "ветки автозакрытия рядом нет — проверить нечего"
+    assert tail.index("} else {") < tail.index("closeModal"), \
+        "автозакрытие не убрано из ветки с предупреждением — текст пролетит мимо"

@@ -579,6 +579,9 @@ async def get_settings(request: Request):
         # которого убрали константный «1:2.0».
         "min_trade_headroom_r": cfg.MIN_TRADE_HEADROOM_R,
         "min_rr": cfg.MIN_RR,
+        # Стоп и цель — управляемая геометрия сделки.
+        "max_sl_atr": cfg.MAX_SL_ATR,
+        "tp_r_mult": cfg.TP_R_MULT,
     })
 
 
@@ -612,11 +615,18 @@ async def update_settings(request: Request):
         "risk_per_trade":  (float, 0.1,         3.0),   # инвариант: риск ≤3%
         "max_positions":   (int,   1,           20),
         "leverage":        (int,   1,           5),     # инвариант: плечо ≤5x
+        # Ширина стопа: потолок в ATR. Шире — уже не сделка, а лотерея:
+        # размер позиции схлопывается, а шанс задеть стоп высок.
+        "max_sl_atr":      (float, 1.0,         10.0),
+        # Основная цель в единицах риска. Задаёт безубыточный винрейт:
+        # 2R требует 33.3% побед, 3R — 25%, 1.5R — 40%.
+        "tp_r_mult":       (float, 1.0,         5.0),
     }
     field_map = {
         "auto_trade": "AUTO_TRADE", "min_score": "MIN_SCORE",
         "trade_min_score": "TRADE_MIN_SCORE", "risk_per_trade": "RISK_PER_TRADE",
         "max_positions": "MAX_POSITIONS", "leverage": "LEVERAGE",
+        "max_sl_atr": "MAX_SL_ATR", "tp_r_mult": "TP_R_MULT",
     }
     pending: dict = {}
     rejected: dict = {}
@@ -646,6 +656,22 @@ async def update_settings(request: Request):
     # max_positions=20 оба лежат в своих диапазонах и давали 60% одновременного
     # риска при лимите 6%. Предохранитель считает только РЕАЛИЗОВАННЫЙ убыток,
     # поэтому все позиции успевали открыться до первого стопа.
+    # Цель обязана помещаться в запас до встречного уровня, иначе она лежит
+    # ЗА уровнем, который её остановит, и сделка структурно не может
+    # выиграть. Поштучная валидация этого не ловит: 3R и запас 2R оба
+    # допустимы по отдельности.
+    _new_tp = pending.get("tp_r_mult", cfg.TP_R_MULT)
+    if _new_tp > cfg.MIN_TRADE_HEADROOM_R:
+        rejected["tp_r_mult"] = (
+            f"цель {_new_tp}R дальше требуемого запаса "
+            f"{cfg.MIN_TRADE_HEADROOM_R}R — она лежала бы ЗА встречным "
+            f"уровнем, и сделка не смогла бы выиграть")
+    # Безубыток обязан наступать РАНЬШЕ цели, иначе механизм недостижим.
+    if cfg.BREAKEVEN_AT_R > 0 and _new_tp <= cfg.BREAKEVEN_AT_R:
+        rejected["tp_r_mult"] = (
+            f"цель {_new_tp}R не дальше взвода безубытка "
+            f"{cfg.BREAKEVEN_AT_R}R — безубыток стал бы недостижим")
+
     _new_risk = pending.get("risk_per_trade", cfg.RISK_PER_TRADE)
     _new_pos  = pending.get("max_positions", cfg.MAX_POSITIONS)
     _worst = _new_risk * _new_pos
@@ -662,13 +688,29 @@ async def update_settings(request: Request):
             {"error": "некорректные параметры", "rejected": rejected}, status_code=400
         )
 
+    # Смена ЦЕЛИ меняет спецификацию, по которой собрана статистика: при 2R
+    # безубыточный винрейт 33.3%, при 3R — 25%. Накопленные сигналы судились
+    # по СВОЕЙ цели (оценщик берёт tp2 из строки), поэтому после смены
+    # винрейт складывается из двух разных популяций и сравнивать его с
+    # прежним нельзя. Ровно этим была находка №30: бот исполнял не ту
+    # стратегию, которую измеряли. Молча этого допускать нельзя.
+    warnings: list = []
+    _tp_new = pending.get("tp_r_mult")
+    if _tp_new is not None and _tp_new != cfg.TP_R_MULT:
+        warnings.append(
+            f"цель изменена {cfg.TP_R_MULT}R → {_tp_new}R: накопленный "
+            f"винрейт собран при прежней геометрии и с новой НЕ сравним "
+            f"(безубыток был {100 / (1 + cfg.TP_R_MULT):.1f}%, станет "
+            f"{100 / (1 + _tp_new):.1f}%). Статистику считать заново.")
+
     changes: dict = {}
     for key, v in pending.items():
         setattr(cfg, field_map[key], v)
         changes[key] = v
 
-    log.info(f"Settings updated: {changes}")
-    return JSONResponse({"ok": True, "changed": changes})
+    log.info(f"Settings updated: {changes}"
+             + (f" | {'; '.join(warnings)}" if warnings else ""))
+    return JSONResponse({"ok": True, "changed": changes, "warnings": warnings})
 
 
 @router.post("/api/close/{symbol}")

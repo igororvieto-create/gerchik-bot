@@ -274,7 +274,7 @@ input[type=range]::-moz-range-thumb{
   border-radius:8px;padding:10px 16px;font-size:14px;cursor:pointer;transition:all .15s;
 }
 .btn-cancel:hover{color:var(--text)}
-.save-msg{font-size:12px;color:var(--green);text-align:center;height:16px;margin-top:4px;padding:0 20px}
+.save-msg{font-size:12px;color:var(--green);text-align:center;min-height:16px;line-height:1.4;margin-top:4px;padding:0 20px}
 
 /* ── ALERT BANNER ── */
 #alert{display:none;position:sticky;top:52px;z-index:29;background:rgba(239,68,68,.1);border-bottom:1px solid rgba(239,68,68,.3);padding:8px 16px;font-size:12px;color:var(--red);text-align:center}
@@ -536,6 +536,32 @@ input[type=range]::-moz-range-thumb{
             <div class="range-wrap">
               <input type="range" id="set-tradescore" min="5" max="100" step="1" oninput="$('rv-ts').textContent=this.value">
               <span class="range-val" id="rv-ts">60</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="srow">
+          <div class="srow-label">
+            <span class="srow-name">Ширина стопа</span>
+            <span class="srow-desc">Потолок в ATR. Шире — размер позиции схлопывается, а шанс задеть стоп высок</span>
+          </div>
+          <div class="srow-ctrl">
+            <div class="range-wrap">
+              <input type="range" id="set-slatr" min="1" max="10" step="0.5" oninput="$('rv-sl').textContent=parseFloat(this.value).toFixed(1)+'×ATR'">
+              <span class="range-val" id="rv-sl">3.5×ATR</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="srow">
+          <div class="srow-label">
+            <span class="srow-name">Тейк-профит</span>
+            <span class="srow-desc" id="tp-desc">Цель в единицах риска. Задаёт безубыточный винрейт</span>
+          </div>
+          <div class="srow-ctrl">
+            <div class="range-wrap">
+              <input type="range" id="set-tpr" min="1" max="5" step="0.5" oninput="onTpChange(this.value)">
+              <span class="range-val" id="rv-tp">2.0R</span>
             </div>
           </div>
         </div>
@@ -869,6 +895,34 @@ const MIN_DECIDED_FOR_COLOR = 30;
 // подряд пропущенных проходов, случайностью уже не объяснить.
 const MONITOR_STALE_MIN = 3;
 
+// Требуемый запас до встречного уровня: цель дальше него сервер отвергнет.
+// Заполняется из /api/settings; до загрузки потолок неизвестен, и пугать
+// пользователя красным раньше времени нельзя.
+let TP_HEADROOM = null;
+
+// Безубыточный винрейт при геометрии стоп 1R / цель NR: 1/(1+N).
+// Показываем прямо под ползунком — иначе выбор цели выглядит бесплатным,
+// а он ровно настолько же поднимает планку, насколько увеличивает выигрыш.
+function onTpChange(v){
+  const n=parseFloat(v);
+  $('rv-tp').textContent=n.toFixed(1)+'R';
+  const be=100/(1+n);
+  const el=$('tp-desc');
+  if(!el) return;
+  // Потолок виден ДО сохранения. Иначе ползунок ходит до 5R, а сервер
+  // отвечает отказом — пользователь узнаёт о границе только по ошибке.
+  if(TP_HEADROOM!==null && n>TP_HEADROOM){
+    el.style.color='var(--red)';
+    el.textContent=`Не будет принято: цель ${n.toFixed(1)}R дальше запаса `
+      +`${TP_HEADROOM.toFixed(1)}R до встречного уровня — она лежала бы ЗА `
+      +`уровнем, который её остановит`;
+    return;
+  }
+  el.style.color='';
+  el.textContent=`Цель в единицах риска. При ${n.toFixed(1)}R для выхода `
+    +`в ноль нужно ${be.toFixed(1)}% побед (сейчас у бота около 32%)`;
+}
+
 // Риск выше жёсткого потолка 3%. Сокращение могло не пройти (отказ биржи,
 // превышение меньше минимального лота), и тогда позиция живёт с повышенным
 // риском. Автоматически бот её не трогает — это решение владельца, — но
@@ -1190,6 +1244,14 @@ async function openSettings(){
     // TRADE_MIN_SCORE=45) — раньше стояли 25/60 и расходились с бэкендом
     const ms=$('set-minscore'); ms.value=d.min_score??30; $('rv-ms').textContent=ms.value;
     const ts=$('set-tradescore'); ts.value=d.trade_min_score??45; $('rv-ts').textContent=ts.value;
+    const sa=$('set-slatr');
+    if(sa){ sa.value=d.max_sl_atr??3.5;
+            $('rv-sl').textContent=parseFloat(sa.value).toFixed(1)+'×ATR'; }
+    const tp=$('set-tpr');
+    // Потолок ставится ДО onTpChange, иначе первая отрисовка не знает о нём.
+    TP_HEADROOM=(typeof d.min_trade_headroom_r==='number')
+      ? d.min_trade_headroom_r : null;
+    if(tp){ tp.value=d.tp_r_mult??2.0; onTpChange(tp.value); }
   }catch(e){
     $('save-msg').style.color='var(--red)';
     $('save-msg').textContent='❌ Не удалось загрузить настройки ('+e.message+') — сохранение отключено';
@@ -1222,6 +1284,8 @@ async function saveSettings(){
     max_positions:   num(parseInt($('set-maxpos').value)),
     min_score:       num(parseInt($('set-minscore').value)),
     trade_min_score: num(parseInt($('set-tradescore').value)),
+    max_sl_atr: num(parseFloat($('set-slatr').value)),
+    tp_r_mult: num(parseFloat($('set-tpr').value)),
   };
   Object.keys(body).forEach(k=>body[k]===undefined&&delete body[k]);
   $('save-msg').style.color='';
@@ -1231,10 +1295,19 @@ async function saveSettings(){
     if(r.ok&&d.ok){
       // показываем, что РЕАЛЬНО применилось: бэкенд мог отклонить часть полей
       const n=d.changed?Object.keys(d.changed).length:0;
-      $('save-msg').style.color='var(--green)';
-      $('save-msg').textContent=`✅ Сохранено (${n})`;
       $('s-trade').textContent=body.auto_trade?'🤖 Авто':'👁 Мониторинг';
-      setTimeout(()=>{ $('save-msg').textContent=''; closeModal('settings-modal'); },1200);
+      // Предупреждения — не ошибка, но и не мелочь: смена цели делает
+      // накопленную статистику несравнимой. Такое окно не закрываем само,
+      // иначе сообщение пролетит мимо за 1.2 секунды.
+      const w=(d.warnings&&d.warnings.length)?d.warnings:null;
+      if(w){
+        $('save-msg').style.color='var(--orange)';
+        $('save-msg').textContent='⚠️ Сохранено. '+w.join(' ');
+      } else {
+        $('save-msg').style.color='var(--green)';
+        $('save-msg').textContent=`✅ Сохранено (${n})`;
+        setTimeout(()=>{ $('save-msg').textContent=''; closeModal('settings-modal'); },1200);
+      }
     } else {
       const det=d.rejected?Object.entries(d.rejected).map(([k,v])=>`${k} — ${v}`).join('; ')
                           :(d.error||('HTTP '+r.status));

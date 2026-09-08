@@ -507,6 +507,24 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             log.debug(f"{sig.symbol}: notional capped to {max_notional:.2f}")
 
         qty = _round_step(position_usdt / sig.entry, qty_step)
+        # ОКРУГЛЕНИЕ ВВЕРХ ТОЖЕ ПРОБИВАЕТ ПОТОЛОК МАРЖИ. _round_step берёт
+        # БЛИЖАЙШИЙ шаг, поэтому 0.6 шага превращается в целый — и нотионал
+        # оказывается выше max_notional без всякого подъёма до min_qty.
+        # Проверка ниже стояла под `if bumped` и этот путь не видела;
+        # проверка риска его пропускала, потому что при упёртом в потолок
+        # нотионале фактический риск ЗАВЕДОМО ниже целевого и допуск 1.5×
+        # округление съедал. Пример на живом счёте: баланс 66, цена 20,
+        # шаг лота 1 → нотионал 40 при потолке 33, маржа 12.1% при лимите 10%.
+        #
+        # Отвергать сделку из-за долей шага незачем — округляем ВНИЗ, к
+        # потолку. Если после этого лот меньше минимального, дальше сработает
+        # обычная ветка подъёма и её собственная проверка нотионала.
+        if qty_step > 0 and qty * sig.entry > max_notional:
+            floored = math.floor((position_usdt / sig.entry) / qty_step) * qty_step
+            qty = _round_step(floored, qty_step)
+            if qty * sig.entry > max_notional:
+                # шаг лота сам по себе крупнее потолка — вниз идти некуда
+                qty = 0.0
         bumped = qty < min_qty
         if bumped:
             qty = min_qty
@@ -741,6 +759,24 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             # проскальзывания = 4.6% баланса). Считаем по фактической цене.
             fill_px  = float(live_pos.get("avgPrice") or 0)
             fill_qty = abs(float(live_pos.get("size") or 0))
+            # ФАКТИЧЕСКИЙ ОБЪЁМ ЗАЛИВА, а не запрошенный. IOC на неликвиде
+            # заливается частично — это штатное событие, — а qty_opened
+            # оставался равным заявке навсегда: монитор синхронизирует
+            # только pos.qty, qty_opened не трогает никто.
+            #
+            # Чем это кончалось: fetch_matching_closed_pnl берёт qty_opened
+            # ограничителем «суммируем записи, пока не закрыт объём Q».
+            # Завышенный Q не даёт циклу остановиться на своей записи, и он
+            # берёт следующую в окне — ЧУЖУЮ сделку владельца по тому же
+            # символу. Её PnL попадает и в строку trades, и в дневной
+            # предохранитель. Ради этого ограничитель и написан (находка №2).
+            if fill_qty > 0 and abs(fill_qty - qty) > 1e-12:
+                log.warning(
+                    f"{sig.symbol}: залито {fill_qty} из запрошенных {qty} — "
+                    f"учитываем фактический объём")
+                qty = fill_qty
+                pos.qty = fill_qty
+                pos.qty_opened = fill_qty
             if fill_px > 0 and fill_qty > 0 and sl_px > 0:
                 real_risk = fill_qty * abs(fill_px - sl_px)
                 if real_risk > balance * 3.0 / 100:

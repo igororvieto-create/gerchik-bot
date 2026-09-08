@@ -1378,3 +1378,158 @@ def test_broken_open_time_does_not_close_a_live_position():
     past = (now - timedelta(hours=7)).isoformat()
     assert abs((_parse_opened_at(past) - (now - timedelta(hours=7)))
                .total_seconds()) < 2
+
+
+async def test_ordinary_lot_rounding_cannot_break_the_margin_cap(monkeypatch):
+    """Округление ВВЕРХ пробивало потолок маржи мимо всех проверок.
+
+    _round_step берёт БЛИЖАЙШИЙ шаг, поэтому 0.6 шага превращается в целый
+    и нотионал уходит выше max_notional — без всякого подъёма до min_qty.
+    Проверка нотионала стояла под `if bumped` и этот путь не видела, а
+    проверка риска его пропускала: при упёртом в потолок нотионале
+    фактический риск ЗАВЕДОМО ниже целевого, и допуск 1.5× съедал
+    округление.
+
+    Числа взяты с живого счёта: баланс 66, цена 20, шаг лота 1.
+    Потолок нотионала = 66 × 10% × 5 = 33, риск на сделку = 0.66.
+    Нотионал по риску = 0.66 / 1% = 66 → режется до 33 → 1.65 лота →
+    округление даёт 2.0 → нотионал 40, маржа 12.1% при лимите 10%.
+
+    Отвергать сделку из-за долей шага незачем: лот округляется ВНИЗ."""
+    import strategy.trader as tr
+    from core.config import cfg
+    from core.state import state, Signal
+    monkeypatch.setattr(cfg, "AUTO_TRADE", True)
+    monkeypatch.setattr(cfg, "RISK_PER_TRADE", 1.0)
+    monkeypatch.setattr(cfg, "LEVERAGE", 5)
+    monkeypatch.setattr(cfg, "MAX_MARGIN_PCT", 10.0)
+    monkeypatch.setattr(cfg, "TRADE_MIN_SCORE", 0)
+    monkeypatch.setattr(cfg, "MIN_TRADE_HEADROOM_R", 0.0)
+    state.balance = 66.0
+    state.positions.clear()
+    state.pending_entries.clear()
+    state.trading_halted = False
+    state.halt_reason = ""
+
+    placed = []
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_balance(self):
+            return 66.0
+
+        async def get_instrument_info(self, symbol):
+            # Минимальный лот МЕНЬШЕ шага намеренно: при min_qty == шагу
+            # подъём до минимума маскирует разницу между округлением вниз
+            # и вверх (мутация «ceil вместо floor» проходила незамеченной).
+            return {"lotSizeFilter": {"qtyStep": "1", "minOrderQty": "0.1",
+                                      "minNotionalValue": "5"},
+                    "priceFilter": {"tickSize": "0.01"}}
+
+        async def get_positions(self, symbol=None):
+            return [{"symbol": "AAAUSDT", "side": "Buy", "size": "1",
+                     "avgPrice": "20.0", "stopLoss": "19.8",
+                     "takeProfit": "20.4", "unrealisedPnl": "0"}]
+
+        async def set_leverage(self, symbol, lev):
+            return True
+
+        async def place_order(self, **kw):
+            placed.append(kw)
+            return {"retCode": 0, "result": {"orderId": "1"}}
+
+        async def set_trading_stop(self, symbol, sl=None, tp=None):
+            return True
+
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "AAAUSDT", "lastPrice": "20"}]
+
+    sig = Signal(symbol="AAAUSDT", signal_type="X", direction="LONG", score=99,
+                 price=20.0, oi_change=0.0, vol_ratio=0.0, funding=0.0,
+                 ob_bias="NEUTRAL", atr_pct=1.0, details="",
+                 entry=20.0, sl=19.8, tp1=20.2, tp2=20.4, tp3=20.6,
+                 rr=2.0, headroom=3.0, sl_pct=1.0)
+    await tr.enter_trade(C(), sig)
+
+    max_notional = 66.0 * 10 / 100 * 5
+    assert placed, "сделка отвергнута целиком — округления вниз хватило бы"
+    sent_qty = float(placed[0]["qty"])
+    notional = sent_qty * 20.0
+    assert notional <= max_notional + 1e-9, (
+        f"нотионал {notional:.2f} при потолке {max_notional:.2f} — маржа "
+        f"{notional / 5 / 66 * 100:.1f}% при лимите 10%")
+    assert sent_qty == 1.0, f"ожидался лот 1 (округление вниз), получен {sent_qty}"
+
+
+async def test_partial_entry_fill_updates_the_recorded_size(monkeypatch):
+    """IOC на неликвиде заливается частично — это штатное событие.
+
+    Фактический объём читался, но использовался только риск-гардом:
+    qty_opened оставался равным ЗАЯВКЕ навсегда (монитор синхронизирует
+    только pos.qty). Дальше fetch_matching_closed_pnl берёт qty_opened
+    ограничителем «суммируем записи, пока не закрыт объём Q» — завышенный Q
+    не даёт циклу остановиться на своей записи, и он берёт следующую в
+    окне, то есть ЧУЖУЮ сделку владельца по тому же символу. Ровно ради
+    этого ограничитель и написан (закрытая находка №2)."""
+    import strategy.trader as tr
+    from core.config import cfg
+    from core.state import state, Signal
+    monkeypatch.setattr(cfg, "AUTO_TRADE", True)
+    monkeypatch.setattr(cfg, "RISK_PER_TRADE", 1.0)
+    monkeypatch.setattr(cfg, "TRADE_MIN_SCORE", 0)
+    monkeypatch.setattr(cfg, "MIN_TRADE_HEADROOM_R", 0.0)
+    state.balance = 10000.0
+    state.positions.clear()
+    state.pending_entries.clear()
+    state.trading_halted = False
+    state.halt_reason = ""
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_balance(self):
+            return 10000.0
+
+        async def get_instrument_info(self, symbol):
+            return {"lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001",
+                                      "minNotionalValue": "5"},
+                    "priceFilter": {"tickSize": "0.01"}}
+
+        async def get_positions(self, symbol=None):
+            return []
+
+        async def get_position(self, symbol):
+            # Залито ВДВОЕ меньше заявки — и со стопом, и с целью, чтобы
+            # проверялся именно объём, а не ветка незащищённой позиции.
+            return {"symbol": symbol, "side": "Buy", "size": "0.5",
+                    "avgPrice": "100.0", "stopLoss": "99.0",
+                    "takeProfit": "102.0", "unrealisedPnl": "0"}
+
+        async def set_leverage(self, symbol, lev):
+            return True
+
+        async def place_order(self, **kw):
+            return {"retCode": 0, "result": {"orderId": "ord-1"}}
+
+        async def set_trading_stop(self, symbol, sl=None, tp=None):
+            return True
+
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "PARTUSDT", "lastPrice": "100"}]
+
+    sig = Signal(symbol="PARTUSDT", signal_type="X", direction="LONG", score=99,
+                 price=100.0, oi_change=0.0, vol_ratio=0.0, funding=0.0,
+                 ob_bias="NEUTRAL", atr_pct=1.0, details="",
+                 entry=100.0, sl=99.0, tp1=101.0, tp2=102.0, tp3=103.0,
+                 rr=2.0, headroom=3.0, sl_pct=1.0)
+    await tr.enter_trade(C(), sig)
+
+    pos = state.positions.get("PARTUSDT")
+    assert pos is not None, "позиция не взята под учёт"
+    assert pos.qty == 0.5, f"pos.qty={pos.qty} вместо фактических 0.5"
+    assert pos.qty_opened == 0.5, (
+        f"qty_opened={pos.qty_opened} вместо фактических 0.5 — ограничитель "
+        f"учёта PnL втянет чужую запись по этому же символу")

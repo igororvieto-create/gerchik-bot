@@ -400,6 +400,10 @@ async def get_status(request: Request):
         "positions":      len(state.positions),
         "ws_clients":     len(state.ws_clients),
         "balance":        round(state.balance, 2),
+        # Эквити рядом с доступным: от него считается доля риска, и если
+        # биржа его не отдаёт, проверка молча откатывается на доступное —
+        # заметить это можно только увидев само число.
+        "equity":         round(state.equity, 2),
         # Дневной предохранитель был невидим снаружи: бот стоял, а дашборд
         # показывал «🤖 Авто», и пользователь считал его вооружённым.
         "trading_halted":     state.trading_halted,

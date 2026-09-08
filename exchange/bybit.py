@@ -412,7 +412,8 @@ class BybitClient:
                             if eq <= 0:
                                 eq = float(coin.get("walletBalance") or 0)
                             state.equity = eq if eq > 0 else available
-                            log.info(f"get_balance {acc_type}: USDT available={available}")
+                            log.info(f"get_balance {acc_type}: USDT "
+                                     f"available={available} equity={state.equity}")
                             if available > 0:
                                 state.last_balance_error = ""
                                 return available

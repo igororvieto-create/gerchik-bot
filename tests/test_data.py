@@ -1366,3 +1366,72 @@ async def test_evaluator_waits_instead_of_judging_a_truncated_window(
     assert outcome is None, (
         f"вердикт {outcome!r} вынесен по окну с необеспеченным началом — "
         f"неизвестно, был ли стоп задет раньше")
+
+
+def test_expectancy_follows_the_target_the_trade_actually_aimed_at():
+    """Цена победы была зашита в 2.0R, а цель стала ползунком.
+
+    Оценщик судит каждый сигнал по ЕГО собственному tp2, поэтому винрейт
+    при смене цели меняется честно — и именно поэтому ошибка не бросалась в
+    глаза: неверен был только перевод побед в R.
+
+    При цели 1.5R выборка 40W/60L — это ровно ноль. Показывалось +0.2R, и
+    при 100 решённых порог окраски пройден, то есть стратегия без
+    преимущества получала ЗЕЛЁНОЕ утверждение о прибыльности."""
+    from core.db import _ev
+    slot = {"win": 40, "loss": 60, "be": 0}
+
+    honest = _ev(dict(slot), fee_r=0.0, win_r=1.5)
+    assert abs(honest["ev_gross_r"]) < 1e-9, (
+        f"при цели 1.5R 40W/60L это безубыток, показано "
+        f"{honest['ev_gross_r']}R")
+    assert honest["win_r"] == 1.5
+
+    # Симметрия: при цели 3R работающая геометрия не смеет выглядеть убыточной
+    up = _ev({"win": 30, "loss": 70, "be": 0}, fee_r=0.0, win_r=3.0)
+    assert abs(up["ev_gross_r"] - 0.2) < 1e-9, up["ev_gross_r"]
+
+    # История без записанной кратности собрана при 2R — читается как 2R
+    legacy = _ev(dict(slot), fee_r=0.0, win_r=None)
+    assert abs(legacy["ev_gross_r"] - 0.2) < 1e-9
+    assert legacy["win_r"] == 2.0
+
+
+async def test_breakdown_takes_the_multiple_from_the_winning_rows(tmp_path,
+                                                                  monkeypatch):
+    """Кратность обязана считаться ПОСТРОЧНО по победам, а не одним числом
+    на весь дашборд: корзины могут содержать разную геометрию, и общее
+    среднее приписало бы одной из них чужую цель."""
+    import core.db as d
+    from datetime import datetime
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "t.db"))
+    await d.init_db()
+
+    now = datetime.utcnow().isoformat()
+    async with __import__("aiosqlite").connect(d.DB_PATH) as db:
+        # Кратность внутри корзины НАМЕРЕННО разная у побед и убытков:
+        # при одинаковой мутация «копить rr и по убыткам» дала бы то же
+        # среднее, и тест бы её пропустил — фактор был бы замаскирован
+        # (0-Б п.2). Победы 60+ идут по 3R, её же убыток — по 1R.
+        for i, (score, outcome, rr) in enumerate([
+                (70, "WIN", 3.0), (70, "WIN", 3.0), (70, "LOSS", 1.0),
+                (50, "WIN", 1.5), (50, "LOSS", 4.0), (50, "LOSS", 4.0)]):
+            await db.execute(
+                "INSERT INTO signals (symbol, ts, score, direction, price, "
+                "signal_type, outcome, sl_pct, atr_pct, rr, strategy) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (f"S{i}USDT", now, score, "LONG", 100.0, "VSA_CLIMAX",
+                 outcome, 1.0, 2.0, rr, d._strategy_id()))
+        await db.commit()
+
+    br = await d.get_outcome_breakdown(days=7)
+    hi = br["by_score"]["60+"]
+    lo = br["by_score"]["45-59"]
+    assert hi["win_r"] == 3.0, (
+        f"корзина 60+ получила цель {hi['win_r']}R — в среднее затесались "
+        f"строки, победами не являющиеся")
+    assert lo["win_r"] == 1.5, f"корзина 45-59 получила цель {lo['win_r']}R"
+    # 2W/1L при цели 3R: (2×3 − 1)/3 = +1.667R брутто
+    assert abs(hi["ev_gross_r"] - 1.667) < 0.01, hi["ev_gross_r"]
+    # 1W/2L при цели 1.5R: (1.5 − 2)/3 = −0.167R брутто
+    assert abs(lo["ev_gross_r"] + 0.167) < 0.01, lo["ev_gross_r"]

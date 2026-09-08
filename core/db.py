@@ -673,8 +673,14 @@ def funding_r(funding_pct: Optional[float], direction: Optional[str],
     return -sign * funding_pct * FUNDING_SETTLEMENTS / sl_pct
 
 
+# Кратность цели для строк, у которых её не записали (история до появления
+# колонки rr). Вся такая история собрана при цели 2R.
+_LEGACY_WIN_R = 2.0
+
+
 def _ev(slot: Dict, sl_pct: Optional[float] = None,
-        fee_r: Optional[float] = None, fund_r: Optional[float] = None) -> Dict:
+        fee_r: Optional[float] = None, fund_r: Optional[float] = None,
+        win_r: Optional[float] = None) -> Dict:
     """Винрейт и матожидание в R.
 
     С переносом стопа в безубыток одного винрейта мало: исход BE даёт ~0R и
@@ -682,7 +688,20 @@ def _ev(slot: Dict, sl_pct: Optional[float] = None,
     сделки, которые раньше были полным убытком. Решение о реальных деньгах
     принимается по ev_r, а не по проценту побед.
 
-    Цель — TP2 = 2R, стоп — 1R, безубыток — 0R.
+    Стоп — 1R, безубыток — 0R, победа — win_r R.
+
+    win_r БОЛЬШЕ НЕ КОНСТАНТА. Цель настраивается (cfg.TP_R_MULT, ползунок
+    на дашборде), оценщик судит каждый сигнал по ЕГО собственному tp2, и
+    винрейт при смене цели меняется честно — а перевод побед в R оставался
+    зашитым на 2.0. При цели 1.5R выборка 40W/60L это ровно ноль
+    ((40×1.5−60)/100), а показывалось +0.2R зелёным: стратегия без
+    преимущества получала утверждение о прибыльности. Симметрично при цели
+    3R работающая геометрия выглядела бы убыточной.
+
+    Величина ЛИНЕЙНА по кратности, поэтому среднее rr по строкам с ПОБЕДОЙ
+    даёт точный ответ, а не приближение: Σ rr_i = win × avg(rr).
+    Неравенство Йенсена (0-Б п.4) здесь не мешает — в отличие от комиссии,
+    где усредняется 1/sl_pct.
     """
     win, loss, be = slot.get("win", 0), slot.get("loss", 0), slot.get("be", 0)
     decided = win + loss
@@ -692,7 +711,9 @@ def _ev(slot: Dict, sl_pct: Optional[float] = None,
         out["ev_r"] = None
         out["ev_gross_r"] = None
         return out
-    gross = (win * 2.0 + be * 0.0 + loss * -1.0) / total
+    wr = win_r if (win_r and win_r > 0) else _LEGACY_WIN_R
+    gross = (win * wr + be * 0.0 + loss * -1.0) / total
+    out["win_r"] = round(wr, 2)
     out["ev_gross_r"] = round(gross, 3)
     # Комиссия вычитается по СРЕДНЕМУ стопу корзины: в R она зависит от
     # ширины стопа, поэтому одна константа для всех корзин снова дала бы
@@ -750,6 +771,16 @@ async def get_outcome_stats(days: int = 7) -> Dict:
             ) as cur_fd:
                 row_fd = await cur_fd.fetchone()
             avg_fund = float(row_fd[0]) if (row_fd and row_fd[0] is not None) else None
+            # Средняя кратность цели по ПОБЕДАМ: победа стоит столько R,
+            # на сколько была поставлена цель, а она настраивается.
+            async with db.execute(
+                f"""SELECT AVG(rr) FROM signals
+                    WHERE outcome = 'WIN' AND rr > 0
+                      AND ts >= ? AND {_CUR_STRAT}""",
+                (cutoff, *_strat_params()),
+            ) as cur_wr:
+                row_wr = await cur_wr.fetchone()
+            avg_win_r = float(row_wr[0]) if (row_wr and row_wr[0] is not None) else None
             async with db.execute(
                 f"""SELECT COALESCE(outcome, 'OPEN') o, COUNT(*) c
                     FROM signals
@@ -762,7 +793,8 @@ async def get_outcome_stats(days: int = 7) -> Dict:
                     elif o == "BE":      stats["be"] = c
                     elif o == "EXPIRED": stats["expired"] = c
                     else:                stats["open"] = c
-        stats.update(_ev(stats, fee_r=avg_fee, fund_r=avg_fund))
+        stats.update(_ev(stats, fee_r=avg_fee, fund_r=avg_fund,
+                         win_r=avg_win_r))
         return stats
     except Exception as e:
         log.error(f"get_outcome_stats error: {e}")
@@ -883,7 +915,7 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """SELECT symbol, score, direction, signal_type, outcome, ts,
-                          sl_pct, atr_pct, headroom, funding,
+                          sl_pct, atr_pct, headroom, funding, rr,
                           flow_delta, flow_absorb, flow_span_min,
                           ob_bias, round_pos
                    FROM signals WHERE outcome IS NOT NULL AND ts >= ?
@@ -894,10 +926,11 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
                 rows = await cur.fetchall()
 
         def _acc(d: Dict, key: str, outcome: str, sl_pct=None,
-                 fund=None) -> None:
+                 fund=None, rr=None) -> None:
             slot = d.setdefault(key, {"win": 0, "loss": 0, "be": 0, "expired": 0,
                                       "_fee_sum": 0.0, "_fee_n": 0,
-                                      "_fund_sum": 0.0, "_fund_n": 0})
+                                      "_fund_sum": 0.0, "_fund_n": 0,
+                                      "_wr_sum": 0.0, "_wr_n": 0})
             k = outcome.lower()
             if k in slot:
                 slot[k] += 1
@@ -913,28 +946,36 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             if fund is not None and k in ("win", "loss", "be"):
                 slot["_fund_sum"] += fund
                 slot["_fund_n"] += 1
+            # Кратность копится ТОЛЬКО по победам: победа стоит ровно
+            # столько R, на сколько была поставлена её цель. У корзины со
+            # смешанной геометрией получится честное среднее по ней самой,
+            # а не одно число на весь дашборд.
+            if k == "win" and rr and rr > 0:
+                slot["_wr_sum"] += rr
+                slot["_wr_n"] += 1
 
         for r in rows:
             _sl = r["sl_pct"]
             _fd = funding_r(r["funding"], r["direction"], _sl)
-            _acc(out["by_score"], _bucket(r["score"]), r["outcome"], _sl, _fd)
-            _acc(out["by_direction"], r["direction"], r["outcome"], _sl, _fd)
-            _acc(out["by_type"], r["signal_type"], r["outcome"], _sl, _fd)
+            _rr = r["rr"]
+            _acc(out["by_score"], _bucket(r["score"]), r["outcome"], _sl, _fd, _rr)
+            _acc(out["by_direction"], r["direction"], r["outcome"], _sl, _fd, _rr)
+            _acc(out["by_type"], r["signal_type"], r["outcome"], _sl, _fd, _rr)
             slb = _sl_bucket(r["sl_pct"], r["atr_pct"])
             if slb:
-                _acc(out["by_sl_atr"], slb, r["outcome"], _sl, _fd)
+                _acc(out["by_sl_atr"], slb, r["outcome"], _sl, _fd, _rr)
             hrb = _hr_bucket(r["headroom"])
             if hrb:
-                _acc(out["by_headroom"], hrb, r["outcome"], _sl, _fd)
+                _acc(out["by_headroom"], hrb, r["outcome"], _sl, _fd, _rr)
             fb = _flow_bucket(r["flow_delta"], r["flow_absorb"], r["flow_span_min"])
             if fb:
-                _acc(out["by_flow"], fb, r["outcome"], _sl, _fd)
+                _acc(out["by_flow"], fb, r["outcome"], _sl, _fd, _rr)
             obb = _ob_bucket(r["ob_bias"], r["direction"])
             if obb:
-                _acc(out["by_ob"], obb, r["outcome"], _sl, _fd)
+                _acc(out["by_ob"], obb, r["outcome"], _sl, _fd, _rr)
             rb = _round_bucket(r["round_pos"])
             if rb:
-                _acc(out["by_round"], rb, r["outcome"], _sl, _fd)
+                _acc(out["by_round"], rb, r["outcome"], _sl, _fd, _rr)
 
         for d in (out["by_score"], out["by_direction"], out["by_type"],
                   out["by_sl_atr"], out["by_headroom"], out["by_flow"],
@@ -942,8 +983,10 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             for slot in d.values():
                 fee = (slot["_fee_sum"] / slot["_fee_n"]) if slot["_fee_n"] else None
                 fnd = (slot["_fund_sum"] / slot["_fund_n"]) if slot["_fund_n"] else None
-                slot.update(_ev(slot, fee_r=fee, fund_r=fnd))
-                for k_tmp in ("_fee_sum", "_fee_n", "_fund_sum", "_fund_n"):
+                wr = (slot["_wr_sum"] / slot["_wr_n"]) if slot["_wr_n"] else None
+                slot.update(_ev(slot, fee_r=fee, fund_r=fnd, win_r=wr))
+                for k_tmp in ("_fee_sum", "_fee_n", "_fund_sum", "_fund_n",
+                              "_wr_sum", "_wr_n"):
                     slot.pop(k_tmp, None)
 
         out["recent"] = [

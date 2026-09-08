@@ -268,7 +268,8 @@ def wilson_overlap(k: int, n: int, rows: List[Dict]) -> tuple:
     return wilson(int(round(k / c)), max(1, int(round(n / c))))
 
 
-def _acc(d: Dict, key: str, outcome: str, sl_pct: float) -> None:
+def _acc(d: Dict, key: str, outcome: str, sl_pct: float,
+         rr: Optional[float] = None) -> None:
     """Накопление корзины — теми же правилами, что в core/db.py.
 
     Комиссия копится ПОСТРОЧНО и только по решённым исходам: усреднение
@@ -276,21 +277,28 @@ def _acc(d: Dict, key: str, outcome: str, sl_pct: float) -> None:
     знаменатель матожидания не входят.
     """
     slot = d.setdefault(key, {"win": 0, "loss": 0, "be": 0, "expired": 0,
-                              "_fee_sum": 0.0, "_fee_n": 0})
+                              "_fee_sum": 0.0, "_fee_n": 0,
+                              "_wr_sum": 0.0, "_wr_n": 0})
     k = outcome.lower()
     if k in slot:
         slot[k] += 1
     if sl_pct and sl_pct > 0 and k in ("win", "loss", "be"):
         slot["_fee_sum"] += db.ROUND_TRIP_FEE_PCT / sl_pct
         slot["_fee_n"] += 1
+    # Кратность цели — только по победам: победа стоит ровно столько R, на
+    # сколько поставлена её цель, а цель стала настраиваемой.
+    if k == "win" and rr and rr > 0:
+        slot["_wr_sum"] += rr
+        slot["_wr_n"] += 1
 
 
 def _finish(d: Dict) -> None:
     for slot in d.values():
         fee = (slot["_fee_sum"] / slot["_fee_n"]) if slot["_fee_n"] else None
-        slot.update(db._ev(slot, fee_r=fee))
-        slot.pop("_fee_sum", None)
-        slot.pop("_fee_n", None)
+        wr = (slot["_wr_sum"] / slot["_wr_n"]) if slot["_wr_n"] else None
+        slot.update(db._ev(slot, fee_r=fee, win_r=wr))
+        for _k in ("_fee_sum", "_fee_n", "_wr_sum", "_wr_n"):
+            slot.pop(_k, None)
 
 
 # Варианты структуры стратегии. Каждый — гипотеза, сформулированная ДО
@@ -434,6 +442,9 @@ async def replay_symbol(hist: Dict[str, Any], step: int = 1,
             "sl_pct": sig.sl_pct, "atr_pct": sig.atr_pct, "sl_atr": sl_atr,
             "headroom": sig.headroom, "confidence": sig.confidence,
             "round_pos": sig.round_pos,
+            # Кратность цели: победа стоит столько R, на сколько поставлена
+            # цель. Без неё разбор считал бы победу в 2R при любой геометрии.
+            "rr": sig.rr,
             "outcome": verdict[0], "mfe_r": verdict[2],
         })
     return out
@@ -469,17 +480,18 @@ def report(rows: List[Dict], meta: Dict) -> str:
     by_hr: Dict = {}
     tradable: Dict = {}
     for r in rows:
-        _acc(overall, "все", r["outcome"], r["sl_pct"])
-        _acc(by_score, _score_bucket(r["score"]), r["outcome"], r["sl_pct"])
-        _acc(by_dir, r["direction"], r["outcome"], r["sl_pct"])
-        _acc(by_type, r["type"], r["outcome"], r["sl_pct"])
+        _rr = r.get("rr")
+        _acc(overall, "все", r["outcome"], r["sl_pct"], _rr)
+        _acc(by_score, _score_bucket(r["score"]), r["outcome"], r["sl_pct"], _rr)
+        _acc(by_dir, r["direction"], r["outcome"], r["sl_pct"], _rr)
+        _acc(by_type, r["type"], r["outcome"], r["sl_pct"], _rr)
         if r["sl_atr"] > 0:
-            _acc(by_sl, _sl_bucket(r["sl_atr"]), r["outcome"], r["sl_pct"])
+            _acc(by_sl, _sl_bucket(r["sl_atr"]), r["outcome"], r["sl_pct"], _rr)
         if r["headroom"] > 0:
-            _acc(by_hr, _hr_bucket(r["headroom"]), r["outcome"], r["sl_pct"])
+            _acc(by_hr, _hr_bucket(r["headroom"]), r["outcome"], r["sl_pct"], _rr)
         # Торгуемая популяция: те же два порога, что читает enter_trade
         if r["score"] >= cfg.TRADE_MIN_SCORE and r["headroom"] >= cfg.MIN_TRADE_HEADROOM_R:
-            _acc(tradable, "торгуемые", r["outcome"], r["sl_pct"])
+            _acc(tradable, "торгуемые", r["outcome"], r["sl_pct"], _rr)
     for d in (overall, by_score, by_dir, by_type, by_sl, by_hr, tradable):
         _finish(d)
 

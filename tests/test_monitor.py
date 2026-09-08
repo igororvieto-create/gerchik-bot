@@ -1159,7 +1159,13 @@ async def test_position_older_than_the_measured_window_is_closed(monkeypatch):
     await tr.monitor_positions(C())
     assert closed, ("позиция старше окна замера не закрыта — бот работает "
                     "не по той спецификации, которую измеряли")
-    assert closed[0][0] == "OLDUSDT" and closed[0][1] == "Sell"
+    # Передаётся сторона ПОЗИЦИИ: close_position инвертирует её сам, и так
+    # же поступают остальные четыре вызова close_and_verify. Прежняя версия
+    # требовала здесь "Sell" — то есть закрепляла предварительную инверсию,
+    # из-за которой на биржу уходил Buy reduceOnly по Buy-позиции. Сторону,
+    # реально уходящую на биржу, проверяет
+    # test_time_exit_sends_the_side_the_exchange_actually_accepts.
+    assert closed[0][0] == "OLDUSDT" and closed[0][1] == "Buy"
 
 
 async def test_fresh_position_is_not_closed_by_the_age_rule(monkeypatch):
@@ -1241,3 +1247,134 @@ async def test_age_rule_does_not_touch_manual_positions(monkeypatch):
 
     await tr.monitor_positions(C())
     assert not closed, "закрыта ЧУЖАЯ позиция"
+
+
+async def test_time_exit_sends_the_side_the_exchange_actually_accepts(monkeypatch):
+    """Выход по времени переворачивал сторону ДВАЖДЫ.
+
+    close_position инвертирует сторону сам, а здесь стояла ещё и
+    предварительная инверсия: на биржу уходил Buy reduceOnly по
+    Buy-позиции. Bybit такой ордер отвергает, то есть правило не могло
+    сработать НИ РАЗУ — находка №30 оставалась открытой при закрытом на
+    вид коде.
+
+    Старый тест этого не ловил ПО ПОСТРОЕНИЮ: он подменял
+    close_and_verify — ровно тот слой, ниже которого происходит вторая
+    инверсия. Здесь подменяется КЛИЕНТ, и проверяется сторона, реально
+    уходящая на биржу (0-Б п.10: моделируем не отказ, а ложный успех)."""
+    from datetime import datetime, timedelta
+    import strategy.trader as tr
+    from core.config import cfg
+    from core.state import state, Position
+
+    monkeypatch.setattr(cfg, "MAX_POSITION_AGE_HOURS", 48)
+
+    async def settled(client, p, attempts=4):
+        return True
+    monkeypatch.setattr(tr, "_settle_closed_position", settled)
+
+    sent = []
+
+    class C:
+        api_key = "k"
+        secret = "s"
+        _live = [{"symbol": "OLDUSDT", "side": "Buy", "size": "1",
+                  "avgPrice": "100.0", "stopLoss": "95.0",
+                  "takeProfit": "110.0", "unrealisedPnl": "0"}]
+
+        async def get_positions(self):
+            return list(self._live)
+
+        async def close_position(self, symbol, side, qty):
+            # Фейк повторяет боевую инверсию клиента: именно она и есть
+            # вторая половина бага.
+            close_side = "Sell" if side == "Buy" else "Buy"
+            sent.append((symbol, close_side, qty))
+            self._live = []          # ордер исполнен — позиции больше нет
+            return {"retCode": 0}
+
+        async def get_balance(self):
+            return 1000.0
+
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "OLDUSDT", "lastPrice": "100"}]
+
+    pos = Position(symbol="OLDUSDT", side="Buy", entry=100.0, sl=95.0,
+                   tp1=0.0, tp2=110.0, tp3=0.0, qty=1.0, qty_opened=1.0,
+                   score=50, signal_type="VSA_CLIMAX", order_id="o1")
+    pos.ts = datetime.utcnow() - timedelta(hours=60)
+    state.positions.clear()
+    state.positions["OLDUSDT"] = pos
+    state.balance = 1000.0
+
+    await tr.monitor_positions(C())
+
+    assert sent, "выход по времени не отправил ордер вовсе"
+    assert sent[0][1] == "Sell", (
+        f"на биржу ушла сторона {sent[0][1]} по Buy-позиции — reduceOnly "
+        f"такой ордер отвергает, позиция не закроется никогда")
+
+
+async def test_adopted_position_keeps_its_original_open_time(monkeypatch):
+    """Часы позиции обнулялись каждым рестартом.
+
+    Усыновление после рестарта восстанавливало сторону, вход, стоп, цели,
+    объём и order_id — но не время открытия, и Position.ts брал текущий
+    момент. Railway перезапускает бота на каждый пуш, поэтому ни выход по
+    времени (48 ч), ни освобождение залипшего слота (72 ч) не наступали."""
+    from datetime import datetime, timedelta
+    import strategy.trader as tr
+    from core.state import state
+
+    opened = datetime.utcnow() - timedelta(hours=30)
+
+    async def fake_open_trades():
+        return [{"symbol": "ADOPTUSDT", "side": "Buy", "entry": 100.0,
+                 "sl": 95.0, "tp1": 0.0, "tp2": 110.0, "tp3": 0.0,
+                 "score": 55, "signal_type": "VSA_CLIMAX", "order_id": "o9",
+                 "opened_at": opened.isoformat(), "status": "open"}]
+    monkeypatch.setattr(tr.db, "get_open_trades", fake_open_trades)
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_positions(self):
+            return [{"symbol": "ADOPTUSDT", "side": "Buy", "size": "1",
+                     "avgPrice": "100.0", "stopLoss": "95.0",
+                     "takeProfit": "110.0", "unrealisedPnl": "0"}]
+
+        async def get_balance(self):
+            return 1000.0
+
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "ADOPTUSDT", "lastPrice": "100"}]
+
+    state.positions.clear()
+    state.balance = 1000.0
+    await tr.monitor_positions(C())
+
+    pos = state.positions.get("ADOPTUSDT")
+    assert pos is not None, "своя позиция не усыновлена"
+    age_h = (datetime.utcnow() - pos.ts).total_seconds() / 3600
+    assert age_h > 29, (
+        f"возраст усыновлённой позиции {age_h:.1f} ч вместо ~30 — часы "
+        f"обнулились рестартом, и правило 48 ч недостижимо")
+
+
+def test_broken_open_time_does_not_close_a_live_position():
+    """Ошибаться следует в сторону бездействия: непрочитанное время даёт
+    позиции лишний срок, выдуманное «давно» закрыло бы живую позицию по
+    рынку сразу после рестарта."""
+    from datetime import datetime, timedelta
+    from strategy.trader import _parse_opened_at
+    now = datetime.utcnow()
+    assert (now - _parse_opened_at("мусор")).total_seconds() < 5
+    assert (now - _parse_opened_at(None)).total_seconds() < 5
+    # время из будущего не смеет отматывать часы назад
+    future = (now + timedelta(hours=10)).isoformat()
+    assert _parse_opened_at(future) <= now + timedelta(seconds=1)
+    # честное время читается как есть
+    past = (now - timedelta(hours=7)).isoformat()
+    assert abs((_parse_opened_at(past) - (now - timedelta(hours=7)))
+               .total_seconds()) < 2

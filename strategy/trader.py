@@ -21,6 +21,29 @@ _DAILY_LOCK = asyncio.Lock()
 # wrongly mark the brand-new position as closed.
 _MIN_POSITION_AGE_S = 90
 
+
+def _parse_opened_at(raw) -> datetime:
+    """Время открытия из строки БД. При любой беде — текущий момент.
+
+    Осторожная сторона именно такая: непрочитанное время даёт позиции
+    лишний срок жизни, а выдуманное «давно» закрыло бы живую позицию по
+    рынку сразу после рестарта. Ошибаться следует в сторону бездействия.
+
+    Хранится naive-UTC (Position.ts = datetime.utcnow), таким и возвращаем:
+    сравнение в мониторе делает replace(tzinfo=utc) само.
+    """
+    if isinstance(raw, datetime):
+        return raw.replace(tzinfo=None)
+    try:
+        parsed = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return datetime.utcnow()
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    # Время из будущего — испорченная строка: часы позиции пошли бы назад.
+    return min(parsed, datetime.utcnow())
+
+
 # Счётчик неудачных попыток восстановить TP (символ -> попытки)
 _TP_RETRIES: dict[str, int] = {}
 # То же для SL. Без него ветка эскалации была недостижима: set_trading_stop
@@ -948,6 +971,13 @@ async def monitor_positions(client: BybitClient) -> None:
                             qty=size, qty_opened=size, score=row["score"] or 0,
                             signal_type=row["signal_type"] or "RESTORED",
                             order_id=row["order_id"] or "",
+                            # ВРЕМЯ ОТКРЫТИЯ, а не время усыновления. Без
+                            # него Position.ts брал текущий момент, и часы
+                            # позиции обнулялись КАЖДЫМ рестартом: выход по
+                            # времени (48 ч) и освобождение залипшего слота
+                            # (72 ч) не наступали никогда, потому что Railway
+                            # перезапускает бота на каждый пуш.
+                            ts=_parse_opened_at(row["opened_at"]),
                         )
                         log.warning(f"{sym}: позиция бота восстановлена после рестарта "
                                     f"({adopted.side} {size} @ {entry_px})")
@@ -1162,9 +1192,15 @@ async def monitor_positions(client: BybitClient) -> None:
                             f"{sym}: позиция живёт {age_h:.0f} ч при пределе "
                             f"{cfg.MAX_POSITION_AGE_HOURS} — закрываю по рынку "
                             f"(за окном, в котором измерена стратегия)")
-                        side_close = "Sell" if pos.side == "Buy" else "Buy"
+                        # Сторона ПОЗИЦИИ, а не встречная: close_position
+                        # инвертирует её сам. Здесь стояла предварительная
+                        # инверсия, и сторона переворачивалась ДВАЖДЫ — на
+                        # биржу уходил Buy reduceOnly по Buy-позиции.
+                        # Bybit такой ордер отвергает, и выход по времени не
+                        # мог сработать НИ РАЗУ: находка №30 оставалась
+                        # открытой при закрытом на вид коде.
                         done, remaining = await close_and_verify(
-                            client, sym, side_close, pos.qty)
+                            client, sym, pos.side, pos.qty)
                         if done:
                             if await _settle_closed_position(client, pos,
                                                              attempts=4):

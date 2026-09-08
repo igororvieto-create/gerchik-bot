@@ -337,6 +337,13 @@ if cfg.MAX_POSITION_AGE_HOURS:
     cfg.MAX_POSITION_AGE_HOURS = int(
         _clamp(cfg.MAX_POSITION_AGE_HOURS, _JUDGE_WINDOW_H, 720,
                "MAX_POSITION_AGE_HOURS"))
+# Единственный параметр хранения без границ: SIGNAL_TTL_HOURS=1e12
+# принимался как есть, а timedelta(hours=...) на таком значении БРОСАЕТ
+# OverflowError. Он ловится внутри cleanup_old_signals, та возвращает 0 —
+# и чистка не работает ни разу. С подключённым томом она стала
+# единственным ограничителем роста базы: раньше границу ставил деплой.
+cfg.SIGNAL_TTL_HOURS = int(_clamp(cfg.SIGNAL_TTL_HOURS, 1, 24 * 365,
+                                  "SIGNAL_TTL_HOURS"))
 cfg.MIN_RR               = _clamp(cfg.MIN_RR, 1.0, 10.0, "MIN_RR")
 cfg.MAX_SL_ATR           = _clamp(cfg.MAX_SL_ATR, 1.0, 10.0, "MAX_SL_ATR")
 

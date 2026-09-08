@@ -464,9 +464,16 @@ def _sl_bucket(r: float) -> str:
 
 
 def _hr_bucket(h: float) -> str:
-    if h < 2.0: return "1.5-2.0R (не торгуется)"
-    if h < 3.0: return "2.0-3.0R"
-    return ">3.0R"
+    """Границы — от фактического торгового порога, а не от числа 2.0.
+
+    MIN_TRADE_HEADROOM_R клампится снизу как max(MIN_RR, TP_R_MULT), и при
+    цели 3R корзина «2.0-3.0R» подписывалась торгуемой, хотя enter_trade
+    отвергает такие сигналы все до одного.
+    """
+    thr = cfg.MIN_TRADE_HEADROOM_R
+    if h < thr: return f"<{thr:.1f}R (не торгуется)"
+    if h < thr + 1.0: return f"{thr:.1f}-{thr + 1.0:.1f}R"
+    return f">{thr + 1.0:.1f}R"
 
 
 def report(rows: List[Dict], meta: Dict) -> str:

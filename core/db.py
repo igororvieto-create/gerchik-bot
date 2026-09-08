@@ -333,7 +333,21 @@ async def init_db() -> None:
     log.info(f"DB initialised at {DB_PATH} (стратегия {_strategy_id()})")
 
 
-async def save_signal(sig: Signal) -> None:
+async def save_signal(sig: Signal) -> bool:
+    """Записать сигнал. False — запись НЕ состоялась.
+
+    Единственная запись в БД, у которой не было канала об отказе: все
+    соседи давно отдают bool или бросают (save_trade_open, save_trade_close,
+    set_signal_outcome), а здесь исключение гасилось в лог, и try/except у
+    вызывающего был бесполезен — функция не бросала никогда.
+
+    Чем это кончалось: при `database is locked` строка в signals не
+    появлялась, а сделка по этому сигналу совершалась. PnL ложился в
+    trades, а в форвард-тест исход не входил НИКОГДА. Потеря не случайна —
+    она приходится на моменты конкуренции за базу (чистка, пакет
+    оценщика), то есть систематически вырезает часть популяции, и на
+    экране этого не видно.
+    """
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
@@ -354,8 +368,10 @@ async def save_signal(sig: Signal) -> None:
                  _strategy_id(), sig.ts.isoformat()),
             )
             await db.commit()
+        return True
     except Exception as e:
         log.error(f"save_signal error: {e}")
+        return False
 
 
 async def save_trade_open(pos: Position) -> bool:
@@ -678,6 +694,21 @@ def funding_r(funding_pct: Optional[float], direction: Optional[str],
 _LEGACY_WIN_R = 2.0
 
 
+def _headroom_labels() -> List[str]:
+    """Подписи корзин запаса, посчитанные от фактического торгового порога.
+
+    Границы были зашиты (1.5-2.0 / 2.0-3.0 / >3.0) при настраиваемом
+    MIN_TRADE_HEADROOM_R, который клампится снизу как max(MIN_RR,
+    TP_R_MULT). При цели 3R корзина «2.0-3.0R» продолжала подписываться
+    торгуемой, хотя enter_trade отвергает такие сигналы все до одного.
+    """
+    from core.config import cfg as _c
+    thr = _c.MIN_TRADE_HEADROOM_R
+    return [f"<{thr:.1f}R (не торгуется)",
+            f"{thr:.1f}-{thr + 1.0:.1f}R",
+            f">{thr + 1.0:.1f}R"]
+
+
 def _ev(slot: Dict, sl_pct: Optional[float] = None,
         fee_r: Optional[float] = None, fund_r: Optional[float] = None,
         win_r: Optional[float] = None) -> Dict:
@@ -817,7 +848,10 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
                         "поглощение", "лента <1 мин"],
         "by_score":    ["30-44", "45-59", "60+"],
         "by_sl_atr":   ["<1.0 ATR", "1.0-1.5", "1.5-2.5", ">2.5 ATR"],
-        "by_headroom": ["1.5-2.0R (не торгуется)", "2.0-3.0R", ">3.0R"],
+        # Подписи считаются от ТОГО ЖЕ порога, что и сами корзины: иначе
+        # ось теряет монотонность, а в ней весь смысл среза. Пустой список
+        # здесь означал бы произвольный порядок.
+        "by_headroom": _headroom_labels(),
         "by_ob":       ["стакан за", "стакан нейтр.", "стакан против"],
         "by_round":    ["круглое ниже", "на круглом", "круглое выше"],
     }
@@ -906,9 +940,17 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
         срез показывает, оправдано ли это отсечение."""
         if hr is None or hr <= 0:
             return None
-        if hr < 2.0: return "1.5-2.0R (не торгуется)"
-        if hr < 3.0: return "2.0-3.0R"
-        return ">3.0R"
+        # Граница «торгуется / не торгуется» — ФАКТИЧЕСКИЙ порог, а не
+        # число 2.0: он клампится снизу как max(MIN_RR, TP_R_MULT), и при
+        # цели 3R корзина «2.0-3.0R» продолжала подписываться торгуемой,
+        # хотя enter_trade отвергает эти сигналы все до одного. Срез по
+        # запасу — основной инструмент «где стратегия выигрывает», и он
+        # показывал неверную границу.
+        from core.config import cfg as _c
+        thr = _c.MIN_TRADE_HEADROOM_R
+        if hr < thr: return f"<{thr:.1f}R (не торгуется)"
+        if hr < thr + 1.0: return f"{thr:.1f}-{thr + 1.0:.1f}R"
+        return f">{thr + 1.0:.1f}R"
 
     try:
         async with aiosqlite.connect(DB_PATH) as db:
@@ -1343,7 +1385,11 @@ async def cleanup_old_signals(keep_hours: int = 192) -> int:
                 # 'stale', и такие строки не удалялись НИКОГДА — таблица
                 # росла без предела. Функционально безвредно (get_open_trades
                 # фильтрует по 'open'), но это утечка на годы работы.
-                "DELETE FROM trades WHERE status IN ('closed','stale') "
+                # 'abandoned' добавлен: терминальный статус завели позже, а
+                # в этот список не внесли — та же утечка, что уже чинили для
+                # 'stale'. На эфемерной базе её стирал деплой, на томе — нет.
+                "DELETE FROM trades WHERE status IN "
+                "('closed','stale','abandoned') "
                 "AND closed_at < ?", (old_trades,)
             )
             await db.commit()

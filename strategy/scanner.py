@@ -1245,9 +1245,20 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "",
             _SIGNALLED_CANDLE[sig.symbol] = ct
 
         try:
-            await db.save_signal(sig)
+            saved = await db.save_signal(sig)
         except Exception as dbe:
+            saved = False
             log.error(f"run_scan_and_broadcast: db.save_signal({sig.symbol}) failed — {dbe}")
+        if not saved:
+            # Строки в signals нет — сделка по этому сигналу не войдёт в
+            # форвард-тест НИКОГДА, а PnL по ней ляжет в trades. Потеря не
+            # случайна: она приходится на моменты конкуренции за базу, то
+            # есть систематически вырезает часть популяции. Торговать по
+            # неучтённому сигналу значит собирать статистику, которая не
+            # описывает то, что бот делает.
+            log.error(f"{sig.symbol}: сигнал не записан в БД — вход пропущен, "
+                      f"иначе сделка выпала бы из замера")
+            continue
 
         # allow_trading=False для ручного скана из дашборда: GET-запрос
         # не должен открывать позиции на реальные деньги.

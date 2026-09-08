@@ -1435,3 +1435,72 @@ async def test_breakdown_takes_the_multiple_from_the_winning_rows(tmp_path,
     assert abs(hi["ev_gross_r"] - 1.667) < 0.01, hi["ev_gross_r"]
     # 1W/2L при цели 1.5R: (1.5 − 2)/3 = −0.167R брутто
     assert abs(lo["ev_gross_r"] + 0.167) < 0.01, lo["ev_gross_r"]
+
+
+async def test_signal_that_was_not_recorded_does_not_get_traded(monkeypatch,
+                                                                tmp_path):
+    """Отказ записи сигнала — это событие, а не «ничего не произошло».
+
+    save_signal была единственной записью в БД без канала об отказе:
+    исключение гасилось в лог, и try/except у вызывающего был бесполезен.
+    При `database is locked` строки в signals не появлялось, а сделка по
+    этому сигналу совершалась: PnL ложился в trades, а в форвард-тест исход
+    не входил НИКОГДА. Потеря не случайна — она приходится на моменты
+    конкуренции за базу, то есть систематически вырезает часть популяции."""
+    import core.db as d
+    monkeypatch.setattr(d, "DB_PATH", "/nonexistent-dir/x.db")
+    from core.state import Signal
+    sig = Signal(symbol="AAAUSDT", signal_type="X", direction="LONG", score=50,
+                 price=100.0, oi_change=0.0, vol_ratio=0.0, funding=0.0,
+                 ob_bias="NEUTRAL", atr_pct=1.0, details="",
+                 entry=100.0, sl=99.0, tp1=101.0, tp2=102.0, tp3=103.0,
+                 rr=2.0, headroom=3.0, sl_pct=1.0)
+    assert await d.save_signal(sig) is False, \
+        "провал записи отрапортован как успех — сделка выпала бы из замера"
+
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "ok.db"))
+    await d.init_db()
+    assert await d.save_signal(sig) is True
+
+
+async def test_abandoned_trades_are_cleaned_up(tmp_path, monkeypatch):
+    """'abandoned' — терминальный статус, заведённый позже, — не входил в
+    список чистки. Та же утечка, что уже чинили для 'stale': на эфемерной
+    базе её стирал деплой, на томе она копится годами."""
+    import core.db as d
+    from datetime import datetime, timedelta
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "t.db"))
+    await d.init_db()
+    # Горизонт чистки сделок — 90 суток, а не keep_hours: строки старше
+    # берутся отдельным запросом.
+    old = (datetime.utcnow() - timedelta(days=100)).isoformat()
+    async with __import__("aiosqlite").connect(d.DB_PATH) as db:
+        for st in ("closed", "stale", "abandoned"):
+            await db.execute(
+                "INSERT INTO trades (symbol, side, entry, opened_at, "
+                "closed_at, status) VALUES (?,?,?,?,?,?)",
+                (f"{st}USDT", "Buy", 1.0, old, old, st))
+        await db.commit()
+    await d.cleanup_old_signals(keep_hours=24)
+    async with __import__("aiosqlite").connect(d.DB_PATH) as db:
+        async with db.execute("SELECT status FROM trades") as cur:
+            left = [r[0] for r in await cur.fetchall()]
+    assert left == [], f"в таблице остались строки: {left}"
+
+
+def test_headroom_buckets_follow_the_actual_trading_threshold(monkeypatch):
+    """Граница «торгуется / не торгуется» была зашита числом 2.0 при
+    настраиваемом пороге. При цели 3R порог автоматически становится 3.0, а
+    корзина «2.0-3.0R» продолжала подписываться торгуемой — хотя
+    enter_trade отвергает такие сигналы все до одного. Срез по запасу —
+    основной инструмент «где стратегия выигрывает»."""
+    from core.config import cfg
+    import core.db as d
+    monkeypatch.setattr(cfg, "MIN_TRADE_HEADROOM_R", 3.0)
+    labels = d._headroom_labels()
+    assert labels[0] == "<3.0R (не торгуется)", labels
+    assert labels[1] == "3.0-4.0R", labels
+    import tools.replay as rp
+    assert "не торгуется" in rp._hr_bucket(2.5), \
+        "запас 2.5R при пороге 3.0 назван торгуемым"
+    assert "не торгуется" not in rp._hr_bucket(3.5)

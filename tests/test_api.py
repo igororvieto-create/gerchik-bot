@@ -685,3 +685,50 @@ def test_dashboard_references_only_existing_elements():
     used = set(re.findall(r"\$\('([\w-]+)'\)", code))
     assert not (used - ids), \
         f"ссылки на несуществующие элементы: {used - ids}"
+
+
+def test_db_banner_does_not_cry_wipe_when_a_volume_is_attached():
+    """Наблюдалось живьём: сразу после подключения тома дашборд показал
+    «данные стёрлись при рестарте» — история 3 ч, бот работает 3 ч. Данные
+    не терялись, том только что смонтирован, и база закономерно молодая.
+
+    Красная строка, которая врёт, обесценивает все остальные красные
+    строки, поэтому это не косметика. Вердикт считает dbBannerState, и
+    проверяется он ЗАПУСКОМ функции в node, а не чтением исходника: тест на
+    текст не отличает работающую логику от похожей на работающую."""
+    import json as _j
+    import os
+    import re
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    m = re.search(r"function dbBannerState\(h, up, ephemeral\)\{.*?\n\}",
+                  html, re.S)
+    assert m, "dbBannerState исчезла из дашборда"
+
+    cases = [
+        # том подключён, история моложе процесса — НЕ потеря
+        ({"age_hours": 3.0}, 3.1, False, "fresh"),
+        # том подключён, история старше — сказать нечего
+        ({"age_hours": 40.0}, 3.0, False, ""),
+        # тома нет, история моложе и процесс живёт давно — реальная потеря
+        ({"age_hours": 3.0}, 50.0, True, "wiped"),
+        # тома нет, история старше — потери не было, но следующий деплой сотрёт
+        ({"age_hours": 90.0}, 50.0, True, "ephemeral"),
+        # тома нет, первые минуты после старта — не потеря, а молодость
+        ({"age_hours": 0.2}, 1.0, True, "ephemeral"),
+        # признак неизвестен — судим по возрасту, как раньше
+        ({"age_hours": 3.0}, 50.0, None, "wiped"),
+    ]
+    script = m.group(0) + "\nconst cases=" + _j.dumps(cases) + ";\n" + (
+        "console.log(JSON.stringify(cases.map("
+        "c=>dbBannerState(c[0], c[1], c[2]))));")
+    out = subprocess.run(["node", "-e", script],
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    got = _j.loads(out.stdout.strip().splitlines()[-1])
+    for (h, up, eph, want), have in zip(cases, got):
+        assert have == want, (
+            f"история {h['age_hours']} ч, аптайм {up} ч, эфемерная={eph}: "
+            f"ожидалось {want!r}, получено {have!r}")

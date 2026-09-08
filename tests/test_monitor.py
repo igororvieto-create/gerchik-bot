@@ -1677,3 +1677,45 @@ async def test_risk_share_is_measured_against_equity_not_free_margin(monkeypatch
         f"ложная тревога: {state.over_risk} — 25 USDT это 2.5% счёта, "
         f"а не 8.3% свободной маржи")
     state.equity = 0.0
+
+
+async def test_closed_pnl_is_taken_as_final_and_funding_is_not_subtracted_twice(
+        monkeypatch):
+    """closedPnl у Bybit — ИТОГОВАЯ величина:
+
+        Closed P&L = P&L позиции − комиссия открытия − комиссия закрытия
+                     − сумма фандинга
+
+    Ревью предлагало вычитать фандинг дополнительно. Проверено по
+    первоисточнику (Bybit, P&L Calculations, USDT Perpetual) и отклонено:
+    это посчитало бы издержки ДВАЖДЫ и систематически занижало учёт — тем
+    сильнее, чем дольше держится позиция, а сканер целенаправленно отбирает
+    символы с повышенной ставкой фандинга.
+
+    Тест закрепляет отклонённую находку так же, как это сделано для
+    ошибочной находки про блокировку сканов (№26): иначе следующее ревью
+    «починит» её снова."""
+    import strategy.trader as tr
+    from core.state import Position
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_closed_pnl(self, symbol, limit=50):
+            # Время записи обязано попадать в окно [открытие − 60 с,
+            # сейчас + 60 с], иначе она отфильтруется как чужая, и тест
+            # проходил бы по пустой сумме — не проверяя ничего.
+            from datetime import datetime, timezone
+            now_ms = datetime.now(timezone.utc).timestamp() * 1000
+            return [{"orderId": "o1", "closedPnl": "-1.23",
+                     "avgExitPrice": "100.0", "closedSize": "1",
+                     "updatedTime": str(int(now_ms))}]
+
+    pos = Position(symbol="FUNDUSDT", side="Buy", entry=100.0, sl=99.0,
+                   tp1=0.0, tp2=102.0, tp3=0.0, qty=1.0, qty_opened=1.0,
+                   score=50, signal_type="VSA_CLIMAX", order_id="o1")
+    exit_px, pnl = await tr.fetch_matching_closed_pnl(C(), pos, attempts=1)
+    assert pnl == -1.23, (
+        f"учтено {pnl} вместо биржевого -1.23 — если из closedPnl что-то "
+        f"вычитается дополнительно, издержки считаются дважды")

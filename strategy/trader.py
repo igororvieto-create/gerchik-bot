@@ -285,6 +285,14 @@ async def fetch_matching_closed_pnl(client: BybitClient, pos: Position,
                 # безопаснее, чем приписать себе чужую сделку.
                 if acc <= 0 or qty <= 0:
                     taken = hits[:1]
+                # closedPnl — ИТОГОВАЯ величина, фандинг в неё уже входит:
+                #   Closed P&L = P&L позиции − комиссия открытия
+                #              − комиссия закрытия − сумма фандинга
+                # (Bybit, P&L Calculations, USDT Perpetual). Вычитать
+                # фандинг здесь ещё раз значило бы посчитать издержки
+                # ДВАЖДЫ. Ревью 2026-09-08 предлагало ровно это — проверено
+                # по первоисточнику и отклонено; закреплено тестом
+                # test_closed_pnl_is_taken_as_final_and_funding_is_not_subtracted_twice.
                 total = sum(float(r.get("closedPnl", 0)) for _, r in taken)
                 exit_px = float(taken[-1][1].get("avgExitPrice", 0))
                 if len(taken) > 1:

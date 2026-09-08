@@ -374,6 +374,11 @@ input[type=range]::-moz-range-thumb{
 </div>
 
 <div class="pos-panel" id="pos-panel">
+  <!-- Признак устаревших данных лежит В РАЗМЕТКЕ, а не создаётся из JS:
+       проверка фронтенда в CI сверяет $('id') с реальными id и на
+       динамически созданном элементе давала отказ. Статический узел ещё и
+       проще — переключается видимость, а не жизненный цикл узла. -->
+  <div id="pos-stale" style="display:none;color:var(--red);font-size:12px;margin:4px 0"></div>
   <div class="pos-hdr">📋 Открытые позиции</div>
   <div class="pos-list" id="pos-list"></div>
 </div>
@@ -1057,17 +1062,11 @@ let _posRefreshInFlight=false;
 function markPositionsStale(stale){
   const p=$('pos-panel'); if(!p) return;
   p.style.opacity = stale ? '0.45' : '';
-  let b=$('pos-stale');
-  if(stale){
-    if(!b){
-      b=document.createElement('div');
-      b.id='pos-stale';
-      b.style.cssText='color:var(--red);font-size:12px;margin:4px 0';
-      p.prepend(b);
-    }
-    b.textContent='⚠ данные позиций устарели — ответ биржи не получен';
-  } else if(b){
-    b.remove();
+  const b=$('pos-stale');
+  if(b){
+    b.textContent = stale
+      ? '⚠ данные позиций устарели — ответ биржи не получен' : '';
+    b.style.display = stale ? '' : 'none';
   }
   document.querySelectorAll('[id^="cbtn-"]').forEach(el=>{ el.disabled = !!stale; });
 }

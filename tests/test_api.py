@@ -653,3 +653,35 @@ def test_dashboard_shows_save_warnings(with_token):
     assert "closeModal" in tail, "ветки автозакрытия рядом нет — проверить нечего"
     assert tail.index("} else {") < tail.index("closeModal"), \
         "автозакрытие не убрано из ветки с предупреждением — текст пролетит мимо"
+
+
+def test_dashboard_references_only_existing_elements():
+    """Та же проверка, что в CI (шаг «Frontend sanity»), но локально.
+
+    Расхождение между локальным прогоном и CI уже стоило одного отказа
+    деплоя: `$('pos-stale')` ссылался на элемент, который JS создавал сам,
+    и CI считал ссылку висячей. Пока проверка живёт ТОЛЬКО в CI, о поломке
+    узнаёшь после пуша — то есть в момент, когда бот уже не обновляется.
+
+    Дашборд — один файл со встроенным JS: висячая ссылка на id роняет
+    обработчик целиком, а синтаксис при этом корректен."""
+    import os
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as f:
+        s = f.read()
+    code = "\n".join(re.findall(r"<script[^>]*>(.*?)</script>", s, re.S))
+
+    for op, cl in (("{", "}"), ("(", ")"), ("[", "]")):
+        assert code.count(op) == code.count(cl), \
+            f"скобки {op}{cl} разъехались: {code.count(op)}/{code.count(cl)}"
+
+    called = set(re.findall(r'onclick="(\w+)\(', s))
+    defined = set(re.findall(r"function\s+(\w+)\s*\(", code))
+    assert not (called - defined), \
+        f"обработчики без определения: {called - defined}"
+
+    ids = set(re.findall(r'id="([\w-]+)"', s))
+    used = set(re.findall(r"\$\('([\w-]+)'\)", code))
+    assert not (used - ids), \
+        f"ссылки на несуществующие элементы: {used - ids}"

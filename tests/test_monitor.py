@@ -1632,3 +1632,48 @@ async def test_breakeven_without_tick_size_does_not_spam_the_exchange(monkeypatc
         f"повторяться каждые 30 секунд бессрочно")
     assert tr._BE_NO_TICK.get("NOTICKUSDT") == 1, tr._BE_NO_TICK
     assert pos.breakeven_done is False
+
+
+async def test_risk_share_is_measured_against_equity_not_free_margin(monkeypatch):
+    """Доступный баланс уменьшается на занятую маржу, поэтому доля риска,
+    посчитанная от него, ЗАВЫШЕНА: при открытых позициях база ниже эквити
+    заметно, и здоровая позиция получала «риск > 3%» — предупреждение
+    работало против владельца, подталкивая сократить нормальную позицию.
+
+    Для САЙЗИНГА база не меняется: считать размер от эквити значит
+    открывать больше, а это движение в сторону риска."""
+    from datetime import datetime, timedelta
+    import strategy.trader as tr
+    from core.state import state, Position
+    state.over_risk.clear()
+    state.positions.clear()
+    state.balance = 300.0      # свободно
+    state.equity = 1000.0      # весь счёт
+
+    # Риск 25 USDT: 2.5% от эквити (норма) и 8.3% от свободного (ложная тревога)
+    pos = Position(symbol="EQUSDT", side="Buy", entry=100.0, sl=95.0,
+                   tp1=0.0, tp2=110.0, tp3=0.0, qty=5.0, qty_opened=5.0,
+                   score=50, signal_type="VSA_CLIMAX", order_id="o1")
+    pos.ts = datetime.utcnow() - timedelta(hours=1)
+    state.positions["EQUSDT"] = pos
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_positions(self):
+            return [{"symbol": "EQUSDT", "side": "Buy", "size": "5",
+                     "avgPrice": "100.0", "stopLoss": "95.0",
+                     "takeProfit": "110.0", "unrealisedPnl": "0"}]
+
+        async def get_balance(self):
+            return 300.0
+
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "EQUSDT", "lastPrice": "100"}]
+
+    await tr.monitor_positions(C())
+    assert "EQUSDT" not in state.over_risk, (
+        f"ложная тревога: {state.over_risk} — 25 USDT это 2.5% счёта, "
+        f"а не 8.3% свободной маржи")
+    state.equity = 0.0

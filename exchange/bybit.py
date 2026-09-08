@@ -398,6 +398,20 @@ class BybitClient:
                                 available = float(coin.get("availableToWithdraw") or 0)
                             if available == 0:
                                 available = float(coin.get("walletBalance") or 0)
+                            # ЭКВИТИ отдельно от доступного. Доступное
+                            # уменьшается на занятую маржу, поэтому база для
+                            # ПРОВЕРКИ доли риска по нему занижена: при трёх
+                            # открытых позициях она ниже эквити примерно на
+                            # 40%, и здоровая позиция получала на дашборде
+                            # «риск > 3%», подталкивая владельца сократить её
+                            # вручную. Для САЙЗИНГА оставляем доступное:
+                            # считать размер от эквити значит открывать
+                            # БОЛЬШЕ, а это движение в сторону риска, и делать
+                            # его молча нельзя.
+                            eq = float(coin.get("equity") or 0)
+                            if eq <= 0:
+                                eq = float(coin.get("walletBalance") or 0)
+                            state.equity = eq if eq > 0 else available
                             log.info(f"get_balance {acc_type}: USDT available={available}")
                             if available > 0:
                                 state.last_balance_error = ""

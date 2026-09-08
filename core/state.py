@@ -162,6 +162,13 @@ class AppState:
         # быть разрешён, иначе он навсегда занимает слот из MAX_POSITIONS.
         self.pending_entries: Dict[str, tuple] = {}
         self.balance: float = 0.0
+        # ЭКВИТИ — весь счёт, включая занятую под позиции маржу. balance
+        # (доступное) на неё уменьшается, поэтому доля риска, посчитанная
+        # от него, ЗАВЫШЕНА: при трёх позициях база ниже эквити примерно на
+        # 40%, и здоровая позиция получала «риск > 3%». Для сайзинга
+        # по-прежнему берётся balance — считать размер от эквити значит
+        # открывать больше.
+        self.equity: float = 0.0
         self.client: Any = None  # set by main.py after BybitClient init
         self.last_balance_error: str = ""
         self.last_scan_error: str = ""  # non-empty if the most recent scan failed

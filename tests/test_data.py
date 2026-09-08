@@ -1504,3 +1504,45 @@ def test_headroom_buckets_follow_the_actual_trading_threshold(monkeypatch):
     assert "не торгуется" in rp._hr_bucket(2.5), \
         "запас 2.5R при пороге 3.0 назван торгуемым"
     assert "не торгуется" not in rp._hr_bucket(3.5)
+
+
+async def test_expectancy_per_taken_trade_is_reported_alongside(tmp_path,
+                                                                monkeypatch):
+    """До появления выхода по времени EXPIRED был чисто модельной меткой:
+    у живых позиций ограничения не было, и такая сделка просто висела.
+    Теперь бот её реально закрывает по рынку — она занимала слот и платила
+    комиссии, то есть на вопрос «сколько приносит ВЗЯТАЯ сделка» отвечает
+    наравне с решёнными.
+
+    ev_r при этом НЕ меняется: по нему задан замер, и менять определение
+    метрики посреди него значило бы снова сравнивать разные популяции
+    (находки №30 и №31). Показываем оба числа."""
+    import core.db as d
+    from datetime import datetime
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "t.db"))
+    await d.init_db()
+    now = datetime.utcnow().isoformat()
+
+    # 2 победы по 2R, 2 убытка, 6 просрочек по −0.5R (выход 99.5 при риске
+    # 1.0). Ненулевой результат просрочек НАМЕРЕННО: при нуле фолбэк
+    # «просрочка = 0R» давал бы то же число, и мутация «результат просрочек
+    # не читается» прошла бы незамеченной — фактор был бы замаскирован.
+    rows = ([("WIN", 102.0)] * 2 + [("LOSS", 99.0)] * 2
+            + [("EXPIRED", 99.5)] * 6)
+    async with __import__("aiosqlite").connect(d.DB_PATH) as db:
+        for i, (outcome, px) in enumerate(rows):
+            await db.execute(
+                "INSERT INTO signals (symbol, ts, score, direction, price, "
+                "signal_type, outcome, outcome_price, entry, sl, sl_pct, "
+                "atr_pct, rr, strategy) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"E{i}USDT", now, 50, "LONG", 100.0, "VSA_CLIMAX", outcome,
+                 px, 100.0, 99.0, 1.0, 2.0, 2.0, d._strategy_id()))
+        await db.commit()
+
+    st = await d.get_outcome_stats(days=7)
+    # На РЕШЁННУЮ: (2×2 − 2)/4 = +0.50R
+    assert abs(st["ev_gross_r"] - 0.5) < 1e-9, st["ev_gross_r"]
+    # На ВЗЯТУЮ: (2×2 − 2 + 6×(−0.5)) / 10 = −0.10R
+    assert abs(st["ev_taken_r"] + 0.1) < 1e-9, st["ev_taken_r"]
+    assert st["expired_n"] == 6

@@ -711,7 +711,8 @@ def _headroom_labels() -> List[str]:
 
 def _ev(slot: Dict, sl_pct: Optional[float] = None,
         fee_r: Optional[float] = None, fund_r: Optional[float] = None,
-        win_r: Optional[float] = None) -> Dict:
+        win_r: Optional[float] = None,
+        expired_r: Optional[float] = None) -> Dict:
     """Винрейт и матожидание в R.
 
     С переносом стопа в безубыток одного винрейта мало: исход BE даёт ~0R и
@@ -745,6 +746,27 @@ def _ev(slot: Dict, sl_pct: Optional[float] = None,
     wr = win_r if (win_r and win_r > 0) else _LEGACY_WIN_R
     gross = (win * wr + be * 0.0 + loss * -1.0) / total
     out["win_r"] = round(wr, 2)
+    # МАТОЖИДАНИЕ НА ВЗЯТУЮ СДЕЛКУ — отдельным числом, а не вместо ev_r.
+    #
+    # ev_r считается по РЕШЁННЫМ исходам, и так задан замер: менять
+    # определение метрики посреди него значило бы снова сравнивать разные
+    # популяции (находки №30 и №31). Но с появлением выхода по времени
+    # EXPIRED перестал быть чисто модельной меткой: такую сделку бот
+    # реально закрывает по рынку, она занимала слот и платила комиссии.
+    #
+    # Разрыв бывает кратным: 30W/30L/90 EXPIRED со средним около нуля дают
+    # +0.50R на решённую и +0.20R на взятую. Показываем оба, и пусть
+    # владелец видит, что это два ответа на два разных вопроса.
+    expired = slot.get("expired", 0)
+    taken = total + expired
+    if taken:
+        exp_r = expired_r if expired_r is not None else 0.0
+        out["ev_taken_r"] = round(
+            (win * wr + be * 0.0 + loss * -1.0 + expired * exp_r) / taken, 3)
+        out["expired_n"] = expired
+    else:
+        out["ev_taken_r"] = None
+        out["expired_n"] = 0
     out["ev_gross_r"] = round(gross, 3)
     # Комиссия вычитается по СРЕДНЕМУ стопу корзины: в R она зависит от
     # ширины стопа, поэтому одна константа для всех корзин снова дала бы
@@ -812,6 +834,22 @@ async def get_outcome_stats(days: int = 7) -> Dict:
             ) as cur_wr:
                 row_wr = await cur_wr.fetchone()
             avg_win_r = float(row_wr[0]) if (row_wr and row_wr[0] is not None) else None
+            # Средний результат ПРОСРОЧЕННЫХ сделок в R. Считается
+            # построчно и усредняется после: R = ход / риск, и усреднять
+            # ход и риск по отдельности было бы неверно.
+            async with db.execute(
+                f"""SELECT AVG(CASE WHEN direction = 'LONG'
+                                    THEN (outcome_price - entry) / (entry - sl)
+                                    ELSE (entry - outcome_price) / (sl - entry)
+                               END)
+                    FROM signals
+                    WHERE outcome = 'EXPIRED' AND outcome_price > 0
+                      AND entry > 0 AND sl > 0 AND sl <> entry
+                      AND ts >= ? AND {_CUR_STRAT}""",
+                (cutoff, *_strat_params()),
+            ) as cur_ex:
+                row_ex = await cur_ex.fetchone()
+            avg_exp_r = float(row_ex[0]) if (row_ex and row_ex[0] is not None) else None
             async with db.execute(
                 f"""SELECT COALESCE(outcome, 'OPEN') o, COUNT(*) c
                     FROM signals
@@ -825,7 +863,7 @@ async def get_outcome_stats(days: int = 7) -> Dict:
                     elif o == "EXPIRED": stats["expired"] = c
                     else:                stats["open"] = c
         stats.update(_ev(stats, fee_r=avg_fee, fund_r=avg_fund,
-                         win_r=avg_win_r))
+                         win_r=avg_win_r, expired_r=avg_exp_r))
         return stats
     except Exception as e:
         log.error(f"get_outcome_stats error: {e}")
@@ -958,6 +996,7 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             async with db.execute(
                 """SELECT symbol, score, direction, signal_type, outcome, ts,
                           sl_pct, atr_pct, headroom, funding, rr,
+                          entry, sl, outcome_price,
                           flow_delta, flow_absorb, flow_span_min,
                           ob_bias, round_pos
                    FROM signals WHERE outcome IS NOT NULL AND ts >= ?
@@ -968,11 +1007,12 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
                 rows = await cur.fetchall()
 
         def _acc(d: Dict, key: str, outcome: str, sl_pct=None,
-                 fund=None, rr=None) -> None:
+                 fund=None, rr=None, exp_r=None) -> None:
             slot = d.setdefault(key, {"win": 0, "loss": 0, "be": 0, "expired": 0,
                                       "_fee_sum": 0.0, "_fee_n": 0,
                                       "_fund_sum": 0.0, "_fund_n": 0,
-                                      "_wr_sum": 0.0, "_wr_n": 0})
+                                      "_wr_sum": 0.0, "_wr_n": 0,
+                                      "_ex_sum": 0.0, "_ex_n": 0})
             k = outcome.lower()
             if k in slot:
                 slot[k] += 1
@@ -995,29 +1035,46 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             if k == "win" and rr and rr > 0:
                 slot["_wr_sum"] += rr
                 slot["_wr_n"] += 1
+            # Результат просрочки в R — построчно: такую сделку бот теперь
+            # реально закрывает по рынку (выход по времени), и на вопрос
+            # «сколько приносит ВЗЯТАЯ сделка» она отвечает наравне с
+            # решёнными.
+            if k == "expired" and exp_r is not None:
+                slot["_ex_sum"] += exp_r
+                slot["_ex_n"] += 1
 
         for r in rows:
             _sl = r["sl_pct"]
             _fd = funding_r(r["funding"], r["direction"], _sl)
             _rr = r["rr"]
-            _acc(out["by_score"], _bucket(r["score"]), r["outcome"], _sl, _fd, _rr)
-            _acc(out["by_direction"], r["direction"], r["outcome"], _sl, _fd, _rr)
-            _acc(out["by_type"], r["signal_type"], r["outcome"], _sl, _fd, _rr)
+            _exr = None
+            if (r["outcome"] == "EXPIRED" and r["outcome_price"]
+                    and r["entry"] and r["sl"] and r["sl"] != r["entry"]):
+                _den = (r["entry"] - r["sl"]) if r["direction"] == "LONG" \
+                    else (r["sl"] - r["entry"])
+                if _den:
+                    _num = (r["outcome_price"] - r["entry"]) \
+                        if r["direction"] == "LONG" \
+                        else (r["entry"] - r["outcome_price"])
+                    _exr = _num / _den
+            _acc(out["by_score"], _bucket(r["score"]), r["outcome"], _sl, _fd, _rr, _exr)
+            _acc(out["by_direction"], r["direction"], r["outcome"], _sl, _fd, _rr, _exr)
+            _acc(out["by_type"], r["signal_type"], r["outcome"], _sl, _fd, _rr, _exr)
             slb = _sl_bucket(r["sl_pct"], r["atr_pct"])
             if slb:
-                _acc(out["by_sl_atr"], slb, r["outcome"], _sl, _fd, _rr)
+                _acc(out["by_sl_atr"], slb, r["outcome"], _sl, _fd, _rr, _exr)
             hrb = _hr_bucket(r["headroom"])
             if hrb:
-                _acc(out["by_headroom"], hrb, r["outcome"], _sl, _fd, _rr)
+                _acc(out["by_headroom"], hrb, r["outcome"], _sl, _fd, _rr, _exr)
             fb = _flow_bucket(r["flow_delta"], r["flow_absorb"], r["flow_span_min"])
             if fb:
-                _acc(out["by_flow"], fb, r["outcome"], _sl, _fd, _rr)
+                _acc(out["by_flow"], fb, r["outcome"], _sl, _fd, _rr, _exr)
             obb = _ob_bucket(r["ob_bias"], r["direction"])
             if obb:
-                _acc(out["by_ob"], obb, r["outcome"], _sl, _fd, _rr)
+                _acc(out["by_ob"], obb, r["outcome"], _sl, _fd, _rr, _exr)
             rb = _round_bucket(r["round_pos"])
             if rb:
-                _acc(out["by_round"], rb, r["outcome"], _sl, _fd, _rr)
+                _acc(out["by_round"], rb, r["outcome"], _sl, _fd, _rr, _exr)
 
         for d in (out["by_score"], out["by_direction"], out["by_type"],
                   out["by_sl_atr"], out["by_headroom"], out["by_flow"],
@@ -1026,9 +1083,11 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
                 fee = (slot["_fee_sum"] / slot["_fee_n"]) if slot["_fee_n"] else None
                 fnd = (slot["_fund_sum"] / slot["_fund_n"]) if slot["_fund_n"] else None
                 wr = (slot["_wr_sum"] / slot["_wr_n"]) if slot["_wr_n"] else None
-                slot.update(_ev(slot, fee_r=fee, fund_r=fnd, win_r=wr))
+                exr = (slot["_ex_sum"] / slot["_ex_n"]) if slot["_ex_n"] else None
+                slot.update(_ev(slot, fee_r=fee, fund_r=fnd, win_r=wr,
+                                expired_r=exr))
                 for k_tmp in ("_fee_sum", "_fee_n", "_fund_sum", "_fund_n",
-                              "_wr_sum", "_wr_n"):
+                              "_wr_sum", "_wr_n", "_ex_sum", "_ex_n"):
                     slot.pop(k_tmp, None)
 
         out["recent"] = [

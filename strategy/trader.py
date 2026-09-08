@@ -1194,7 +1194,13 @@ async def monitor_positions(client: BybitClient) -> None:
                 # Здесь только ОБНАРУЖЕНИЕ и громкий лог: автоматическое
                 # сокращение позиции по возможно устаревшему балансу может
                 # навредить сильнее самой проблемы, это решение владельца.
-                if (state.balance > 0 and pos.entry > 0 and pos.sl > 0
+                # База — ЭКВИТИ, а не доступное: доступное уменьшено на
+                # занятую маржу, и доля риска от него завышена. Здоровая
+                # позиция получала «риск > 3%» и подталкивала владельца
+                # сокращать её вручную — то есть предупреждение работало
+                # против него. Фолбэк на balance, пока эквити неизвестно.
+                _risk_base = state.equity if state.equity > 0 else state.balance
+                if (_risk_base > 0 and pos.entry > 0 and pos.sl > 0
                         and pos.signal_type != "MANUAL"):
                     # Стоп берётся С БИРЖИ, а не из памяти. Все проверки
                     # подтверждали лишь ФАКТ стопа (exch_sl > 0), но не его
@@ -1217,7 +1223,7 @@ async def monitor_positions(client: BybitClient) -> None:
                                 f"с учтённым {pos.sl} — риск считаю по "
                                 f"биржевому, он и сработает")
                     real_risk = pos.qty * abs(pos.entry - _risk_sl)
-                    risk_pct = real_risk / state.balance * 100
+                    risk_pct = real_risk / _risk_base * 100
                     # Признак держим АКТУАЛЬНЫМ, а не только в момент
                     # обнаружения: сократили вручную — строка с экрана
                     # уходит сама.

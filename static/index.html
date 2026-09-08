@@ -817,8 +817,17 @@ async function refreshStats(){
         : (oc.ev_r>0?'v-green':'v-red'));
       WINRATE_FACT = (oc.winrate!=null) ? oc.winrate : null;
       WINRATE_N = _dec;
+      // Матожидание НА ВЗЯТУЮ сделку — рядом, а не вместо. ev_r считается
+      // по решённым исходам, и так задан замер. Но выход по времени
+      // закрывает просроченные сделки по рынку: они занимали слот и
+      // платили комиссии, то есть на вопрос «сколько приносит взятая
+      // сделка» отвечают наравне с решёнными, и разрыв бывает кратным.
+      const _tk = (oc.ev_taken_r!=null && (oc.expired_n??0)>0)
+        ? ` · со взятыми ${(oc.ev_taken_r>0?'+':'')}${oc.ev_taken_r}R`
+          + ` (${oc.expired_n} просроч.)`
+        : '';
       $('s-wr-sub').textContent=`${oc.win}W · ${oc.loss}L · ${oc.be??0}БУ · `
-        +`${oc.winrate!=null?oc.winrate+'%':'—'} · ${oc.open} ждут`;
+        +`${oc.winrate!=null?oc.winrate+'%':'—'} · ${oc.open} ждут${_tk}`;
     }
     // Состояние базы — НЕЗАВИСИМО от того, был ли скан и не упал ли он.
     // Раньше весь блок был вложен в if(last_scan_at) и в else от

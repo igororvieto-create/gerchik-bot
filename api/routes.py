@@ -582,6 +582,9 @@ async def get_settings(request: Request):
         # Стоп и цель — управляемая геометрия сделки.
         "max_sl_atr": cfg.MAX_SL_ATR,
         "tp_r_mult": cfg.TP_R_MULT,
+        # Нижняя граница цели. Верхнюю (запас) фронт уже показывал до
+        # сохранения, а про эту узнавали по отказу — половина исправления.
+        "breakeven_at_r": cfg.BREAKEVEN_AT_R,
     })
 
 

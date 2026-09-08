@@ -620,7 +620,13 @@ function fmtT(iso){
   return new Date(iso).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
 }
 function scoreRing(s){
-  const cls = s>=70?'hi':s>=45?'md':'lo';
+  // Средний порог — ТОРГОВЫЙ, а не зашитые 45: он приходит с сервера и
+  // меняется ползунком. При TRADE_MIN_SCORE=70 сигнал со счётом 50 получал
+  // жёлтое кольцо «почти проходной», а подпись рядом честно писала «не
+  // торгуется» — два противоположных сигнала на одной карточке.
+  const mid = (typeof gTradeMinScore==='number' && gTradeMinScore>0)
+    ? gTradeMinScore : 45;
+  const cls = s>=Math.max(70, mid+15)?'hi':s>=mid?'md':'lo';
   return `<div class="score-ring ${cls}">${s}</div>`;
 }
 function mvSpan(v, suffix='%', decimals=1){
@@ -764,6 +770,28 @@ function setStatus(cls,txt){
 async function refreshStats(){
   try{
     const d=await fetch('/api/stats').then(r=>r.json());
+    // ОХРАНА ДОСТУПА СТОИТ ПЕРВОЙ. Находка №19 подняла её выше рендереров,
+    // но пять записей в карточки остались ниже, и при 401 экран заполнялся
+    // нулями: «Сканов 0» — это не «не знаю», а утверждение «бот не
+    // сканировал ни разу». Матожидание при этом не трогалось вовсе и
+    // оставалось прежним числом со своим цветом, то есть ровно тот
+    // показатель, по которому принимается решение о реальных деньгах,
+    // подавался как актуальный. Рядом жила строка «Скан #43» — два
+    // взаимоисключающих утверждения на одном экране.
+    if(d.error || d.trading_halted===undefined){
+      ['s-total','s-long','s-short','s-scans','s-wr'].forEach(id=>{
+        const el=$(id); if(el){ el.textContent='—';
+          if(id==='s-wr') el.className='stat-value'; }
+      });
+      const sub=$('s-wr-sub'); if(sub) sub.textContent='нет доступа';
+      const si=$('scan-info'); if(si) si.textContent='';
+      // 401 отдаёт валидный JSON — r.json() не бросает, catch{} не
+      // срабатывает, и прежняя ветка else ГАСИЛА баннер стоп-дня, попутно
+      // рисуя «🤖 Авто». «Не знаю» обязано отличаться от «стоп-дня нет».
+      $('s-trade').textContent='🔒 нет доступа';
+      gScanErr=true;   // индикатор не смеет гореть зелёным без данных
+      return;
+    }
     $('s-total').textContent=d.total_24h??'—';
     $('s-long').textContent=d.by_direction?.LONG??0;
     $('s-short').textContent=d.by_direction?.SHORT??0;
@@ -787,6 +815,8 @@ async function refreshStats(){
       $('s-wr').className='stat-value '+(
         (oc.ev_r==null || _dec<MIN_DECIDED_FOR_COLOR) ? ''
         : (oc.ev_r>0?'v-green':'v-red'));
+      WINRATE_FACT = (oc.winrate!=null) ? oc.winrate : null;
+      WINRATE_N = _dec;
       $('s-wr-sub').textContent=`${oc.win}W · ${oc.loss}L · ${oc.be??0}БУ · `
         +`${oc.winrate!=null?oc.winrate+'%':'—'} · ${oc.open} ждут`;
     }
@@ -795,23 +825,9 @@ async function refreshStats(){
     // scan_error, то есть молчал ровно тогда, когда нужен: сразу после
     // деплоя (скана ещё не было) и при падающих сканах — а это и есть
     // моменты, когда данные теряются.
-    // Охрана СТОИТ ПЕРЕД рендерерами, а не после.
-    //
-    // 401 отдаёт валидный JSON {"error":"unauthorized"} — r.json() не
-    // бросает. Рендереры, стоявшие выше, видели пустые поля и ГАСИЛИ
-    // предупреждения: «риск выше 3%» и «монитор не отрабатывал» исчезали
-    // с экрана ровно тогда, когда владелец терял доступ, — то есть когда
-    // проверить состояние он уже не мог.
-    if(d.error || d.trading_halted===undefined){
-
-      // 401 отдаёт валидный JSON {"error":"unauthorized"} — r.json() не
-      // бросает, catch{} не срабатывает, и прежняя ветка else ГАСИЛА
-      // баннер стоп-дня, попутно рисуя «🤖 Авто». То есть ровно та ложь,
-      // ради устранения которой поле trading_halted и вводилось.
-      // «Не знаю» обязано отличаться от «стоп-дня нет».
-      $('s-trade').textContent='🔒 нет доступа';
-      return;
-    }
+    // Охрана осталась ОДНА и стоит в самом начале функции — до первой
+    // записи в карточки. Здесь её больше нет намеренно: две охраны
+    // расходились, и нижняя пропускала вперёд пять записей.
     renderDbState(d);
     renderEnvTypos(d);
     renderMonitorState(d);
@@ -904,6 +920,13 @@ const MONITOR_STALE_MIN = 3;
 // Заполняется из /api/settings; до загрузки потолок неизвестен, и пугать
 // пользователя красным раньше времени нельзя.
 let TP_HEADROOM = null;
+// Нижняя граница цели: сервер отвергает цель, не превышающую взвод
+// безубытка. Верхняя половина этой проверки была видна до сохранения,
+// нижняя — нет, и о ней узнавали по отказу.
+let TP_BREAKEVEN = null;
+// Фактический винрейт и размер выборки — для подписи под ползунком цели.
+let WINRATE_FACT = null;
+let WINRATE_N = 0;
 
 // Безубыточный винрейт при геометрии стоп 1R / цель NR: 1/(1+N).
 // Показываем прямо под ползунком — иначе выбор цели выглядит бесплатным,
@@ -923,9 +946,25 @@ function onTpChange(v){
       +`уровнем, который её остановит`;
     return;
   }
+  if(TP_BREAKEVEN!==null && TP_BREAKEVEN>0 && n<=TP_BREAKEVEN){
+    el.style.color='var(--red)';
+    el.textContent=`Не будет принято: цель ${n.toFixed(1)}R не дальше взвода `
+      +`безубытка ${TP_BREAKEVEN.toFixed(1)}R — безубыток стал бы недостижим`;
+    return;
+  }
   el.style.color='';
+  // Фактический винрейт берётся из тех же данных, что и карточка, вместе с
+  // размером выборки. Здесь было зашито «около 32%», тогда как замеры дают
+  // 24.6% на 118 решённых: владелец видел разрыв до безубытка в 1.3 пункта
+  // вместо 8.7 — утверждение о прибыльности, не поддержанное данными, и
+  // ровно там, где принимается решение о геометрии.
+  let fact='';
+  if(WINRATE_FACT!=null){
+    fact = ` — у бота ${WINRATE_FACT.toFixed(1)}% на ${WINRATE_N} решённых`
+         + (WINRATE_N<30 ? ' (мало данных)' : '');
+  }
   el.textContent=`Цель в единицах риска. При ${n.toFixed(1)}R для выхода `
-    +`в ноль нужно ${be.toFixed(1)}% побед (сейчас у бота около 32%)`;
+    +`в ноль нужно ${be.toFixed(1)}% побед${fact}`;
 }
 
 // Риск выше жёсткого потолка 3%. Сокращение могло не пройти (отказ биржи,
@@ -947,8 +986,21 @@ function onTpChange(v){
 function dbBannerState(h, up, ephemeral){
   const known = h && h.age_hours!=null && up!=null;
   const younger = known && h.age_hours < up;
+  // Насколько история может отставать от процесса, оставаясь «просто
+  // молодой». Свежесмонтированный том даёт базу-ровесницу процесса;
+  // разрыв в часы означает, что файл базы исчез при живом процессе.
+  const gap = known ? (up - h.age_hours) : 0;
   if(ephemeral===true) return (younger && up>2) ? 'wiped' : 'ephemeral';
-  if(ephemeral===false) return younger ? 'fresh' : '';
+  if(ephemeral===false){
+    // is_ephemeral отвечает лишь на вопрос «лежит ли база внутри
+    // смонтированного тома» — она НЕ знает, цел ли файл. Пересозданный том,
+    // ручная чистка, опечатка в DB_PATH: история 0.5 ч при аптайме 300 ч
+    // объявлялась «просто новым томом», баннер снимался, и владелец видел,
+    // как вся 7-дневная статистика обнулилась без единой строки
+    // объяснения — ровно та ситуация, ради которой history_span и писалась.
+    if(younger && gap>2) return 'wiped';
+    return younger ? 'fresh' : '';
+  }
   // Признак неизвестен (старый бэкенд или сбой) — судим как раньше, по
   // возрасту: молчать о возможной потере хуже, чем предупредить лишний раз.
   return (younger && up>2) ? 'wiped' : '';
@@ -1087,13 +1139,21 @@ let _posRefreshInFlight=false;
 // Пометка «данные устарели» на панели позиций. Отдельная функция, а не
 // правка вёрстки на месте: панель обновляется из двух путей, и признак
 // обязан сниматься автоматически при первом же удачном ответе.
-function markPositionsStale(stale){
+function markPositionsStale(stale, reason){
   const p=$('pos-panel'); if(!p) return;
   p.style.opacity = stale ? '0.45' : '';
   const b=$('pos-stale');
   if(b){
+    // Причина названа верно. Ветка ловила и сетевой сбой, и 401, и писала
+    // одно: «ответ биржи не получен». По истории проекта недоступность
+    // биржи означает «стоп не досылается» (рецидив №1), поэтому владелец
+    // шёл проверять Bybit, прокси и гео-блок, тогда как дело было в
+    // доступе, и написано это было в другом баннере.
     b.textContent = stale
-      ? '⚠ данные позиций устарели — ответ биржи не получен' : '';
+      ? (reason==='auth'
+         ? '⚠ нет доступа — данные позиций не обновляются (нужен токен)'
+         : '⚠ данные позиций устарели — ответ биржи не получен')
+      : '';
     b.style.display = stale ? '' : 'none';
   }
   document.querySelectorAll('[id^="cbtn-"]').forEach(el=>{ el.disabled = !!stale; });
@@ -1114,7 +1174,7 @@ async function refreshPositions(){
       // выдавать старые числа за живые нельзя: PnL и стоп минутной
       // давности набраны тем же шрифтом, что и настоящие, а кнопка
       // «Закрыть» остаётся активной. Помечаем панель устаревшей.
-      markPositionsStale(true);
+      markPositionsStale(true, d.error==='unauthorized' ? 'auth' : 'exchange');
       return;
     }
     markPositionsStale(false);
@@ -1278,6 +1338,7 @@ async function openSettings(){
     // Потолок ставится ДО onTpChange, иначе первая отрисовка не знает о нём.
     TP_HEADROOM=(typeof d.min_trade_headroom_r==='number')
       ? d.min_trade_headroom_r : null;
+    TP_BREAKEVEN=(typeof d.breakeven_at_r==='number') ? d.breakeven_at_r : null;
     if(tp){ tp.value=d.tp_r_mult??2.0; onTpChange(tp.value); }
   }catch(e){
     $('save-msg').style.color='var(--red)';
@@ -1336,7 +1397,14 @@ async function saveSettings(){
         setTimeout(()=>{ $('save-msg').textContent=''; closeModal('settings-modal'); },1200);
       }
     } else {
-      const det=d.rejected?Object.entries(d.rejected).map(([k,v])=>`${k} — ${v}`).join('; ')
+      // Имена полей API («tp_r_mult») в интерфейсе называются иначе
+      // («Тейк-профит»), и сопоставление приходилось делать самому.
+      const FIELD_RU={auto_trade:'Автоторговля', min_score:'Порог показа',
+        trade_min_score:'Порог торговли', risk_per_trade:'Риск на сделку',
+        max_positions:'Позиций одновременно', leverage:'Плечо',
+        max_sl_atr:'Ширина стопа', tp_r_mult:'Тейк-профит'};
+      const det=d.rejected?Object.entries(d.rejected)
+                            .map(([k,v])=>`${FIELD_RU[k]||k} — ${v}`).join('; ')
                           :(d.error||('HTTP '+r.status));
       $('save-msg').textContent='❌ '+det;
       $('save-msg').style.color='var(--red)';
@@ -1602,7 +1670,12 @@ async function pollOnce(){
     if(wsOk) return;  // WS реконнектнулся, пока fetch'и были в полёте
     const rows=sgr.signals||[];
     if(rows.length) loadHistory(rows);
-    if(!gScanErr) setStatus('ok','HTTP режим');
+    // gScanErr обновляется только внутри ветки с данными, поэтому при 401
+    // он оставался false и точка горела ЗЕЛЁНЫМ «HTTP режим» рядом с
+    // красным баннером «нужен токен». Зелёный индикатор — самое сильное
+    // утверждение на экране; без данных он не имеет права гореть.
+    if(gScanErr) setStatus('err','нет данных');
+    else setStatus('ok','HTTP режим');
     await refreshBalance(); await refreshPositions();
   }catch{ setStatus('','Ошибка'); }
 }

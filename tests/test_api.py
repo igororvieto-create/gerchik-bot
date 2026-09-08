@@ -715,6 +715,10 @@ def test_db_banner_does_not_cry_wipe_when_a_volume_is_attached():
     cases = [
         # том подключён, история моложе процесса — НЕ потеря
         ({"age_hours": 3.0}, 3.1, False, "fresh"),
+        # том подключён, но история 0.5 ч при аптайме 300 ч: файл базы
+        # исчез при живом процессе. is_ephemeral отвечает лишь на вопрос
+        # «лежит ли база внутри тома», цела ли она — она не знает.
+        ({"age_hours": 0.5}, 300.0, False, "wiped"),
         # том подключён, история старше — сказать нечего
         ({"age_hours": 40.0}, 3.0, False, ""),
         # тома нет, история моложе и процесс живёт давно — реальная потеря
@@ -772,3 +776,43 @@ def test_target_clamp_runs_before_the_bounds_derived_from_it():
         assert got_hr >= got_tp, (
             f"запас {got_hr} меньше цели {got_tp} — цель лежала бы за "
             f"уровнем, который её остановит")
+
+
+async def test_lower_bound_of_the_target_is_visible_before_saving(with_token):
+    """Сервер отвергает цель по ДВУМ встречным проверкам: дальше запаса и
+    не дальше взвода безубытка. Верхняя была видна на дашборде до
+    сохранения, нижняя — нет, и о ней узнавали по отказу. Исправление было
+    сделано наполовину."""
+    import os
+    import re
+    resp = await R.get_settings(FakeRequest(with_token))
+    assert "breakeven_at_r" in _body(resp), \
+        "сервер не отдаёт границу безубытка — показать её нечем"
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    assert "d.breakeven_at_r" in html, "дашборд не читает границу безубытка"
+    assert "TP_BREAKEVEN" in html and "n<=TP_BREAKEVEN" in html, \
+        "сравнение цели с безубытком пропало — нижняя граница снова невидима"
+
+
+def test_slider_hint_does_not_state_a_winrate_from_thin_air():
+    """Под ползунком цели было зашито «сейчас у бота около 32%», тогда как
+    замеры дают 24.6% на 118 решённых: владелец видел разрыв до безубытка
+    в 1.3 пункта вместо 8.7. Это утверждение о прибыльности, не
+    поддержанное данными, и ровно там, где выбирается геометрия."""
+    import os
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    # Комментарии отбрасываем: они объясняют, почему числа тут быть не
+    # должно, и грубый поиск ловил бы само объяснение.
+    code = "\n".join(l for l in html.splitlines()
+                     if not l.lstrip().startswith("//"))
+    assert not re.search(r"у бота (около )?\d", code), \
+        "винрейт снова назван числом из воздуха"
+    assert "WINRATE_FACT" in html, "винрейт не берётся из данных"
+    assert "мало данных" in html, \
+        "размер выборки не назван — процент без него утверждает больше, чем знает"

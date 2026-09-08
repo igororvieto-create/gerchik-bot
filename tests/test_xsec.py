@@ -298,3 +298,28 @@ def test_universe_spec_matches_the_frozen_one():
     assert uni.HOLD_DAYS == base.HOLD_DAYS == 7
     assert uni.TOP_FRACTION == base.TOP_FRACTION == 0.20
     assert uni.verdict is base.verdict, "планка подменена"
+
+
+def test_price_is_none_when_the_series_stopped():
+    """Символ, переставший торговаться, обязан выпадать из недели, а не
+    давать доходность 0.0.
+
+    Без проверки свежести _price_at возвращала последнюю известную цену
+    любой давности: застывшая котировка, делённая сама на себя, = ровно
+    ноль. В шортовой ноге это подарок — делистятся преимущественно
+    слабейшие имена, и замер V получал смещение в оптимистичную сторону.
+    Поправка уже была в xsec_universe (замер V-бис), здесь её не было."""
+    from tools.xsec import _price_at, _DAY_MS
+    k4 = [{"ts": 0, "close": 10.0}, {"ts": 4 * 3600 * 1000, "close": 11.0}]
+    last_close_ms = 4 * 3600 * 1000 + 4 * 3600 * 1000
+
+    # свежая цена — отдаём
+    assert _price_at(k4, last_close_ms) == 11.0
+    assert _price_at(k4, last_close_ms + 12 * 3600 * 1000) == 11.0
+
+    # ряд оборвался больше суток назад — цены нет
+    assert _price_at(k4, last_close_ms + 3 * _DAY_MS) is None
+
+    # и как следствие неделя не засчитывает такую ногу нулём
+    from tools.xsec import _return_over
+    assert _return_over(k4, 0, last_close_ms + 3 * _DAY_MS) is None

@@ -539,7 +539,12 @@ def test_position_age_limit_cannot_be_shorter_than_the_judging_window():
     import sys as _sys
     code = "import json; from core.config import cfg; print(json.dumps(cfg.MAX_POSITION_AGE_HOURS))"
     root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-    for given, expect_at_least in (("1", 4), ("2", 4), ("48", 48)):
+    # Граница — ОКНО ОЦЕНКИ (48 ч), а не число 4. Прежняя версия требовала
+    # >= 4, то есть мутация 4 → 1 её не роняла: тест узаконивал ровно тот
+    # дефект, от которого должен был защищать. Дробное значение теперь тоже
+    # проверяется: "0.5" усекалось в ноль и МОЛЧА выключало правило целиком.
+    for given, expect_at_least in (("1", 48), ("2", 48), ("6", 48),
+                                   ("0.5", 48), ("48", 48), ("100", 100)):
         env = {**_os.environ, "MAX_POSITION_AGE_HOURS": given}
         out = subprocess.run([_sys.executable, "-c", code], env=env,
                              capture_output=True, text=True, cwd=root)
@@ -732,3 +737,38 @@ def test_db_banner_does_not_cry_wipe_when_a_volume_is_attached():
         assert have == want, (
             f"история {h['age_hours']} ч, аптайм {up} ч, эфемерная={eph}: "
             f"ожидалось {want!r}, получено {have!r}")
+
+
+def test_target_clamp_runs_before_the_bounds_derived_from_it():
+    """Порядок клампов: цель зажимается ПЕРВОЙ.
+
+    По ней зажимаются безубыток (сверху) и требуемый запас (снизу). Пока
+    цель стояла ПОСЛЕ них, границы считались по необрезанному значению:
+    TP_R_MULT=20 BREAKEVEN_AT_R=10 давало цель 5.0 и безубыток 10.0 — то
+    есть безубыток ПОЗЖЕ цели, ровно тот дефект, ради которого граница к
+    цели и привязана, и без единой строки в логе.
+
+    Через subprocess: importlib.reload(cfg) протекает в соседние тесты
+    (0-Б п.7)."""
+    import json as _j
+    import os as _os
+    import subprocess
+    import sys as _sys
+    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    code = ("import json;from core.config import cfg;"
+            "print(json.dumps([cfg.TP_R_MULT, cfg.BREAKEVEN_AT_R,"
+            " cfg.MIN_TRADE_HEADROOM_R]))")
+    for tp, be in (("20", "10"), ("0.5", "0.9"), ("3", "1.0")):
+        env = {**_os.environ, "TP_R_MULT": tp, "BREAKEVEN_AT_R": be,
+               "MIN_TRADE_HEADROOM_R": "2.0"}
+        out = subprocess.run([_sys.executable, "-c", code], env=env,
+                             capture_output=True, text=True, cwd=root)
+        assert out.returncode == 0, out.stderr
+        got_tp, got_be, got_hr = _j.loads(out.stdout.strip().splitlines()[-1])
+        assert 1.0 <= got_tp <= 5.0, f"цель {got_tp} вне диапазона"
+        assert got_be < got_tp, (
+            f"TP_R_MULT={tp} BREAKEVEN_AT_R={be}: безубыток {got_be} не "
+            f"раньше цели {got_tp} — механизм недостижим")
+        assert got_hr >= got_tp, (
+            f"запас {got_hr} меньше цели {got_tp} — цель лежала бы за "
+            f"уровнем, который её остановит")

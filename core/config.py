@@ -301,22 +301,57 @@ cfg.MIN_LISTING_AGE_DAYS = int(_clamp(cfg.MIN_LISTING_AGE_DAYS, 1, 365,
                                       "MIN_LISTING_AGE_DAYS"))
 cfg.MAX_LAST_CANDLE_ATR  = _clamp(cfg.MAX_LAST_CANDLE_ATR, 1.0, 10.0,
                                   "MAX_LAST_CANDLE_ATR")
-# 0 — осознанное отключение; иначе не короче окна оценки, иначе бот закрывал
-# бы сделки раньше, чем замер успевает вынести по ним вердикт.
+# 0 — осознанное отключение; иначе НЕ КОРОЧЕ ОКНА ОЦЕНКИ: замер судит исход
+# в окне 48 часов, и сделка, закрытая раньше, получает вердикт, которого
+# живая позиция не увидела, — это ровно находка №30 (бот исполняет не ту
+# спецификацию, которую измеряют), только через переменную окружения.
+#
+# Здесь стояло 4, хотя и комментарий, и docs/FINDINGS.md обещали окно
+# оценки; собственный тест это узаконивал, требуя >= 4, то есть мутация
+# 4 → 1 его не роняла. Граница берётся ИЗ оценщика, а не переписывается
+# числом: разъехаться они тогда не смогут.
+#
+# Дробное значение усекается _env_int в ноль ("0.5" → 0), а ноль означает
+# «правило выключено» — противоположность намерению владельца, и молча.
+# Тот же капкан уже описан у SCAN_INTERVAL_MIN.
+#
+# Явный "0" при этом ОСТАЁТСЯ осознанным отключением: различаем по тому,
+# было ли исходное число ненулевым. Иначе документированный способ
+# выключить правило перестал бы работать.
+_mpa_raw = (os.getenv("MAX_POSITION_AGE_HOURS") or "").strip()
+if _mpa_raw and not cfg.MAX_POSITION_AGE_HOURS:
+    try:
+        _mpa_f = float(_mpa_raw)
+    except ValueError:
+        _mpa_f = 0.0
+    if _mpa_f != 0.0:
+        from strategy.evaluator import _MAX_AGE_HOURS as _JUDGE_H
+        _log.error(
+            f"MAX_POSITION_AGE_HOURS={_mpa_raw} усечён до нуля, а ноль "
+            f"означает «правило выхода по времени выключено» — "
+            f"противоположность намерению. Ставлю окно оценки: {_JUDGE_H} ч. "
+            f"Отключить правило осознанно можно значением 0.")
+        cfg.MAX_POSITION_AGE_HOURS = _JUDGE_H
 if cfg.MAX_POSITION_AGE_HOURS:
+    from strategy.evaluator import _MAX_AGE_HOURS as _JUDGE_WINDOW_H
     cfg.MAX_POSITION_AGE_HOURS = int(
-        _clamp(cfg.MAX_POSITION_AGE_HOURS, 4, 720, "MAX_POSITION_AGE_HOURS"))
+        _clamp(cfg.MAX_POSITION_AGE_HOURS, _JUDGE_WINDOW_H, 720,
+               "MAX_POSITION_AGE_HOURS"))
 cfg.MIN_RR               = _clamp(cfg.MIN_RR, 1.0, 10.0, "MIN_RR")
 cfg.MAX_SL_ATR           = _clamp(cfg.MAX_SL_ATR, 1.0, 10.0, "MAX_SL_ATR")
 
-# Безубыток должен наступать РАНЬШЕ цели, иначе механизм недостижим
+# ЦЕЛЬ ЗАЖИМАЕТСЯ ПЕРВОЙ. По ней зажимаются два соседних параметра, и
+# пока она стояла ПОСЛЕ них, границы считались по необрезанному значению:
+# TP_R_MULT=20 BREAKEVEN_AT_R=10 давало цель 5.0 и безубыток 10.0 — то
+# есть ровно тот дефект, ради которого граница и привязана к цели, и без
+# единой строки в логе.
+cfg.TP_R_MULT = _clamp(cfg.TP_R_MULT, 1.0, 5.0, "TP_R_MULT")
 # Безубыток обязан наступать РАНЬШЕ цели, иначе механизм недостижим.
 # Верхняя граница привязана к цели, а не к числу 1.9: при цели 1.5R старый
 # потолок пропускал взвод ПОСЛЕ цели.
 cfg.BREAKEVEN_AT_R    = _clamp(cfg.BREAKEVEN_AT_R, 0.0,
                                max(0.0, cfg.TP_R_MULT - 0.1), "BREAKEVEN_AT_R")
 cfg.BREAKEVEN_FEE_PCT = _clamp(cfg.BREAKEVEN_FEE_PCT, 0.0, 1.0, "BREAKEVEN_FEE_PCT")
-cfg.TP_R_MULT = _clamp(cfg.TP_R_MULT, 1.0, 5.0, "TP_R_MULT")
 # Запас до встречного уровня обязан быть НЕ МЕНЬШЕ цели: иначе цель лежит
 # ЗА уровнем, который её остановит, и сделка структурно не может выиграть.
 cfg.MIN_TRADE_HEADROOM_R = _clamp(cfg.MIN_TRADE_HEADROOM_R,

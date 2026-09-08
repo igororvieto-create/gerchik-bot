@@ -50,6 +50,11 @@ _TP_RETRIES: dict[str, int] = {}
 # возвращал True по retCode, монитор считал стоп восстановленным и каждые
 # 30 секунд «чинил» его заново, а позиция жила без защиты (рецидив бага №1).
 _SL_RETRIES: dict[str, int] = {}
+# Стоп на бирже разошёлся с учтённым: логируем смену уровня, а не каждый тик.
+_SL_DIVERGED: dict[str, float] = {}
+# Сколько раз подряд не удалось получить шаг цены при переносе в безубыток.
+_BE_NO_TICK: dict[str, int] = {}
+
 _MAX_SL_RETRIES = 3
 # Символы, по которым уже кричали о превышении потолка риска: без этого
 # CRITICAL печатался бы каждые 30 секунд и утопил остальной лог.
@@ -1191,7 +1196,27 @@ async def monitor_positions(client: BybitClient) -> None:
                 # навредить сильнее самой проблемы, это решение владельца.
                 if (state.balance > 0 and pos.entry > 0 and pos.sl > 0
                         and pos.signal_type != "MANUAL"):
-                    real_risk = pos.qty * abs(pos.entry - pos.sl)
+                    # Стоп берётся С БИРЖИ, а не из памяти. Все проверки
+                    # подтверждали лишь ФАКТ стопа (exch_sl > 0), но не его
+                    # УРОВЕНЬ: владелец двигает стоп в приложении Bybit —
+                    # и потолок риска считался по цене, которой на бирже
+                    # нет. Маркер перестал врать о наличии стопа, но всё
+                    # ещё мог врать о его цене.
+                    #
+                    # Для расчёта в R (fav_r, безубыток) остаётся pos.sl:
+                    # единица риска задана в момент входа, и менять её на
+                    # лету значило бы переопределять шкалу посреди сделки.
+                    _live_sl = float(lp.get("stopLoss") or 0)
+                    _risk_sl = _live_sl if _live_sl > 0 else pos.sl
+                    if _live_sl > 0 and pos.sl > 0 and \
+                            abs(_live_sl - pos.sl) > pos.entry * 1e-4:
+                        if _SL_DIVERGED.get(sym) != round(_live_sl, 10):
+                            _SL_DIVERGED[sym] = round(_live_sl, 10)
+                            log.warning(
+                                f"{sym}: стоп на бирже {_live_sl} не совпадает "
+                                f"с учтённым {pos.sl} — риск считаю по "
+                                f"биржевому, он и сработает")
+                    real_risk = pos.qty * abs(pos.entry - _risk_sl)
                     risk_pct = real_risk / state.balance * 100
                     # Признак держим АКТУАЛЬНЫМ, а не только в момент
                     # обнаружения: сократили вручную — строка с экрана
@@ -1282,12 +1307,31 @@ async def monitor_positions(client: BybitClient) -> None:
                                 _tick = float(_pf.get("tickSize", "0") or 0)
                             except Exception:
                                 pass
-                            if _tick > 0:
-                                be = _quantize(be, _tick, "up" if pos.side == "Buy" else "down")
-                            # Переносим только ВПЕРЁД: если стоп уже выгоднее
-                            # безубытка, трогать его нельзя — это ухудшило бы
-                            # защиту уже прибыльной позиции.
-                            better = be > exch_sl if pos.side == "Buy" else be < exch_sl
+                            if _tick <= 0:
+                                # Без шага цены квантовать нечем: биржа либо
+                                # отвергнет цену, либо примет с округлением —
+                                # и тогда сверка (допуск схлопывается до
+                                # be*1e-6) не сойдётся, breakeven_done не
+                                # взведётся, а запрос будет уходить каждые 30
+                                # секунд бессрочно: счётчика попыток здесь, в
+                                # отличие от TP и SL, нет. Пропускаем тик,
+                                # позиция под своим исходным стопом.
+                                _BE_NO_TICK[sym] = _BE_NO_TICK.get(sym, 0) + 1
+                                if _BE_NO_TICK[sym] in (1, 10):
+                                    log.warning(
+                                        f"{sym}: шаг цены недоступен "
+                                        f"({_BE_NO_TICK[sym]}-я попытка) — "
+                                        f"перенос в безубыток отложен")
+                                better = False
+                            else:
+                                _BE_NO_TICK.pop(sym, None)
+                                be = _quantize(be, _tick,
+                                               "up" if pos.side == "Buy" else "down")
+                                # Переносим только ВПЕРЁД: если стоп уже
+                                # выгоднее безубытка, трогать его нельзя —
+                                # это ухудшило бы защиту прибыльной позиции.
+                                better = (be > exch_sl if pos.side == "Buy"
+                                          else be < exch_sl)
                             if better:
                                 try:
                                     if await client.set_trading_stop(sym, sl=be):

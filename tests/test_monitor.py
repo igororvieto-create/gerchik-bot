@@ -1533,3 +1533,102 @@ async def test_partial_entry_fill_updates_the_recorded_size(monkeypatch):
     assert pos.qty_opened == 0.5, (
         f"qty_opened={pos.qty_opened} вместо фактических 0.5 — ограничитель "
         f"учёта PnL втянет чужую запись по этому же символу")
+
+
+async def test_risk_cap_uses_the_stop_that_is_actually_on_the_exchange(monkeypatch):
+    """Все проверки подтверждали ФАКТ стопа (exch_sl > 0), но не его
+    УРОВЕНЬ. Владелец двигает стоп в приложении Bybit — и потолок риска 3%
+    считался по цене, которой на бирже нет. Маркер перестал врать о наличии
+    стопа, но всё ещё мог врать о его цене."""
+    from datetime import datetime, timedelta
+    import strategy.trader as tr
+    from core.state import state, Position
+    state.over_risk.clear()
+    state.positions.clear()
+    state.balance = 1000.0
+
+    # Учтённый стоп 99 (риск 1% баланса), биржевой отодвинут на 90 —
+    # реальный риск вдесятеро больше и обязан быть замечен.
+    pos = Position(symbol="DIVUSDT", side="Buy", entry=100.0, sl=99.0,
+                   tp1=0.0, tp2=110.0, tp3=0.0, qty=10.0, qty_opened=10.0,
+                   score=50, signal_type="VSA_CLIMAX", order_id="o1")
+    pos.ts = datetime.utcnow() - timedelta(hours=1)
+    state.positions["DIVUSDT"] = pos
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_positions(self):
+            return [{"symbol": "DIVUSDT", "side": "Buy", "size": "10",
+                     "avgPrice": "100.0", "stopLoss": "90.0",
+                     "takeProfit": "110.0", "unrealisedPnl": "0"}]
+
+        async def get_balance(self):
+            return 1000.0
+
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "DIVUSDT", "lastPrice": "100"}]
+
+    await tr.monitor_positions(C())
+    assert "DIVUSDT" in state.over_risk, (
+        "превышение потолка не замечено: риск считался по стопу 99, "
+        "которого на бирже нет, вместо биржевого 90")
+    assert state.over_risk["DIVUSDT"] == 10.0, state.over_risk
+
+
+async def test_breakeven_without_tick_size_does_not_spam_the_exchange(monkeypatch):
+    """При сбое get_instrument_info шаг цены неизвестен: цена не квантуется,
+    а допуск сверки схлопывается до be*1e-6. Биржа либо отвергает цену, либо
+    принимает с округлением — сверка не сходится, breakeven_done не
+    взводится, и запрос уходит каждые 30 секунд бессрочно: счётчика попыток
+    здесь, в отличие от TP и SL, нет. Позиция при этом под своим стопом,
+    поэтому правильное поведение — отложить, а не слать вслепую."""
+    from datetime import datetime, timedelta
+    import strategy.trader as tr
+    from core.config import cfg
+    from core.state import state, Position
+    monkeypatch.setattr(cfg, "BREAKEVEN_AT_R", 1.0)
+    monkeypatch.setattr(cfg, "MAX_POSITION_AGE_HOURS", 0)
+    tr._BE_NO_TICK.clear()
+    state.positions.clear()
+    state.balance = 1000.0
+
+    pos = Position(symbol="NOTICKUSDT", side="Buy", entry=100.0, sl=99.0,
+                   tp1=0.0, tp2=102.0, tp3=0.0, qty=1.0, qty_opened=1.0,
+                   score=50, signal_type="VSA_CLIMAX", order_id="o1")
+    pos.ts = datetime.utcnow() - timedelta(hours=1)
+    state.positions["NOTICKUSDT"] = pos
+
+    sent = []
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_positions(self):
+            # markPrice 101 = +2R при риске 1 -> безубыток взводится
+            return [{"symbol": "NOTICKUSDT", "side": "Buy", "size": "1",
+                     "avgPrice": "100.0", "markPrice": "101.0",
+                     "stopLoss": "99.0", "takeProfit": "102.0",
+                     "unrealisedPnl": "1"}]
+
+        async def get_instrument_info(self, symbol):
+            return {}          # сбой: шага цены нет
+
+        async def set_trading_stop(self, symbol, sl=None, tp=None):
+            sent.append((symbol, sl, tp))
+            return True        # ЛОЖНЫЙ УСПЕХ, как врала биржа в проде
+
+        async def get_balance(self):
+            return 1000.0
+
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "NOTICKUSDT", "lastPrice": "101"}]
+
+    await tr.monitor_positions(C())
+    assert not sent, (
+        f"неквантованная цена ушла на биржу: {sent} — запрос будет "
+        f"повторяться каждые 30 секунд бессрочно")
+    assert tr._BE_NO_TICK.get("NOTICKUSDT") == 1, tr._BE_NO_TICK
+    assert pos.breakeven_done is False

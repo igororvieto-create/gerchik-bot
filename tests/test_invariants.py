@@ -263,3 +263,54 @@ async def test_close_and_verify_reports_unknown_state():
     closed, remaining = await tr.close_and_verify(ex, "T", "Buy", 10)
     assert closed is False
     assert remaining == -1.0
+
+
+def test_judging_window_has_exactly_one_source():
+    """Окно оценки задано ОДИН раз.
+
+    Было три копии: strategy/evaluator._MAX_AGE_HOURS, core/db.
+    _JUDGE_WINDOW_HOURS и импорт в core/config. Копии расходятся молча:
+    подними окно у оценщика — чистка в db продолжит считать по прежнему
+    значению и начнёт удалять нерешённые строки раньше вердикта. Потеря
+    СМЕЩЁННАЯ: стопы разрешаются быстрее целей, значит исчезают
+    преимущественно будущие победы, и винрейт занижается (находка №24).
+    """
+    import core.config as c
+    import core.db as d
+    import strategy.evaluator as e
+    assert c.JUDGE_WINDOW_HOURS == e._MAX_AGE_HOURS == d._JUDGE_WINDOW_HOURS
+
+    # И это должна быть одна переменная, а не три совпавших числа:
+    # совпадение сегодня ничего не говорит о завтрашней правке.
+    import os
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for path, name in ((os.path.join(root, "strategy", "evaluator.py"),
+                        "_MAX_AGE_HOURS"),
+                       (os.path.join(root, "core", "db.py"),
+                        "_JUDGE_WINDOW_HOURS")):
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        assert not re.search(rf"^{name}\s*=\s*\d+", src, re.M), \
+            f"{name} снова задан числом — копия окна оценки вернулась"
+
+
+def test_evaluator_imports_standalone():
+    """`import strategy.evaluator` первым обязан работать.
+
+    Раньше config импортировал evaluator, а evaluator — config: цикл, и
+    любой новый скрипт, начинающий с оценщика, падал с невнятным
+    «partially initialized module». Проверяется отдельным процессом:
+    внутри общего прогона модули уже загружены и цикл не проявится.
+    """
+    import json as _j
+    import os
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = subprocess.run(
+        ["python3", "-c",
+         "import strategy.evaluator as e; import json;"
+         " print(json.dumps(e._MAX_AGE_HOURS))"],
+        capture_output=True, text=True, cwd=root, timeout=60)
+    assert out.returncode == 0, f"циклический импорт вернулся: {out.stderr}"
+    assert _j.loads(out.stdout.strip().splitlines()[-1]) == 48

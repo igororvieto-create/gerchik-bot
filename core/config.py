@@ -239,6 +239,21 @@ class Config:
     ABORT_ON_LEVERAGE_FAIL: bool  = _env_bool("ABORT_ON_LEVERAGE_FAIL", True)
 
 
+# ОКНО ОЦЕНКИ — единственный источник истины.
+#
+# Было задано в ТРЁХ местах: strategy/evaluator._MAX_AGE_HOURS,
+# core/db._JUDGE_WINDOW_HOURS и импортом сюда. Копии живут порознь: подними
+# окно у оценщика — чистка в db продолжит считать по 48 и начнёт удалять
+# нерешённые строки раньше, чем по ним вынесен вердикт. Потеря при этом
+# СМЕЩЁННАЯ: стопы разрешаются быстрее целей, значит исчезали бы
+# преимущественно будущие победы (та же механика, что в находке №24).
+#
+# Живёт в config, потому что это нижний слой: он не импортирует ничего
+# своего. Прежний импорт config -> evaluator делал цикл, и `import
+# strategy.evaluator` первым падал с невнятным ImportError.
+JUDGE_WINDOW_HOURS = 48
+
+
 def _clamp(value, lo, hi, name: str):
     """Жёсткое ограничение инвариантов проекта на уровне конфига.
     Раньше потолки (риск 1-3%, плечо ≤5x) проверялись ТОЛЬКО в /api/settings —
@@ -325,7 +340,7 @@ if _mpa_raw and not cfg.MAX_POSITION_AGE_HOURS:
     except ValueError:
         _mpa_f = 0.0
     if _mpa_f != 0.0:
-        from strategy.evaluator import _MAX_AGE_HOURS as _JUDGE_H
+        _JUDGE_H = JUDGE_WINDOW_HOURS
         _log.error(
             f"MAX_POSITION_AGE_HOURS={_mpa_raw} усечён до нуля, а ноль "
             f"означает «правило выхода по времени выключено» — "
@@ -333,7 +348,7 @@ if _mpa_raw and not cfg.MAX_POSITION_AGE_HOURS:
             f"Отключить правило осознанно можно значением 0.")
         cfg.MAX_POSITION_AGE_HOURS = _JUDGE_H
 if cfg.MAX_POSITION_AGE_HOURS:
-    from strategy.evaluator import _MAX_AGE_HOURS as _JUDGE_WINDOW_H
+    _JUDGE_WINDOW_H = JUDGE_WINDOW_HOURS
     cfg.MAX_POSITION_AGE_HOURS = int(
         _clamp(cfg.MAX_POSITION_AGE_HOURS, _JUDGE_WINDOW_H, 720,
                "MAX_POSITION_AGE_HOURS"))

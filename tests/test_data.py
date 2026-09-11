@@ -1546,3 +1546,95 @@ async def test_expectancy_per_taken_trade_is_reported_alongside(tmp_path,
     # На ВЗЯТУЮ: (2×2 − 2 + 6×(−0.5)) / 10 = −0.10R
     assert abs(st["ev_taken_r"] + 0.1) < 1e-9, st["ev_taken_r"]
     assert st["expired_n"] == 6
+
+
+async def test_market_drift_is_recorded_and_never_guessed_as_zero(tmp_path,
+                                                                 monkeypatch):
+    """Дрейф рынка записывается вместе с вердиктом, а НЕИЗМЕРЕННЫЙ дрейф
+    остаётся пустым, а не нулём.
+
+    Ноль — это утверждение «рынок стоял»: сигнал попал бы в корзину
+    боковика и исказил ровно тот срез, ради которого колонка заведена.
+    Отличить «не измерили» от «рынок стоял» обязана сама колонка."""
+    import core.db as d
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "t.db"))
+    await d.init_db()
+
+    from core.state import Signal
+    def mk(sym, direction):
+        return Signal(symbol=sym, signal_type="VSA_CLIMAX", direction=direction,
+                      score=55, price=100.0, oi_change=0.0, vol_ratio=0.0,
+                      funding=0.0, ob_bias="NEUTRAL", atr_pct=2.0, details="",
+                      entry=100.0, sl=98.0, tp1=101.0, tp2=104.0, tp3=106.0,
+                      rr=2.0, sl_pct=2.0)
+    await d.save_signal(mk("AAAUSDT", "LONG"))
+    await d.save_signal(mk("BBBUSDT", "SHORT"))
+
+    import aiosqlite
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        async with db.execute("SELECT id FROM signals ORDER BY id") as c:
+            ids = [r[0] for r in await c.fetchall()]
+
+    assert await d.set_signal_outcome(ids[0], "LOSS", 98.0, mkt_pct=-3.1)
+    assert await d.set_signal_outcome(ids[1], "WIN", 96.0)   # дрейф неизвестен
+
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        async with db.execute(
+                "SELECT id, mkt_pct FROM signals ORDER BY id") as c:
+            got = {r[0]: r[1] for r in await c.fetchall()}
+    assert got[ids[0]] == -3.1, "дрейф не записан"
+    assert got[ids[1]] is None, \
+        "неизмеренный дрейф подменён нулём — сигнал уедет в корзину боковика"
+
+    # Повторный вердикт БЕЗ дрейфа не смеет затирать уже измеренный.
+    assert await d.set_signal_outcome(ids[0], "EXPIRED", 99.0)
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        async with db.execute(
+                "SELECT mkt_pct FROM signals WHERE id=?", (ids[0],)) as c:
+            row = await c.fetchone()
+    assert row[0] == -3.1, "повторная запись затёрла измеренный дрейф"
+
+
+async def test_direction_by_market_slice_separates_selection_from_beta(
+        tmp_path, monkeypatch):
+    """Срез «направление × рынок» существует ради одного вопроса: 1 победа
+    из 27 в лонг — это плохой отбор или падавший рынок?
+
+    Раздельные срезы на него не отвечают: «шорт даёт +0.3R» и «рынок падал»
+    — два наблюдения, из которых вывод не собирается. Нужна пара."""
+    import core.db as d
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "t2.db"))
+    await d.init_db()
+
+    from core.state import Signal
+    import aiosqlite
+
+    async def add(sym, direction, outcome, mkt):
+        await d.save_signal(Signal(
+            symbol=sym, signal_type="VSA_CLIMAX", direction=direction,
+            score=55, price=100.0, oi_change=0.0, vol_ratio=0.0, funding=0.0,
+            ob_bias="NEUTRAL", atr_pct=2.0, details="", entry=100.0, sl=98.0,
+            tp1=101.0, tp2=104.0, tp3=106.0, rr=2.0, sl_pct=2.0))
+        async with aiosqlite.connect(d.DB_PATH) as db:
+            async with db.execute("SELECT MAX(id) FROM signals") as c:
+                sid = (await c.fetchone())[0]
+        await d.set_signal_outcome(sid, outcome, 100.0, mkt_pct=mkt)
+
+    # Падающий рынок: лонги гибнут, шорты выигрывают — это БЕТА.
+    for i in range(4):
+        await add(f"L{i}USDT", "LONG", "LOSS", -3.0)
+        await add(f"S{i}USDT", "SHORT", "WIN", -3.0)
+    # Боковик: тут видно уже качество отбора, а не направление рынка.
+    await add("MUSDT", "SHORT", "LOSS", 0.2)
+    await add("NUSDT", "LONG", "WIN", -0.1)
+
+    br = await d.get_outcome_breakdown(days=30)
+    slice_ = br["by_dir_market"]
+    assert "лонг · рынок падал" in slice_, slice_.keys()
+    assert slice_["лонг · рынок падал"]["loss"] == 4
+    assert slice_["шорт · рынок падал"]["win"] == 4
+    assert slice_["шорт · рынок боковик"]["loss"] == 1
+    assert slice_["лонг · рынок боковик"]["win"] == 1
+    # Пары обязаны идти рядом по режиму, иначе их снова читают порознь.
+    order = br["_order"]["by_dir_market"]
+    assert order.index("шорт · рынок падал") - order.index("лонг · рынок падал") == 1

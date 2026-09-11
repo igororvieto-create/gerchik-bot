@@ -214,7 +214,16 @@ async def init_db() -> None:
                     # каждый деплой обнулял его: та же свеча сигналила заново.
                     # Три деплоя внутри одной свечи — четыре строки на один
                     # сетап, и все четыре считались независимыми исходами.
-                    "candle_ts INTEGER"]:
+                    "candle_ts INTEGER",
+                    # Дрейф РЫНКА за окно оценки сигнала, в процентах (BTC как
+                    # прокси). Без него самая яркая закономерность в данных
+                    # неинтерпретируема: 1 победа из 27 в лонг против 22 из 48
+                    # в шорт объясняется и отбором, и падением рынка на 2.5% за
+                    # те же трое суток, а различить их имеющимися колонками
+                    # НЕЛЬЗЯ. Правило docs/REVIEW.md §0-А п.5: если гипотезу
+                    # не проверить существующими колонками — нужна
+                    # инструментовка, а не вывод.
+                    "mkt_pct REAL"]:
             try:
                 await db.execute(f"ALTER TABLE signals ADD COLUMN {col}")
             except Exception as e:
@@ -627,7 +636,8 @@ async def get_pending_signals(max_age_hours: int = 48) -> List[Dict]:
 
 
 async def set_signal_outcome(signal_id: int, outcome: str, price: float,
-                             mfe_r: float = 0.0) -> bool:
+                             mfe_r: float = 0.0,
+                             mkt_pct: Optional[float] = None) -> bool:
     """True — вердикт ДЕЙСТВИТЕЛЬНО записан.
 
     Возврат обязателен: оценщик считал `decided += 1` безусловно, и при
@@ -635,10 +645,16 @@ async def set_signal_outcome(signal_id: int, outcome: str, price: float,
     базе. Оператор принимает решение о реальных деньгах по этой цифре."""
     try:
         async with aiosqlite.connect(DB_PATH) as db:
+            # mkt_pct пишется ТОЛЬКО когда он известен: COALESCE сохраняет
+            # уже записанное значение, если вызов пришёл без него. Иначе
+            # повторный вердикт (EXPIRED поверх решённого) затирал бы
+            # измеренный дрейф нулём, и срез «направление × рынок» тихо
+            # вырождался бы в «рынок боковик» на всей истории.
             await db.execute(
-                "UPDATE signals SET outcome=?, outcome_price=?, outcome_at=?, mfe_r=? "
-                "WHERE id=?",
-                (outcome, price, datetime.utcnow().isoformat(), mfe_r, signal_id),
+                "UPDATE signals SET outcome=?, outcome_price=?, outcome_at=?, "
+                "mfe_r=?, mkt_pct=COALESCE(?, mkt_pct) WHERE id=?",
+                (outcome, price, datetime.utcnow().isoformat(), mfe_r,
+                 mkt_pct, signal_id),
             )
             await db.commit()
         return True
@@ -876,7 +892,8 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
     out: Dict = {"by_score": {}, "by_direction": {}, "by_type": {},
                  "by_sl_atr": {}, "by_headroom": {}, "by_flow": {},
-                 "by_ob": {}, "by_round": {}, "recent": []}
+                 "by_ob": {}, "by_round": {}, "by_dir_market": {},
+                 "recent": []}
     # Явный порядок корзин. Фронт сортировал ключи лексикографически, а '<'
     # (0x3C) и '>' (0x3E) больше цифр — крайние корзины уезжали в середину и
     # хвост, ось переставала быть монотонной по ширине стопа. Именно её
@@ -892,6 +909,12 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
         "by_headroom": _headroom_labels(),
         "by_ob":       ["стакан за", "стакан нейтр.", "стакан против"],
         "by_round":    ["круглое ниже", "на круглом", "круглое выше"],
+        # Пары идут вместе по режиму рынка: именно сравнение лонга с шортом
+        # ВНУТРИ одного режима отделяет отбор от беты. Разнесённые по
+        # алфавиту, они опять читались бы порознь.
+        "by_dir_market": ["лонг · рынок падал", "шорт · рынок падал",
+                          "лонг · рынок боковик", "шорт · рынок боковик",
+                          "лонг · рынок рос", "шорт · рынок рос"],
     }
 
     def _bucket(score: int) -> str:
@@ -998,13 +1021,35 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
                           sl_pct, atr_pct, headroom, funding, rr,
                           entry, sl, outcome_price,
                           flow_delta, flow_absorb, flow_span_min,
-                          ob_bias, round_pos
+                          ob_bias, round_pos, mkt_pct
                    FROM signals WHERE outcome IS NOT NULL AND ts >= ?
                      AND """ + _CUR_STRAT + """
                    ORDER BY ts DESC""",
                 (cutoff, *_strat_params()),
             ) as cur:
                 rows = await cur.fetchall()
+
+        def _mkt_bucket(direction: str, mkt_pct) -> Optional[str]:
+            """Направление сделки ВМЕСТЕ с тем, куда шёл рынок.
+
+            Раздельные срезы на этот вопрос не отвечают: «шорт даёт +0.3R»
+            и «рынок падал» — два наблюдения, из которых нельзя собрать
+            вывод. Нужна именно пара, иначе бета рынка читается как
+            качество отбора, а это ровно тот вывод, который разоряет на
+            первом развороте.
+
+            Порог ±1% за окно оценки: движение BTC меньше процента за двое
+            суток — это боковик, и сторона сделки в нём не предрешена.
+            """
+            if mkt_pct is None:
+                return None
+            if mkt_pct <= -1.0:
+                m = "рынок падал"
+            elif mkt_pct >= 1.0:
+                m = "рынок рос"
+            else:
+                m = "рынок боковик"
+            return f"{'лонг' if direction == 'LONG' else 'шорт'} · {m}"
 
         def _acc(d: Dict, key: str, outcome: str, sl_pct=None,
                  fund=None, rr=None, exp_r=None) -> None:
@@ -1075,10 +1120,13 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             rb = _round_bucket(r["round_pos"])
             if rb:
                 _acc(out["by_round"], rb, r["outcome"], _sl, _fd, _rr, _exr)
+            mb = _mkt_bucket(r["direction"], r["mkt_pct"])
+            if mb:
+                _acc(out["by_dir_market"], mb, r["outcome"], _sl, _fd, _rr, _exr)
 
         for d in (out["by_score"], out["by_direction"], out["by_type"],
                   out["by_sl_atr"], out["by_headroom"], out["by_flow"],
-                  out["by_ob"], out["by_round"]):
+                  out["by_ob"], out["by_round"], out["by_dir_market"]):
             for slot in d.values():
                 fee = (slot["_fee_sum"] / slot["_fee_n"]) if slot["_fee_n"] else None
                 fnd = (slot["_fund_sum"] / slot["_fund_n"]) if slot["_fund_n"] else None
@@ -1283,7 +1331,7 @@ _EVAL_REACH_HOURS = 144
 # Окно, внутри которого оценщик ещё может вынести вердикт. Сигнал моложе
 # этого срока удалять нельзя ни по какому потолку: исход будет потерян, и
 # потерян НЕ СЛУЧАЙНО.
-_JUDGE_WINDOW_HOURS = 48
+from core.config import JUDGE_WINDOW_HOURS as _JUDGE_WINDOW_HOURS
 
 
 # Цель замера III (docs/PREREGISTRATION.md): 130 решённых исходов с

@@ -9,16 +9,19 @@
 """
 import asyncio
 import logging
+from typing import Optional
 from datetime import datetime, timezone
 
 from core import db
-from core.config import cfg
+from core.config import cfg, JUDGE_WINDOW_HOURS
 from exchange.bybit import BybitClient
 
 log = logging.getLogger("evaluator")
 
 _EVALUATING = False
-_MAX_AGE_HOURS = 48
+# Имя сохранено: его импортируют tools/replay.py и тесты. Значение —
+# из config, единственного источника (см. JUDGE_WINDOW_HOURS там).
+_MAX_AGE_HOURS = JUDGE_WINDOW_HOURS
 
 
 def _mfe(direction: str, entry: float, sl: float, klines: list) -> float:
@@ -111,6 +114,44 @@ def _judge(direction: str, sl: float, tp2: float, klines: list,
     return None
 
 
+# Прокси рынка. BTC, а не индекс альтов: он доступен одним запросом, а для
+# вопроса «падал рынок или рос» разница между ним и корзиной альтов меньше,
+# чем ширина корзин (±1%).
+_MKT_SYMBOL = "BTCUSDT"
+
+
+async def _market_klines(client: BybitClient) -> list:
+    """Часовые свечи рынка — ОДИН запрос на прогон оценщика, а не на сигнал.
+
+    Часовые, а не 15-минутные: лимит биржи 200 свечей, и 15-минутные
+    покрыли бы лишь 50 часов, тогда как оценщик судит сигналы возрастом до
+    144 часов. Для измерения дрейфа за двое суток часа детализации хватает
+    с запасом.
+    """
+    try:
+        return await client.get_klines(_MKT_SYMBOL, interval="60", limit=200) or []
+    except Exception as e:
+        log.warning(f"дрейф рынка не измерен ({e}) — срез «направление × "
+                    f"рынок» для этих сигналов останется пустым")
+        return []
+
+
+def _market_drift(mkt: list, sig_ms: float, end_ms: float) -> Optional[float]:
+    """Изменение рынка за окно сигнала, в процентах.
+
+    None означает «не измерено» и НЕ равно нулю: ноль — это утверждение
+    «рынок стоял», из-за которого сигнал попал бы в корзину боковика и
+    исказил именно тот срез, ради которого всё делается.
+    """
+    win = [k for k in mkt if sig_ms <= k["ts"] <= end_ms]
+    if len(win) < 2:
+        return None
+    a, b = win[0]["close"], win[-1]["close"]
+    if not a or a <= 0:
+        return None
+    return (b / a - 1.0) * 100.0
+
+
 async def evaluate_signal_outcomes(client: BybitClient) -> None:
     global _EVALUATING
     if _EVALUATING:
@@ -121,6 +162,7 @@ async def evaluate_signal_outcomes(client: BybitClient) -> None:
         if not pending:
             return
         now = datetime.now(timezone.utc)
+        mkt = await _market_klines(client)
         decided = 0
         failed = 0
         for row in pending:
@@ -193,8 +235,9 @@ async def evaluate_signal_outcomes(client: BybitClient) -> None:
                     # decided растёт ТОЛЬКО при подтверждённой записи: иначе
                     # лог рапортует о вердиктах, которых в базе нет, а
                     # решение о деньгах принимается по этой цифре.
-                    if await db.set_signal_outcome(row["id"], verdict[0], verdict[1],
-                                                   mfe_r=verdict[2]):
+                    if await db.set_signal_outcome(
+                            row["id"], verdict[0], verdict[1], mfe_r=verdict[2],
+                            mkt_pct=_market_drift(mkt, sig_ms, end_ms)):
                         decided += 1
                     else:
                         failed += 1

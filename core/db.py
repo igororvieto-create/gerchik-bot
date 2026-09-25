@@ -1360,9 +1360,14 @@ async def flow_progress() -> Dict:
     from core.config import cfg
     # Явная аннотация: без неё mypy выводит Dict[str, int | None] по
     # значению None у usable_share и запрещает положить туда долю.
+    # closed: замер III завершён и вердикт вынесен (docs/FLOW.md). Признак
+    # обязателен, иначе счётчик «N/130» навсегда застывает на достигнутом
+    # значении и читается как ОСТАНОВИВШИЙСЯ замер, а не как закрытый.
+    # Разница существенная: первое — повод чинить, второе — итог.
     out: Dict[str, Any] = {"usable": 0, "too_short": 0, "no_tape": 0,
                            "decided_total": 0, "target": FLOW_TARGET_N,
-                           "usable_share": None}
+                           "usable_share": None,
+                           "closed": cfg.TRADE_FLOW_LIMIT <= 0}
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             # Считаем ТОЛЬКО торгуемые сигналы. Решение, ради которого идёт

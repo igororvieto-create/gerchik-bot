@@ -1066,6 +1066,15 @@ function renderFlowProgress(d){
   const p=d && d.flow_progress;
   if(!p || !p.target){ el.style.display='none'; return; }
   el.style.display='';
+  // Закрытый замер и остановившийся выглядят на счётчике ОДИНАКОВО: число
+  // перестаёт расти. Разница существенная — первое итог, второе повод
+  // чинить, — поэтому закрытый подписывается явно, а предупреждение о
+  // смещении для него гасится: смещать больше нечего.
+  if(p.closed){
+    el.textContent=`замер потока закрыт: фактор не прошёл планку (${p.usable} исх.)`;
+    clearAlert('flow');
+    return;
+  }
   const pct=Math.min(100, Math.round(p.usable/p.target*100));
   el.textContent=`замер потока: ${p.usable}/${p.target} (${pct}%)`;
   // Опасность не в ОТСУТСТВИИ данных, а в их СМЕЩЕНИИ, и прежний порог

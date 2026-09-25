@@ -1070,15 +1070,40 @@ async def test_flow_progress_reports_the_usable_share(tmp_path, monkeypatch):
         "доля пригодных не считается — смещение будет невидимо"
 
 
-def test_tape_depth_is_deep_enough_to_avoid_selection():
-    """Лимит ленты — не вкусовой параметр. При 100 лента покрывала минуту
-    лишь у 46% сигналов, и отбраковка была систематической: сто сделок
-    покрывают тем меньше времени, чем сильнее всплеск, то есть ровно на
-    климаксе, который стратегия и ловит."""
+def test_tape_is_either_off_or_deep_enough_to_avoid_selection():
+    """Мелкая лента — это скрытый ОТБОР, а не просто меньше данных.
+
+    При лимите 100 лента покрывала минуту лишь у 46% сигналов, и отбраковка
+    шла не случайно: сто сделок покрывают тем меньше времени, чем сильнее
+    всплеск, то есть отбрасывается ровно климакс, который стратегия и
+    ловит. У отброшенных ATR 9.9% против 4.1%, score 46.8 против 35.8.
+
+    С закрытием замера III (docs/FLOW.md) сбор выключен: TRADE_FLOW_LIMIT=0,
+    лента не запрашивается вовсе. Инвариант поэтому стал условным — ноль
+    допустим, мелкая глубина НЕТ. Тот, кто вернёт сбор под новую гипотезу,
+    обязан вернуть и глубину, иначе получит смещённую выборку молча."""
     from core.config import cfg
-    assert cfg.TRADE_FLOW_LIMIT >= 500, (
-        f"TRADE_FLOW_LIMIT={cfg.TRADE_FLOW_LIMIT} — при такой глубине "
-        f"отбраковка по длине ленты снова станет отбором по силе движения")
+    assert cfg.TRADE_FLOW_LIMIT == 0 or cfg.TRADE_FLOW_LIMIT >= 500, (
+        f"TRADE_FLOW_LIMIT={cfg.TRADE_FLOW_LIMIT}: сбор включён, но глубина "
+        f"мала — отбраковка по длине ленты снова станет отбором по силе "
+        f"движения")
+
+
+def test_closed_flow_measurement_is_labelled_not_just_frozen():
+    """Закрытый замер и остановившийся выглядят на счётчике одинаково —
+    число перестаёт расти. Разница существенная: первое итог, второе повод
+    чинить. Признак closed обязан приходить с сервера и читаться фронтом."""
+    import os
+    import re
+    from core.config import cfg
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "core", "db.py"), encoding="utf-8") as f:
+        assert "cfg.TRADE_FLOW_LIMIT <= 0" in f.read(),             "признак закрытия замера не вычисляется"
+    with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    assert "p.closed" in html, "дашборд не читает признак закрытия"
+    i = html.index("p.closed")
+    assert "закрыт" in html[i:i + 400],         "признак читается, но подписи «закрыт» рядом нет"
 
 
 # ── База обязана доказать, что она пишет ───────────────────────────────────

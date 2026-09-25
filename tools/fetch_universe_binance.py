@@ -164,8 +164,13 @@ async def daily_series(session, sym: str, months: List[str]) -> List[Dict]:
                 # Оборот в котируемой валюте — 8-я колонка у фьючерсных
                 # дампов. Ранжировать ликвидность по объёму в БАЗОВОЙ монете
                 # нельзя: он не сравним между монетами разной цены.
-                seen[ts] = {"ts": ts, "close": float(r[4]),
-                            "quote": float(r[7])}
+                # high/low обязательны: правило пробоя канала (замер VIII-B)
+                # записано как каноническое правило «черепах», а его канал
+                # строится по МАКСИМУМАМ и МИНИМУМАМ дня. Канал по закрытиям —
+                # другое правило, и подставить его молча значило бы проверить
+                # не ту гипотезу, что записана.
+                seen[ts] = {"ts": ts, "high": float(r[2]), "low": float(r[3]),
+                            "close": float(r[4]), "quote": float(r[7])}
             except (ValueError, IndexError):
                 continue
     return [seen[k] for k in sorted(seen)]
@@ -187,6 +192,22 @@ async def funding_series(session, sym: str, months: List[str]) -> List[Dict]:
             except (ValueError, IndexError):
                 continue
     return [seen[k] for k in sorted(seen)]
+
+
+def _has_range(path: str) -> bool:
+    """Файл скачан версией загрузчика с high/low.
+
+    Файлы первой версии их не содержат. Пропускать их как «готовые» значило
+    бы оставить часть вселенной без канала: пробой считался бы только по
+    монетам, скачанным позже, — отбор по алфавиту.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        daily = d.get("daily") or []
+        return bool(daily) and "high" in daily[0] and "low" in daily[0]
+    except (OSError, ValueError):
+        return False
 
 
 async def main() -> int:
@@ -214,7 +235,7 @@ async def main() -> int:
         kept: List[str] = []
         for i, sym in enumerate(syms, 1):
             path = os.path.join(args.out, f"{sym}.json")
-            if os.path.isfile(path):
+            if os.path.isfile(path) and _has_range(path):
                 kept.append(sym)
                 continue
             k = await daily_series(s, sym, months)

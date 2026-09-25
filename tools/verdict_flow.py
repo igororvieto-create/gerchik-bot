@@ -7,6 +7,7 @@
     python3 -m tools.verdict_flow sig.json
 """
 import json, math, sys, os
+from typing import Dict, List
 from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.db import ROUND_TRIP_FEE_PCT, funding_r
@@ -33,7 +34,7 @@ def side(r):
     agrees = (dr == "LONG" and d >= 0.2) or (dr == "SHORT" and d <= -0.2)
     return "поток ЗА" if agrees else "поток ПРОТИВ"
 
-groups = {}
+groups: Dict[str, List[Dict]] = {}
 for r in pop:
     groups.setdefault(side(r), []).append(r)
 
@@ -86,6 +87,9 @@ for k in ("поток ЗА", "поток ПРОТИВ", "нейтрально"):
 
 # Контроль: те же сделки без разделения
 ctrl = stats(pop)
+if ctrl is None:
+    print("популяция пуста — сравнивать нечего")
+    raise SystemExit(1)
 print(f"\n{'КОНТРОЛЬ':14s} {ctrl['w']:3d}W/{ctrl['l']:3d}L  "
       f"винрейт {ctrl['winrate']:5.1f}%  ev_r {ctrl['ev_r']:+.3f}")
 
@@ -94,13 +98,13 @@ print("\n" + "-" * 74)
 print("ПЛАНКА (docs/PREREGISTRATION.md, замер III — не смягчается):")
 checks = []
 checks.append(("ev_r корзины «поток ЗА» > 0",
-               bool(a) and a["ev_r"] > 0,
+               a is not None and a["ev_r"] > 0,
                f"{a['ev_r']:+.3f}" if a else "нет данных"))
 checks.append(("нижняя граница Уилсона выше безубытка",
-               bool(a) and a["ci_lo"] > a["breakeven"],
+               a is not None and a["ci_lo"] > a["breakeven"],
                f"{a['ci_lo']:.1f}% vs {a['breakeven']:.1f}%" if a else "—"))
 z = None
-if a and b and a["eff_n"] and b["eff_n"]:
+if a is not None and b is not None and a["eff_n"] and b["eff_n"]:
     p1, n1 = a["w"] / a["conc"] / a["eff_n"], a["eff_n"]
     p2, n2 = b["w"] / b["conc"] / b["eff_n"], b["eff_n"]
     p = (p1 * n1 + p2 * n2) / (n1 + n2)
@@ -110,7 +114,7 @@ checks.append(("|z| разницы с «поток ПРОТИВ» > 1.96",
                z is not None and abs(z) > 1.96,
                f"z = {z:+.2f}" if z is not None else "—"))
 checks.append(("n >= 50 в каждой корзине",
-               bool(a) and bool(b) and a["decided"] >= 50 and b["decided"] >= 50,
+               a is not None and b is not None and a["decided"] >= 50 and b["decided"] >= 50,
                f"{a['decided'] if a else 0} и {b['decided'] if b else 0}"))
 for name, ok, val in checks:
     print(f"  {'✓' if ok else '✗'} {name}: {val}")

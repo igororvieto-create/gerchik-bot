@@ -157,3 +157,93 @@ def test_every_registered_rule_is_wired(name):
     """Четыре правила записаны в спецификации — четыре и считаются."""
     assert callable(b.RULES[name])
     assert len(b.RULES) == 4
+
+
+def test_whole_pipeline_runs_end_to_end_on_synthetic_data(tmp_path):
+    """Прогон по explore делается ОДИН раз. Падение инструмента посреди
+    него хуже медлительности, а проверять конвейер на частично скачанных
+    РЕАЛЬНЫХ данных нельзя — это был бы ранний взгляд на результат.
+    Поэтому сквозная проверка — на синтетике, от _meta.json до вердикта."""
+    import json
+    import subprocess
+    import os
+
+    days, syms = 220, []
+    for i in range(24):
+        sym = f"S{i:02d}USDT"
+        syms.append(sym)
+        drift = (i - 12) * 0.0015
+        closes = [100 * (1 + drift) ** d * (1 + 0.02 * ((d * (i + 3)) % 5 - 2) / 2)
+                  for d in range(days)]
+        daily = [{"ts": d * _DAY_MS, "high": c * 1.02, "low": c * 0.98,
+                  "close": c, "quote": 1e6 * (1 + i)}
+                 for d, c in enumerate(closes)]
+        funding = [{"ts": d * _DAY_MS + h * 8 * 3600 * 1000, "rate": 0.0001}
+                   for d in range(days) for h in range(3)]
+        with open(tmp_path / f"{sym}.json", "w", encoding="utf-8") as f:
+            json.dump({"symbol": sym, "daily": daily, "funding": funding}, f)
+    with open(tmp_path / "_meta.json", "w", encoding="utf-8") as f:
+        json.dump({"symbols": syms, "start_ms": 0,
+                   "end_ms": days * _DAY_MS}, f)
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = subprocess.run(
+        ["python3", "-m", "tools.battery", "--hist", str(tmp_path),
+         "--half", "explore"],
+        capture_output=True, text=True, cwd=root, timeout=300)
+    assert out.returncode == 0, out.stderr[-2000:]
+    for name in b.RULES:
+        assert name in out.stdout, f"правило «{name}» не дошло до отчёта"
+    assert "ИТОГ по explore" in out.stdout
+    # хотя бы одно правило обязано собрать недели — иначе прогон пуст
+    assert "недель 0" not in out.stdout.split("A  моментум")[1].split("\n")[1]
+
+
+def test_week_result_books_longs_and_shorts_with_the_right_sign():
+    """Рост цены обязан приносить лонгу плюс, а шорту — минус.
+
+    Тесты правил проверяли, КАКУЮ сторону выбрать, но не то, как сторона
+    превращается в деньги. Перевёрнутый знак в week_result инвертировал бы
+    вердикт каждого правила, а все остальные тесты оставались зелёными
+    (мутация M56 выжила). Здесь ответ известен заранее: все монеты растут на
+    10% за неделю удержания."""
+    t_day = 40
+    coins = {}
+    for i in range(8):
+        closes = [100.0] * t_day + [110.0] * 10       # +10% сразу после t
+        coins[f"W{i}USDT"] = {"daily": _daily(closes), "funding": []}
+    t = t_day * _DAY_MS
+
+    def all_long(c, names, tt):
+        return {s: 1 for s in names}
+
+    def all_short(c, names, tt):
+        return {s: -1 for s in names}
+
+    fee = b.ROUND_TRIP_FEE_PCT / 100.0
+    up = b.week_result(coins, t, all_long)
+    dn = b.week_result(coins, t, all_short)
+    assert up is not None and dn is not None, "неделя не собралась — тест пуст"
+    assert up["ret"] == pytest.approx(0.10 - fee, abs=1e-9), \
+        f"лонг на росте 10% дал {up['ret']:+.4f}"
+    assert dn["ret"] == pytest.approx(-0.10 - fee, abs=1e-9), \
+        f"шорт на росте 10% дал {dn['ret']:+.4f}"
+
+
+def test_week_result_charges_funding_to_longs_and_pays_shorts():
+    """Положительная ставка: лонг платит, шорт получает. Перевёрнутый знак
+    фандинга сдвинул бы каждое правило, державшее перекос по стороне."""
+    t_day = 40
+    coins = {}
+    for i in range(8):
+        closes = [100.0] * (t_day + 10)               # цена стоит
+        funding = [{"ts": (t_day + k) * _DAY_MS + 1, "rate": 0.001}
+                   for k in range(3)]                 # 0.3% за неделю
+        coins[f"F{i}USDT"] = {"daily": _daily(closes), "funding": funding}
+    t = t_day * _DAY_MS
+    fee = b.ROUND_TRIP_FEE_PCT / 100.0
+    up = b.week_result(coins, t, lambda c, n, tt: {s: 1 for s in n})
+    dn = b.week_result(coins, t, lambda c, n, tt: {s: -1 for s in n})
+    assert up is not None and dn is not None
+    assert up["ret"] == pytest.approx(-0.003 - fee, abs=1e-9), "лонг не заплатил фандинг"
+    assert dn["ret"] == pytest.approx(+0.003 - fee, abs=1e-9), "шорт не получил фандинг"

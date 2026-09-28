@@ -468,6 +468,26 @@ async def get_signals(request: Request, hours: int = 24, limit: int = 100):
     return JSONResponse({"signals": rows, "count": len(rows)})
 
 
+@router.get("/api/lowvol")
+async def get_lowvol(request: Request):
+    """Бумажная стратегия «низкая волатильность» — форвард-тест замера X."""
+    if (deny := _require_token(request)) is not None:
+        return deny
+    from strategy.lowvol_paper import summarize
+    weeks = await db.lowvol_weeks()
+    try:
+        open_week = await db.lowvol_open_legs()
+    except Exception as e:
+        log.error(f"lowvol open legs: {e}")
+        open_week = {}
+    return JSONResponse({
+        "summary": summarize(weeks),
+        "weeks": weeks,
+        "open": ({"week_start": open_week["week_start"],
+                  "legs": len(open_week["legs"])} if open_week else None),
+    })
+
+
 @router.get("/api/stats")
 async def get_stats(request: Request):
     # daily_realized_pnl — денежная величина; закрываем тем же токеном.

@@ -10,7 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 
 from core.config import cfg
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from core.state import state
 from core import db
@@ -119,6 +119,22 @@ async def lifespan(app: FastAPI):
                        misfire_grace_time=3600)
     _scheduler.add_job(_outcome_job, "interval", minutes=30,                    id="outcomes",
                        max_instances=1, misfire_grace_time=600)
+    # Бумажная стратегия «низкая волатильность»: понедельник 00:10 UTC —
+    # через 10 минут после закрытия дневного бара, по которому идёт вход.
+    # Окно задержки 6 ч: рестарт в понедельник утром не теряет неделю, а
+    # повторное открытие той же недели в БД — no-op.
+    _scheduler.add_job(_lowvol_job, "cron", day_of_week="mon", hour=0,
+                       minute=10, id="lowvol", max_instances=1,
+                       misfire_grace_time=6 * 3600)
+    # Рестарт в понедельник после окна задержки иначе терял бы неделю
+    # целиком. Вход идёт по закрытию бара на понедельник 00:00, поэтому
+    # открыть неделю в любое время понедельника — то же самое правило. В
+    # другие дни не запускаем: неделя открылась бы не от понедельника.
+    # Повторный запуск безопасен — открытая неделя не открывается заново.
+    if datetime.now(timezone.utc).weekday() == 0:
+        _scheduler.add_job(_lowvol_job, "date",
+                           run_date=datetime.now(timezone.utc) + timedelta(seconds=90),
+                           id="lowvol_catchup")
     _scheduler.start()
     log.info(f"Scheduler started — scan every {cfg.SCAN_INTERVAL_MIN} min")
 
@@ -226,6 +242,12 @@ async def _monitor_job():
 async def _outcome_job():
     if _client:
         await evaluate_signal_outcomes(_client)
+
+
+async def _lowvol_job():
+    if _client:
+        from strategy.lowvol_paper import rebalance
+        await rebalance(_client)
 
 
 async def _cleanup_job():

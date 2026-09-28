@@ -304,6 +304,30 @@ async def init_db() -> None:
             log.error(f"init_db: не удалось создать idx_trades_order — {e}")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status, opened_at)")
+        # Бумажная стратегия «низкая волатильность» (замер X, форвард-тест).
+        # Отдельные таблицы, а не signals/trades: смешение двух стратегий в
+        # одной статистике уже однажды сделало её нечитаемой.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS lowvol_legs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                week_start  INTEGER NOT NULL,
+                symbol      TEXT NOT NULL,
+                side        INTEGER NOT NULL,
+                entry       REAL NOT NULL,
+                exit        REAL,
+                funding     REAL,
+                ret         REAL,
+                UNIQUE(week_start, symbol)
+            )""")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS lowvol_weeks (
+                week_start  INTEGER PRIMARY KEY,
+                btc_entry   REAL,
+                btc_exit    REAL,
+                ret         REAL,
+                n           INTEGER,
+                closed_at   TEXT
+            )""")
         await db.commit()
     # Строки, записанные ДО появления ярлыка, помечаются отдельным
     # значением, а НЕ текущим STRATEGY_ID.
@@ -1604,3 +1628,84 @@ async def cleanup_old_signals(keep_hours: int = 192) -> int:
     except Exception as e:
         log.error(f"cleanup error: {e}")
         return 0
+
+
+
+# ── Бумажная стратегия «низкая волатильность» ──────────────────────────────
+
+async def lowvol_open_week(week_start: int, legs: List[Dict],
+                           btc_entry: Optional[float]) -> bool:
+    """Открыть бумажную неделю. Повторное открытие той же недели — no-op:
+    перезапуск бота в понедельник не должен создавать вторую неделю."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "INSERT OR IGNORE INTO lowvol_weeks(week_start, btc_entry) "
+                "VALUES (?, ?)", (week_start, btc_entry))
+            if cur.rowcount == 0:
+                return False
+            for lg in legs:
+                await db.execute(
+                    "INSERT OR IGNORE INTO lowvol_legs(week_start, symbol, side, "
+                    "entry) VALUES (?, ?, ?, ?)",
+                    (week_start, lg["symbol"], lg["side"], lg["entry"]))
+            await db.commit()
+        return True
+    except Exception as e:
+        log.error(f"lowvol_open_week error: {e}")
+        return False
+
+
+async def lowvol_open_legs() -> Dict[str, Any]:
+    """Незакрытая неделя: {week_start, btc_entry, legs}. БРОСАЕТ при ошибке
+    БД — пустой ответ читался бы как «открытой недели нет», и её позиции
+    не закрылись бы никогда."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+                "SELECT * FROM lowvol_weeks WHERE closed_at IS NULL "
+                "ORDER BY week_start DESC LIMIT 1") as cur:
+            w = await cur.fetchone()
+        if w is None:
+            return {}
+        async with db.execute("SELECT * FROM lowvol_legs WHERE week_start=?",
+                              (w["week_start"],)) as cur:
+            legs = [dict(r) for r in await cur.fetchall()]
+    return {"week_start": w["week_start"], "btc_entry": w["btc_entry"],
+            "legs": legs}
+
+
+async def lowvol_close_week(week_start: int, results: List[Dict],
+                            btc_exit: Optional[float]) -> bool:
+    """Закрыть неделю: записать выход каждой позиции и итог недели."""
+    rets = [r["ret"] for r in results if r.get("ret") is not None]
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            for r in results:
+                await db.execute(
+                    "UPDATE lowvol_legs SET exit=?, funding=?, ret=? "
+                    "WHERE week_start=? AND symbol=?",
+                    (r.get("exit"), r.get("funding"), r.get("ret"),
+                     week_start, r["symbol"]))
+            await db.execute(
+                "UPDATE lowvol_weeks SET btc_exit=?, ret=?, n=?, closed_at=? "
+                "WHERE week_start=?",
+                (btc_exit, (sum(rets) / len(rets)) if rets else None, len(rets),
+                 datetime.utcnow().isoformat(), week_start))
+            await db.commit()
+        return True
+    except Exception as e:
+        log.error(f"lowvol_close_week error: {e}")
+        return False
+
+
+async def lowvol_weeks() -> List[Dict]:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                    "SELECT * FROM lowvol_weeks ORDER BY week_start") as cur:
+                return [dict(r) for r in await cur.fetchall()]
+    except Exception as e:
+        log.error(f"lowvol_weeks error: {e}")
+        return []

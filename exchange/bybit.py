@@ -281,9 +281,25 @@ class BybitClient:
         raw = data.get("result", {}).get("list", [])
         return [
             {"ts": int(r[0]), "open": float(r[1]), "high": float(r[2]),
-             "low": float(r[3]), "close": float(r[4]), "volume": float(r[5])}
+             "low": float(r[3]), "close": float(r[4]), "volume": float(r[5]),
+             # Оборот в USDT: по нему ранжируется ликвидность бумажной
+             # стратегии, как в проверке на истории. Объём в базовой монете
+             # между монетами разной цены не сравним.
+             "turnover": float(r[6]) if len(r) > 6 else 0.0}
             for r in reversed(raw)
         ]
+
+    async def get_funding_history(self, symbol: str, start_ms: int,
+                                  end_ms: int) -> List[Dict]:
+        """Фактические выплаты фандинга за период: [{ts, rate}], по времени."""
+        data = await self._get("/v5/market/funding/history", {
+            "category": "linear", "symbol": symbol,
+            "startTime": int(start_ms), "endTime": int(end_ms), "limit": 200,
+        })
+        raw = data.get("result", {}).get("list", [])
+        out = [{"ts": int(r["fundingRateTimestamp"]),
+                "rate": float(r["fundingRate"])} for r in raw]
+        return sorted(out, key=lambda x: x["ts"])
 
     async def get_open_interest(self, symbol: str, interval: str = "4h", limit: int = 12) -> List[Dict]:
         data = await self._get("/v5/market/open-interest", {

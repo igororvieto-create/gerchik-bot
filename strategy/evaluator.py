@@ -128,8 +128,13 @@ async def _market_klines(client: BybitClient) -> list:
     144 часов. Для измерения дрейфа за двое суток часа детализации хватает
     с запасом.
     """
+    # 1000 — предел биржи для свечей, ≈41 сутки часовых баров. Нужно не
+    # оценщику (ему хватило бы 200), а досчёту дрейфа-до-сигнала для замера
+    # VII: колонку добавили через 12 суток после старта замера, и все
+    # сигналы с 16.09 должны получить величину задним числом. Запрос
+    # по-прежнему ОДИН на прогон.
     try:
-        return await client.get_klines(_MKT_SYMBOL, interval="60", limit=200) or []
+        return await client.get_klines(_MKT_SYMBOL, interval="60", limit=1000) or []
     except Exception as e:
         log.warning(f"дрейф рынка не измерен ({e}) — срез «направление × "
                     f"рынок» для этих сигналов останется пустым")
@@ -152,17 +157,75 @@ def _market_drift(mkt: list, sig_ms: float, end_ms: float) -> Optional[float]:
     return (b / a - 1.0) * 100.0
 
 
+_HOUR_MS = 3600 * 1000
+_PRIOR_WINDOW_MS = 48 * _HOUR_MS
+
+
+def _prior_drift(mkt: list, sig_ms: float) -> Optional[float]:
+    """Изменение рынка за 48 ч ДО сигнала, в процентах — величина замера VII.
+
+    Берутся только бары, ЗАКРЫТЫЕ к моменту сигнала (ts + час <= сигнал).
+    Бар, открытый за минуту до сигнала, содержит будущее целиком, и фильтр
+    входа на нём заглядывал бы вперёд — ровно та ошибка, ради которой эта
+    величина отделена от mkt_pct.
+
+    Задним числом считать её честно: цена BTC до сигнала — исторический
+    факт, не зависящий ни от решений бота, ни от исходов.
+    """
+    closed = [k for k in mkt if k["ts"] + _HOUR_MS <= sig_ms]
+    if not closed:
+        return None
+    now_bar = closed[-1]
+    # Бар «сейчас» обязан быть свежим: если данных у сигнала нет (дыра,
+    # слишком старый сигнал), последний закрытый бар может лежать часы
+    # или сутки назад, и дрейф получился бы за чужое окно.
+    if sig_ms - (now_bar["ts"] + _HOUR_MS) > 2 * _HOUR_MS:
+        return None
+    then = [k for k in closed if k["ts"] + _HOUR_MS <= sig_ms - _PRIOR_WINDOW_MS]
+    if not then:
+        return None
+    a, b = then[-1]["close"], now_bar["close"]
+    if not a or a <= 0:
+        return None
+    return (b / a - 1.0) * 100.0
+
+
+async def _backfill_prior(mkt: list) -> int:
+    """Досчитать дрейф-до-сигнала у сигналов, где его нет."""
+    if not mkt:
+        return 0
+    done = 0
+    for row in await db.get_rows_missing_prior(db.VII_START):
+        try:
+            sig_ms = datetime.fromisoformat(
+                row["ts"].rstrip("Z")).replace(tzinfo=timezone.utc).timestamp() * 1000
+        except (ValueError, AttributeError):
+            continue
+        v = _prior_drift(mkt, sig_ms)
+        if v is not None and await db.set_mkt_prior(row["id"], v):
+            done += 1
+    if done:
+        log.info(f"замер VII: дрейф-до-сигнала досчитан у {done} сигналов")
+    return done
+
+
 async def evaluate_signal_outcomes(client: BybitClient) -> None:
     global _EVALUATING
     if _EVALUATING:
         return
     _EVALUATING = True
     try:
+        # Рынок и досчёт — ДО раннего выхода. Досчёт касается и уже
+        # решённых сигналов, а они в pending не входят: без этого переноса
+        # сигналы с 16 по 25 сентября получили бы величину, только если в
+        # тот же проход случайно нашёлся хоть один ожидающий. Он не читает
+        # ни одного исхода, поэтому порядок с вердиктами неважен.
+        mkt = await _market_klines(client)
+        await _backfill_prior(mkt)
         pending = await db.get_pending_signals(max_age_hours=_MAX_AGE_HOURS * 3)
         if not pending:
             return
         now = datetime.now(timezone.utc)
-        mkt = await _market_klines(client)
         decided = 0
         failed = 0
         for row in pending:

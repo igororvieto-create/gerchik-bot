@@ -368,6 +368,7 @@ input[type=range]::-moz-range-thumb{
   <span id="scan-info">Ожидание первого скана…</span>
   <span id="db-info" style="opacity:.75;margin-left:8px"></span>
   <span id="flow-info" style="display:none;opacity:.75;margin-left:8px"></span>
+  <span id="vii-info" style="display:none;opacity:.75;margin-left:8px"></span>
   <span id="strat-info" style="display:none;opacity:.75;margin-left:8px"></span>
   <span id="risk-info" style="display:none;color:var(--red);margin-left:8px"></span>
   <span id="env-info" style="display:none;color:var(--red);margin-left:8px"></span>
@@ -842,6 +843,7 @@ async function refreshStats(){
     renderMonitorState(d);
     renderOverRisk(d);
     renderFlowProgress(d);
+    renderViiProgress(d);
     renderStrategyTag(d);
 
     if(d.last_scan_at){
@@ -1093,6 +1095,22 @@ function renderFlowProgress(d){
   } else {
     clearAlert('flow');
   }
+}
+
+// Замер VII: показываем ТОЛЬКО, сколько набрано, — не исходы групп.
+// Смотреть на число разрешено (правило остановки задано числом) и нужно:
+// замер потока перевалил цель 130 до 185 незамеченным. Смотреть на
+// винрейт групп до цели — подглядывание, уже записанное как нарушение.
+function renderViiProgress(d){
+  const el=$('vii-info'); if(!el) return;
+  const p=d && d.vii_progress;
+  if(!p || !p.target){ el.style.display='none'; return; }
+  el.style.display='';
+  const ready = p.total>=p.target && p.with_drift>=p.min_per_group
+                && p.against_drift>=p.min_per_group;
+  el.textContent = ready
+    ? `замер VII готов к вердикту: ${p.total} исх. (${p.with_drift} по дрейфу / ${p.against_drift} против)`
+    : `замер VII: ${p.total}/${p.target} (по дрейфу ${p.with_drift}, против ${p.against_drift}, нужно ≥${p.min_per_group} в каждой)`;
 }
 
 function renderEnvTypos(d){

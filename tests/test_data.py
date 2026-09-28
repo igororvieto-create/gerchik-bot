@@ -1663,3 +1663,152 @@ async def test_direction_by_market_slice_separates_selection_from_beta(
     # Пары обязаны идти рядом по режиму, иначе их снова читают порознь.
     order = br["_order"]["by_dir_market"]
     assert order.index("шорт · рынок падал") - order.index("лонг · рынок падал") == 1
+
+
+# ── Замер VII: дрейф рынка ДО сигнала ──────────────────────────────────────
+
+def _hourly(closes, start_ms=0):
+    H = 3600 * 1000
+    return [{"ts": start_ms + i * H, "close": c} for i, c in enumerate(closes)]
+
+
+def test_prior_drift_uses_only_bars_closed_before_the_signal():
+    """Величина замера VII обязана видеть только прошлое. Бар, открытый за
+    минуту до сигнала, содержит будущее целиком: фильтр входа на нём
+    заглядывал бы вперёд — ровно та ошибка, ради которой эта величина
+    отделена от mkt_pct."""
+    from strategy.evaluator import _prior_drift
+    H = 3600 * 1000
+    mkt = _hourly([100.0] * 49 + [102.0] + [150.0] * 10)   # бар 49 закрывается в 50ч
+    sig_ms = 50 * H
+    base = _prior_drift(mkt, sig_ms)
+    assert base == pytest.approx(2.0), f"ожидался дрейф +2%, получено {base}"
+
+    poisoned = [dict(k) for k in mkt]
+    for k in poisoned:
+        if k["ts"] + H > sig_ms:
+            k["close"] = 1e9
+    assert _prior_drift(poisoned, sig_ms) == base, \
+        "дрейф-до-сигнала изменился от данных ПОСЛЕ сигнала"
+
+
+def test_prior_drift_refuses_a_stale_now_bar():
+    """Если у сигнала нет свежего бара, последний закрытый может лежать
+    сутки назад — и дрейф получился бы за чужое окно."""
+    from strategy.evaluator import _prior_drift
+    H = 3600 * 1000
+    mkt = _hourly([100.0] * 60)
+    assert _prior_drift(mkt, (60 + 10) * H) is None, \
+        "дыра в 10 часов перед сигналом не распознана"
+
+
+async def test_backfill_writes_once_and_never_overwrites(tmp_path, monkeypatch):
+    """Дрейф-до-сигнала — исторический факт. Второй проход не имеет права
+    его менять, иначе досчёт зависел бы от того, КОГДА он случился."""
+    import core.db as d
+    import aiosqlite
+    from core.state import Signal
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "vii.db"))
+    await d.init_db()
+    await d.save_signal(Signal(
+        symbol="VUSDT", signal_type="VSA_CLIMAX", direction="LONG", score=55,
+        price=100.0, oi_change=0.0, vol_ratio=0.0, funding=0.0,
+        ob_bias="NEUTRAL", atr_pct=2.0, details="", entry=100.0, sl=98.0,
+        tp1=101.0, tp2=104.0, tp3=106.0, rr=2.0, sl_pct=2.0))
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        async with db.execute("SELECT MAX(id) FROM signals") as c:
+            sid = (await c.fetchone())[0]
+    assert await d.set_mkt_prior(sid, 2.5)
+    assert await d.set_mkt_prior(sid, -9.9)
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        async with db.execute("SELECT mkt_prior_pct FROM signals WHERE id=?",
+                              (sid,)) as c:
+            assert (await c.fetchone())[0] == 2.5, "факт перезаписан"
+    assert not await d.get_rows_missing_prior("1970-01-01"), \
+        "досчитанный сигнал снова числится без величины"
+
+
+async def test_vii_counter_counts_groups_and_reveals_no_outcomes(tmp_path,
+                                                                monkeypatch):
+    """Счётчик VII делит по согласию направления с дрейфом, отсекает
+    сигналы до момента рождения гипотезы и НЕ отдаёт винрейт групп:
+    взгляд на исходы до цели — подглядывание."""
+    import core.db as d
+    import aiosqlite
+    from core.state import Signal
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "vii2.db"))
+    await d.init_db()
+
+    async def add(direction, prior, outcome, ts):
+        await d.save_signal(Signal(
+            symbol=f"Z{ts}USDT", signal_type="VSA_CLIMAX", direction=direction,
+            score=55, price=100.0, oi_change=0.0, vol_ratio=0.0, funding=0.0,
+            ob_bias="NEUTRAL", atr_pct=2.0, details="", entry=100.0, sl=98.0,
+            tp1=101.0, tp2=104.0, tp3=106.0, rr=2.0, sl_pct=2.0))
+        async with aiosqlite.connect(d.DB_PATH) as db:
+            await db.execute(
+                "UPDATE signals SET ts=?, mkt_prior_pct=?, outcome=? "
+                "WHERE id=(SELECT MAX(id) FROM signals)", (ts, prior, outcome))
+            await db.commit()
+
+    after = "2026-09-20T00:00:00"
+    await add("LONG", 2.0, "WIN", after)       # по дрейфу
+    await add("SHORT", -3.0, "LOSS", after)    # по дрейфу
+    await add("LONG", -2.0, "LOSS", after)     # против
+    await add("SHORT", 0.3, "WIN", after)      # боковик — не входит
+    await add("LONG", 5.0, "WIN", "2026-09-10T00:00:00")  # ДО гипотезы — не входит
+
+    p = await d.vii_progress()
+    assert p["with_drift"] == 2 and p["against_drift"] == 1 and p["total"] == 3
+    leaked = [k for k in p if any(w in k for w in ("win", "loss", "ev", "rate"))]
+    assert not leaked, f"счётчик отдаёт исходы групп: {leaked}"
+
+
+async def test_backfill_runs_even_when_nothing_is_pending(tmp_path, monkeypatch):
+    """Досчёт касается и РЕШЁННЫХ сигналов, а они в pending не входят.
+
+    Первая версия вставляла досчёт после раннего выхода «ожидающих нет», и
+    сигналы с 16 по 25 сентября получали бы величину только если в тот же
+    проход случайно нашёлся хоть один ожидающий."""
+    import aiosqlite
+    import strategy.evaluator as ev
+    from core.state import Signal
+    from datetime import datetime, timezone
+    # Модуль берётся У ОЦЕНЩИКА, а не импортом core.db. Несколько тестовых
+    # файлов удаляют core.db из sys.modules и перезагружают его; после
+    # этого `import core.db` даёт НОВЫЙ объект, а оценщик держит ссылку на
+    # старый, и подмена пути ложилась не туда — тест проходил в одиночку и
+    # падал в общем прогоне.
+    d = ev.db
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "vii3.db"))
+    await d.init_db()
+    await d.save_signal(Signal(
+        symbol="DUSDT", signal_type="VSA_CLIMAX", direction="LONG", score=55,
+        price=100.0, oi_change=0.0, vol_ratio=0.0, funding=0.0,
+        ob_bias="NEUTRAL", atr_pct=2.0, details="", entry=100.0, sl=98.0,
+        tp1=101.0, tp2=104.0, tp3=106.0, rr=2.0, sl_pct=2.0))
+    H = 3600 * 1000
+    sig = datetime(2026, 9, 20, tzinfo=timezone.utc)
+    sig_ms = sig.timestamp() * 1000
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        # решённый — значит в pending его нет
+        await db.execute("UPDATE signals SET ts=?, outcome='WIN'",
+                         (sig.replace(tzinfo=None).isoformat(),))
+        await db.commit()
+    assert not await d.get_pending_signals(max_age_hours=10_000), \
+        "сигнал всё ещё ожидающий — тест не проверяет то, что заявлено"
+
+    start = sig_ms - 60 * H
+    bars = [{"ts": start + i * H, "open": 0, "high": 0, "low": 0,
+             "close": 100.0 + (3.0 if start + i * H + H > sig_ms - 48 * H else 0.0),
+             "volume": 0} for i in range(80)]
+
+    class FakeClient:
+        async def get_klines(self, symbol, interval="240", limit=25):
+            return bars
+
+    await ev.evaluate_signal_outcomes(FakeClient())
+    async with aiosqlite.connect(d.DB_PATH) as db:
+        async with db.execute("SELECT mkt_prior_pct FROM signals") as c:
+            v = (await c.fetchone())[0]
+    assert v is not None, "досчёт не выполнился при пустом pending"

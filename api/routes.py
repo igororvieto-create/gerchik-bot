@@ -512,6 +512,8 @@ async def get_stats(request: Request):
         # набранных исходов правилом разрешено — остановка задана по n, а не
         # по результату. На сами исходы по потоку смотрят один раз в конце.
         "flow_progress": await db.flow_progress(),
+        # Только счётчики замера VII — см. db.vii_progress.
+        "vii_progress": await db.vii_progress(),
         # Какой стратегии принадлежит показанная статистика. Без этого
         # после смены стратегии экран выглядел бы как «всё обнулилось».
         "strategy_id": cfg.STRATEGY_ID,

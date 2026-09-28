@@ -223,7 +223,12 @@ async def init_db() -> None:
                     # НЕЛЬЗЯ. Правило docs/REVIEW.md §0-А п.5: если гипотезу
                     # не проверить существующими колонками — нужна
                     # инструментовка, а не вывод.
-                    "mkt_pct REAL"]:
+                    "mkt_pct REAL",
+                    # Дрейф рынка за 48 ч ДО сигнала — величина замера VII.
+                    # Не путать с mkt_pct: тот мерит окно ОЦЕНКИ, то есть
+                    # будущее относительно входа, и строить на нём фильтр
+                    # входа значило бы заглядывать вперёд.
+                    "mkt_prior_pct REAL"]:
             try:
                 await db.execute(f"ALTER TABLE signals ADD COLUMN {col}")
             except Exception as e:
@@ -1347,6 +1352,86 @@ FLOW_TARGET_N = 130
 # задано ЧИСЛОМ исходов (130), поэтому счётчик обязан быть монотонным и
 # зависеть только от поступления данных.
 FLOW_MIN_SCORE = 45
+
+
+# Замер VII (docs/PREREGISTRATION.md). Отсчёт — момент, когда гипотеза
+# была увидена (2026-09-16 06:21 UTC). Берутся сигналы, СОЗДАННЫЕ после
+# него: это строже формулировки «решённые после», зато исключает любой
+# исход, который мог быть виден при рождении гипотезы.
+VII_START = "2026-09-16T06:22:00"
+VII_TARGET_N = 120
+VII_MIN_PER_GROUP = 40
+VII_DRIFT_MIN_PCT = 1.0
+
+
+async def get_rows_missing_prior(since_iso: str, limit: int = 1000) -> List[Dict]:
+    """Сигналы без дрейфа-до-сигнала. Пустой список здесь означает только
+    «досчитывать нечего в этот проход» — решений на нём не строится."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                    "SELECT id, ts FROM signals WHERE mkt_prior_pct IS NULL "
+                    "AND ts >= ? ORDER BY ts LIMIT ?", (since_iso, limit)) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+    except Exception as e:
+        log.error(f"get_rows_missing_prior error: {e}")
+        return []
+
+
+async def set_mkt_prior(signal_id: int, value: float) -> bool:
+    """Записать дрейф-до-сигнала. Уже записанное значение не трогается:
+    это исторический факт, и второй проход не имеет права его менять."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE signals SET mkt_prior_pct=? "
+                "WHERE id=? AND mkt_prior_pct IS NULL", (value, signal_id))
+            await db.commit()
+        return True
+    except Exception as e:
+        log.error(f"set_mkt_prior error: {e}")
+        return False
+
+
+async def vii_progress() -> Dict:
+    """Прогресс замера VII — ТОЛЬКО СЧЁТЧИКИ, без исходов.
+
+    Правило остановки задано числом, поэтому смотреть на число можно и
+    нужно: иначе замер снова перевалит за цель незамеченным, как замер
+    потока (130 → 185). Но винрейт и матожидание групп здесь не
+    считаются намеренно: взгляд на них до цели — это подглядывание, уже
+    однажды записанное как нарушение в пре-регистрации.
+    """
+    out: Dict[str, Any] = {"with_drift": 0, "against_drift": 0,
+                           "total": 0, "target": VII_TARGET_N,
+                           "min_per_group": VII_MIN_PER_GROUP,
+                           "missing_prior": 0}
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                    """SELECT
+                         SUM(CASE WHEN (direction='LONG' AND mkt_prior_pct >= ?)
+                                    OR (direction='SHORT' AND mkt_prior_pct <= -?)
+                                  THEN 1 ELSE 0 END),
+                         SUM(CASE WHEN (direction='LONG' AND mkt_prior_pct <= -?)
+                                    OR (direction='SHORT' AND mkt_prior_pct >= ?)
+                                  THEN 1 ELSE 0 END),
+                         SUM(CASE WHEN mkt_prior_pct IS NULL THEN 1 ELSE 0 END)
+                       FROM signals
+                       WHERE ts >= ? AND outcome IN ('WIN','LOSS','BE')
+                         AND """ + _CUR_STRAT,
+                    (VII_DRIFT_MIN_PCT, VII_DRIFT_MIN_PCT, VII_DRIFT_MIN_PCT,
+                     VII_DRIFT_MIN_PCT, VII_START, *_strat_params())) as cur:
+                row = await cur.fetchone()
+        if row:
+            out["with_drift"] = int(row[0] or 0)
+            out["against_drift"] = int(row[1] or 0)
+            out["missing_prior"] = int(row[2] or 0)
+            out["total"] = out["with_drift"] + out["against_drift"]
+    except Exception as e:
+        log.error(f"vii_progress error: {e}")
+    return out
 
 
 async def flow_progress() -> Dict:

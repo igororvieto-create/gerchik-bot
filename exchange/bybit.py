@@ -1,4 +1,5 @@
 import asyncio
+import random
 import hashlib
 import hmac
 import json
@@ -38,6 +39,11 @@ def _fmt_price(v: float) -> str:
     if "." in s:
         s = s.rstrip("0").rstrip(".")
     return s or "0"
+
+
+# Коды Bybit V5 «превышен лимит запросов»: 10006 — по ключу/эндпоинту,
+# 10018 — по IP. Оба временные, повторяются с паузой.
+_RATE_LIMIT_CODES = (10006, 10018)
 
 
 class BybitClient:
@@ -230,8 +236,19 @@ class BybitClient:
                         return {}
                     await asyncio.sleep(1)
                     continue
-                if data.get("retCode", 0) != 0:
-                    log.warning(f"GET {path} -> {data.get('retCode')}: {data.get('retMsg')}")
+                code = data.get("retCode", 0)
+                if code in _RATE_LIMIT_CODES and attempt < 2:
+                    # Лимит запросов — ВРЕМЕННЫЙ отказ, а не ответ. Раньше он
+                    # возвращался вызывающему как есть: свечей нет, монета
+                    # выпадала из скана. Пики приходились ровно на закрытие
+                    # 4h-свечи (00/04/08/12/16/20 UTC, до 33 отказов в час) —
+                    # то есть ровно на момент, когда появляются сетапы.
+                    # Случайный разброс обязателен: десятки параллельных
+                    # запросов иначе повторили бы удар в одну миллисекунду.
+                    await asyncio.sleep((0.5 * 2 ** attempt) * (1 + random.random()))
+                    continue
+                if code != 0:
+                    log.warning(f"GET {path} -> {code}: {data.get('retMsg')}")
                 return data
             except Exception as e:
                 if attempt == 2:

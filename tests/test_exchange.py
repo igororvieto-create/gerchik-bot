@@ -1,3 +1,4 @@
+import json
 import pytest
 """Клиент биржи: перебор прокси, последний рубеж, сериализация.
 
@@ -289,3 +290,44 @@ async def test_place_order_uses_a_fresh_idempotency_key_per_order():
         assert all(i.startswith("gb-") for i in ids)
     finally:
         await c.close()
+
+
+async def test_rate_limit_is_retried_and_data_comes_through(monkeypatch):
+    """Лимит запросов — временный отказ. Раньше он возвращался вызывающему
+    как ответ: свечей нет, монета выпадала из скана — и пики приходились
+    ровно на закрытие 4h-свечи, когда появляются сетапы."""
+    import exchange.bybit as bb
+    c = bb.BybitClient("", "")
+    replies = [json.dumps({"retCode": 10006, "retMsg": "Too many visits"}),
+               json.dumps({"retCode": 10006, "retMsg": "Too many visits"}),
+               json.dumps({"retCode": 0, "result": {"list": [["1", "2"]]}})]
+    calls = []
+
+    async def fake_raw_get(url, sign_fn):
+        calls.append(url)
+        return 200, replies[len(calls) - 1]
+    slept = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+    monkeypatch.setattr(c, "_raw_get", fake_raw_get)
+    monkeypatch.setattr(bb.asyncio, "sleep", fake_sleep)
+    data = await c._get("/v5/market/kline", {"symbol": "X"})
+    assert data.get("retCode") == 0, "после лимита данные не получены"
+    assert len(calls) == 3 and len(slept) == 2, "повтор без паузы или без повтора"
+    assert slept[1] > slept[0] * 0.9, "паузы не растут"
+
+
+async def test_ordinary_api_error_is_not_retried(monkeypatch):
+    """Неверный параметр — не временный отказ. Повторять его значит трижды
+    долбить биржу заведомо плохим запросом и приближать настоящий лимит."""
+    import exchange.bybit as bb
+    c = bb.BybitClient("", "")
+    calls = []
+
+    async def fake_raw_get(url, sign_fn):
+        calls.append(url)
+        return 200, json.dumps({"retCode": 10001, "retMsg": "params error"})
+    monkeypatch.setattr(c, "_raw_get", fake_raw_get)
+    data = await c._get("/v5/market/kline", {"symbol": "X"})
+    assert data.get("retCode") == 10001 and len(calls) == 1

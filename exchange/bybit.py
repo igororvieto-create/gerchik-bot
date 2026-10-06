@@ -271,8 +271,18 @@ class BybitClient:
                         return {}
                     await asyncio.sleep(1)
                     continue
-                if data.get("retCode", 0) != 0:
-                    log.warning(f"POST {path} -> {data.get('retCode')}: {data.get('retMsg')}")
+                code = data.get("retCode", 0)
+                if code in _RATE_LIMIT_CODES and attempt < 2:
+                    # Повтор безопасен: лимит отвергает запрос ДО исполнения,
+                    # тело (вместе с orderLinkId) одно и то же во всех
+                    # попытках, и дубль ордера упал бы в 110072, который уже
+                    # обрабатывается. Без повтора лимит на досылке стопа
+                    # превращался в аварийное закрытие позиции по рынку через
+                    # три тика вместо простого повтора.
+                    await asyncio.sleep((0.5 * 2 ** attempt) * (1 + random.random()))
+                    continue
+                if code != 0:
+                    log.warning(f"POST {path} -> {code}: {data.get('retMsg')}")
                 return data
             except Exception as e:
                 if attempt == 2:

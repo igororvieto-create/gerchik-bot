@@ -9,7 +9,7 @@
 """
 import asyncio
 import logging
-from typing import Optional
+from typing import Dict, List, Optional
 from datetime import datetime, timezone
 
 from core import db
@@ -22,6 +22,9 @@ _EVALUATING = False
 # Имя сохранено: его импортируют tools/replay.py и тесты. Значение —
 # из config, единственного источника (см. JUDGE_WINDOW_HOURS там).
 _MAX_AGE_HOURS = JUDGE_WINDOW_HOURS
+# Сколько 15-минутных свечей запрашивать: окно оценки целиком плюс запас,
+# но не больше предела биржи.
+_KLINE_CAP = min(1000, _MAX_AGE_HOURS * 4 + 12)
 
 
 def _mfe(direction: str, entry: float, sl: float, klines: list) -> float:
@@ -123,7 +126,7 @@ _MKT_SYMBOL = "BTCUSDT"
 async def _market_klines(client: BybitClient) -> list:
     """Часовые свечи рынка — ОДИН запрос на прогон оценщика, а не на сигнал.
 
-    Часовые, а не 15-минутные: лимит биржи 200 свечей, и 15-минутные
+    Часовые, а не 15-минутные: 15-минутные даже при пределе биржи в 1000
     покрыли бы лишь 50 часов, тогда как оценщик судит сигналы возрастом до
     144 часов. Для измерения дрейфа за двое суток часа детализации хватает
     с запасом.
@@ -139,22 +142,6 @@ async def _market_klines(client: BybitClient) -> list:
         log.warning(f"дрейф рынка не измерен ({e}) — срез «направление × "
                     f"рынок» для этих сигналов останется пустым")
         return []
-
-
-def _market_drift(mkt: list, sig_ms: float, end_ms: float) -> Optional[float]:
-    """Изменение рынка за окно сигнала, в процентах.
-
-    None означает «не измерено» и НЕ равно нулю: ноль — это утверждение
-    «рынок стоял», из-за которого сигнал попал бы в корзину боковика и
-    исказил именно тот срез, ради которого всё делается.
-    """
-    win = [k for k in mkt if sig_ms <= k["ts"] <= end_ms]
-    if len(win) < 2:
-        return None
-    a, b = win[0]["close"], win[-1]["close"]
-    if not a or a <= 0:
-        return None
-    return (b / a - 1.0) * 100.0
 
 
 _HOUR_MS = 3600 * 1000
@@ -190,12 +177,16 @@ def _prior_drift(mkt: list, sig_ms: float) -> Optional[float]:
     return (b / a - 1.0) * 100.0
 
 
-async def _backfill_prior(mkt: list) -> int:
+def _iso(ms: float) -> str:
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).replace(tzinfo=None).isoformat()
+
+
+async def _backfill_prior(mkt: list, rows: List[Dict]) -> int:
     """Досчитать дрейф-до-сигнала у сигналов, где его нет."""
     if not mkt:
         return 0
     done = 0
-    for row in await db.get_rows_missing_prior(db.VII_START):
+    for row in rows:
         try:
             sig_ms = datetime.fromisoformat(
                 row["ts"].rstrip("Z")).replace(tzinfo=timezone.utc).timestamp() * 1000
@@ -206,6 +197,45 @@ async def _backfill_prior(mkt: list) -> int:
             done += 1
     if done:
         log.info(f"замер VII: дрейф-до-сигнала досчитан у {done} сигналов")
+    return done
+
+
+_WINDOW_MS = 48 * _HOUR_MS
+# BTC-история в 1000 часовых барах — около 41 суток; старше досчитать нечем.
+_BACKFILL_REACH_MS = 40 * 24 * _HOUR_MS
+
+
+def _price_at_h(mkt: list, t_ms: float) -> Optional[float]:
+    """Закрытие последнего часового бара, закрытого к t_ms, — если он свежий."""
+    closed = [k for k in mkt if k["ts"] + _HOUR_MS <= t_ms]
+    if not closed or t_ms - (closed[-1]["ts"] + _HOUR_MS) > 2 * _HOUR_MS:
+        return None
+    px = closed[-1]["close"]
+    return px if px and px > 0 else None
+
+
+def _window_drift(mkt: list, sig_ms: float) -> Optional[float]:
+    """Изменение рынка за ФИКСИРОВАННЫЕ 48 ч после сигнала, в процентах.
+
+    Не зависит от того, когда сигнал разрешился: мерить до момента вердикта
+    значило бы связать корзину с исходом (стоп в 1R ближе цели в 2R)."""
+    a, b = _price_at_h(mkt, sig_ms), _price_at_h(mkt, sig_ms + _WINDOW_MS)
+    if a is None or b is None:
+        return None
+    return (b / a - 1.0) * 100.0
+
+
+async def _backfill_window(mkt: list, rows: List[Dict]) -> int:
+    done = 0
+    for row in rows:
+        try:
+            sig_ms = datetime.fromisoformat(
+                row["ts"].rstrip("Z")).replace(tzinfo=timezone.utc).timestamp() * 1000
+        except (ValueError, AttributeError):
+            continue
+        v = _window_drift(mkt, sig_ms)
+        if v is not None and await db.set_mkt_window(row["id"], v):
+            done += 1
     return done
 
 
@@ -220,8 +250,18 @@ async def evaluate_signal_outcomes(client: BybitClient) -> None:
         # сигналы с 16 по 25 сентября получили бы величину, только если в
         # тот же проход случайно нашёлся хоть один ожидающий. Он не читает
         # ни одного исхода, поэтому порядок с вердиктами неважен.
-        mkt = await _market_klines(client)
-        await _backfill_prior(mkt)
+        # Рынок нужен только досчёту, и только если есть что досчитывать:
+        # 1000 часовых баров каждые 30 минут ради пустого досчёта — чистые
+        # издержки (та же логика, по которой выключили ленту).
+        now_ms = datetime.now(timezone.utc).timestamp() * 1000
+        missing_prior = await db.get_rows_missing_prior(db.VII_START)
+        missing_win = await db.get_rows_missing_window(
+            _iso(now_ms - _BACKFILL_REACH_MS), _iso(now_ms - _WINDOW_MS - _HOUR_MS))
+        if missing_prior or missing_win:
+            mkt = await _market_klines(client)
+            if mkt:
+                await _backfill_prior(mkt, missing_prior)
+                await _backfill_window(mkt, missing_win)
         pending = await db.get_pending_signals(max_age_hours=_MAX_AGE_HOURS * 3)
         if not pending:
             return
@@ -237,7 +277,11 @@ async def evaluate_signal_outcomes(client: BybitClient) -> None:
                     continue  # слишком свежий — ещё нечего оценивать
 
                 # 15м-свечи от момента сигнала (лимит Bybit — 1000, нам ≤200)
-                need = min(int(age_h * 4) + 3, 200)
+                # Потолок выводится из окна оценки, а не задан числом 200:
+                # 200 свечей по 15 минут — это 50 часов, и при окне больше
+                # 50 ч каждый нерешённый сигнал закрывался бы как EXPIRED «без
+                # вердикта» на 50-м часу. 1000 — предел биржи.
+                need = min(int(age_h * 4) + 3, _KLINE_CAP)
                 klines = await client.get_klines(row["symbol"], interval="15", limit=need)
                 sig_ms = sig_ts.timestamp() * 1000
                 # Окно ограничено С ДВУХ сторон. Bybit отдаёт ПОСЛЕДНИЕ N свечей,
@@ -255,7 +299,7 @@ async def evaluate_signal_outcomes(client: BybitClient) -> None:
                 # закрывал бы 4-часовой сигнал как EXPIRED навсегда, хотя у
                 # него оставалось ещё 44 часа и данные вот-вот вернутся.
                 if (relevant and klines and klines[0]["ts"] > sig_ms
-                        and (need >= 200 or age_h >= _MAX_AGE_HOURS)):
+                        and (need >= _KLINE_CAP or age_h >= _MAX_AGE_HOURS)):
                     # Начало окна не покрыто — вердикт по неполным данным хуже
                     # отсутствия вердикта: неизвестно, был ли стоп задет раньше.
                     log.warning(
@@ -299,8 +343,7 @@ async def evaluate_signal_outcomes(client: BybitClient) -> None:
                     # лог рапортует о вердиктах, которых в базе нет, а
                     # решение о деньгах принимается по этой цифре.
                     if await db.set_signal_outcome(
-                            row["id"], verdict[0], verdict[1], mfe_r=verdict[2],
-                            mkt_pct=_market_drift(mkt, sig_ms, end_ms)):
+                            row["id"], verdict[0], verdict[1], mfe_r=verdict[2]):
                         decided += 1
                     else:
                         failed += 1

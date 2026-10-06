@@ -816,3 +816,82 @@ def test_slider_hint_does_not_state_a_winrate_from_thin_air():
     assert "WINRATE_FACT" in html, "винрейт не берётся из данных"
     assert "мало данных" in html, \
         "размер выборки не назван — процент без него утверждает больше, чем знает"
+
+
+async def test_lowvol_api_reports_db_failure_instead_of_empty(with_token, monkeypatch):
+    """Ошибка базы не равна «недель нет»: пустой ответ читался бы как
+    «форвард-тест ещё не начался».
+
+    Подменяется модуль, который держит САМ роут (R.db): несколько тестовых
+    файлов перезагружают core.db, и `import core.db` дал бы другой объект —
+    первая версия теста проходила побочным путём, потому что 500 приходил
+    от пустой настоящей базы, а не от подменённой ошибки."""
+    d = R.db
+    calls = []
+
+    async def broken():
+        calls.append(1)
+        raise RuntimeError("disk I/O error")
+    monkeypatch.setattr(d, "lowvol_weeks", broken)
+    resp = await R.get_lowvol(FakeRequest(with_token))
+    assert calls, "подмена не сработала — тест проверяет не то"
+    assert _code(resp) == 500 and "error" in _body(resp)
+
+
+async def test_lowvol_api_flags_a_stalled_forward_test(with_token, monkeypatch):
+    """Неделя этого понедельника обязана открыться в первый ежечасный
+    проход. Если её нет — экран говорит «стоит», а не показывает прежнюю
+    сводку как идущую."""
+    import time
+    d = R.db
+    from strategy.lowvol_paper import monday_of, DAY_MS
+    ws = monday_of(int(time.time() * 1000))
+
+    async def weeks():
+        return [{"week_start": ws - 7 * DAY_MS, "ret": 0.01, "closed_at": "x",
+                 "btc_entry": 1.0, "btc_exit": 1.0, "void": 0}]
+
+    async def open_weeks():
+        return []
+    monkeypatch.setattr(d, "lowvol_weeks", weeks)
+    monkeypatch.setattr(d, "lowvol_open_weeks", open_weeks)
+    monkeypatch.setattr(time, "time", lambda: (ws + 5 * 3600 * 1000) / 1000)
+    body = _body(await R.get_lowvol(FakeRequest(with_token)))
+    assert body["stalled"] is True, "остановившийся форвард-тест не распознан"
+
+
+def test_lowvol_dashboard_text_by_running_it_in_node():
+    """Строка дашборда проверяется ЗАПУСКОМ функции, а не чтением исходника."""
+    import json as _j
+    import os
+    import re
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    pct = re.search(r"function _pct\(x\)\{.*?\}", html, re.S).group(0)
+    fn = re.search(r"function lowvolText\(d\)\{.*?\n\}", html, re.S).group(0)
+    cases = [
+        {"error": "база не читается"},
+        {"stalled": True, "summary": {"weeks": 5}},
+        {"summary": {"weeks": 4, "mean": 0.01,
+                     "alpha": {"alpha": 0.012, "ci_lo": -0.02, "ci_hi": 0.04}}},
+        {"summary": {"weeks": 1}, "last": {"ret": 0.0284}, "open": {"legs": 24}},
+        {"summary": {"weeks": 0}, "open": {"legs": 24, "week_start": 2e12},
+         "forward_start": 1e12},
+        {"summary": {"weeks": 0, "pre_rule": 2}, "forward_start": 2e12,
+         "open": {"legs": 24, "week_start": 1e12}},
+    ]
+    script = pct + "\n" + fn + "\nconst cases=" + _j.dumps(cases) + \
+        ";\nconsole.log(JSON.stringify(cases.map(lowvolText)));"
+    out = subprocess.run(["node", "-e", script], capture_output=True, text=True,
+                         timeout=60)
+    assert out.returncode == 0, out.stderr
+    got = _j.loads(out.stdout.strip().splitlines()[-1])
+    assert "база не читается" in got[0]
+    assert "стоит" in got[1], "остановка не видна"
+    assert "альфа 1.20%" in got[2] and "-2.00%" in got[2], "альфа и интервал не показаны"
+    assert "последняя 2.84%" in got[3], "одна закрытая неделя подписана как «первая»"
+    assert "неделя идёт (24" in got[4]
+    assert "с 12.10" in got[5], "неделя старого правила подана как идущий форвард-тест"
+    assert not any("40 нед" in g for g in got), "вернулась выдуманная оценка «~40 нед.»"

@@ -609,19 +609,24 @@ async def enter_trade(client: BybitClient, sig: Signal) -> bool:
             # filled and only its response was lost to a timeout — the retry
             # got rejected as a duplicate. Treating this as failure would
             # leave a live UNTRACKED position; reconcile as success instead.
-            if ret_code == 110072 or "duplicate" in ret_msg.lower():
-                log.warning(
-                    f"{sig.symbol}: duplicate orderLinkId — first attempt filled, "
-                    f"reconciling as success"
-                )
-            elif not result:
+            duplicate = ret_code == 110072 or "duplicate" in ret_msg.lower()
+            if duplicate or not result:
                 # Пустой ответ = все три попытки _post умерли на транспорте.
                 # Это НЕ «ордер отклонён»: первая попытка могла быть принята
                 # биржей, а ответ потерян. Освобождать слот вслепую нельзя —
                 # живая позиция осталась бы без строки в trades и на следующем
                 # тике была бы усыновлена как MANUAL: без стопа, вне слотов и
                 # мимо дневного лимита. Спрашиваем биржу, что там на самом деле.
-                log.error(f"{sig.symbol}: ответ на ордер потерян — сверяю с биржей")
+                #
+                # Дубликат orderLinkId (110072) — то же самое: первая попытка
+                # ПРИНЯТА, но «принята» не значит «исполнена». Рыночный IOC
+                # бывает отменён с нулевым заливом (ценовая защита), и прежняя
+                # ветка, не спросив биржу, оформляла несуществующую позицию:
+                # слот и направление были заняты фантомом до 72 часов.
+                log.error(f"{sig.symbol}: "
+                          + ("дубликат orderLinkId — первая попытка принята"
+                             if duplicate else "ответ на ордер потерян")
+                          + " — сверяю с биржей")
                 lp = await client.get_position(sig.symbol)
                 if lp is None:
                     log.critical(
@@ -1207,7 +1212,17 @@ async def monitor_positions(client: BybitClient) -> None:
                 # позиция получала «риск > 3%» и подталкивала владельца
                 # сокращать её вручную — то есть предупреждение работало
                 # против него. Фолбэк на balance, пока эквити неизвестно.
-                _risk_base = state.equity if state.equity > 0 else state.balance
+                # Основа — счёт КАК НА МОМЕНТ ВХОДА этой позиции: эквити минус
+                # её собственный нереализованный результат. Голое эквити уже
+                # уменьшено на текущий убыток позиции, а числитель — её полный
+                # исходный риск: одна потеря учитывалась дважды, и позиция,
+                # законно стоящая на 3%, после хода против неё объявлялась
+                # «риск > 3%» с призывом сократить — резать убыточную позицию
+                # (тот же вред, что в находке №38). Убытки ДРУГИХ позиций в
+                # основе остаются: они реальны.
+                _unreal = float(lp.get("unrealisedPnl") or 0)
+                _risk_base = (state.equity - _unreal) if state.equity > 0 \
+                    else state.balance
                 if (_risk_base > 0 and pos.entry > 0 and pos.sl > 0
                         and pos.signal_type != "MANUAL"):
                     # Стоп берётся С БИРЖИ, а не из памяти. Все проверки

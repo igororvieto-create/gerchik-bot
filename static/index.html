@@ -845,7 +845,6 @@ async function refreshStats(){
     renderOverRisk(d);
     renderFlowProgress(d);
     renderViiProgress(d);
-    refreshLowvol();
     renderStrategyTag(d);
 
     if(d.last_scan_at){
@@ -1108,6 +1107,8 @@ function renderViiProgress(d){
   const p=d && d.vii_progress;
   if(!p || !p.target){ el.style.display='none'; return; }
   el.style.display='';
+  if(p.error){ el.textContent='замер VII: база не читается'; return; }
+  if(p.closed){ el.textContent='замер VII закрыт: фильтр по режиму рынка не прошёл'; return; }
   const ready = p.total>=p.target && p.with_drift>=p.min_per_group
                 && p.against_drift>=p.min_per_group;
   el.textContent = ready
@@ -1116,26 +1117,43 @@ function renderViiProgress(d){
 }
 
 // Бумажная стратегия «низкая волатильность» (форвард-тест замера X).
-// Без цвета: на десятке недель знак ничего не утверждает — нужно ~40.
+// Опрашивается СВОИМ таймером раз в 5 минут: данные меняются раз в неделю,
+// а refreshStats дёргается на каждый WS-сигнал.
+// Без цвета: знак на десятке недель ничего не утверждает. Критерий — альфа
+// к BTC, а не сырая доходность (урок замера VII).
 async function refreshLowvol(){
   const el=$('lowvol-info'); if(!el) return;
   try{
     const d=await fetch('/api/lowvol').then(r=>r.json());
-    if(!d || d.error){ el.style.display='none'; return; }
+    if(!d || (d.error==='unauthorized')){ el.style.display='none'; return; }
     el.style.display='';
     el.textContent=lowvolText(d);
   }catch{ el.style.display='none'; }
 }
+function _pct(x){ return (typeof x==='number' && isFinite(x)) ? (x*100).toFixed(2)+'%' : '—'; }
 function lowvolText(d){
+  if(d.error) return 'бумажная «низкая вола»: база не читается';
+  if(d.stalled) return '⚠ бумажная «низкая вола»: неделя не открыта — форвард-тест стоит';
   const s=d.summary||{};
-  const open=d.open;
-  if(s.weeks>=2){
-    return `бумажная «низкая вола»: ${s.weeks} нед., `
-      +`${(s.mean*100).toFixed(2)}%/нед, t=${s.t.toFixed(2)} (для вывода нужно ~40 нед.)`;
+  const a=s.alpha;
+  if(s.weeks>=3 && a){
+    return `бумажная «низкая вола»: ${s.weeks} нед., альфа ${_pct(a.alpha)}/нед `
+      +`[${_pct(a.ci_lo)}..${_pct(a.ci_hi)}], средняя ${_pct(s.mean)}`;
   }
-  if(open) return `бумажная «низкая вола»: неделя идёт (${open.legs} поз.)`;
-  return 'бумажная «низкая вола»: первая неделя — понедельник 00:10 UTC';
+  if(d.last && d.last.ret!=null){
+    return `бумажная «низкая вола»: закрыто ${s.weeks} нед., последняя ${_pct(d.last.ret)}`
+      +(d.open ? `, идёт следующая (${d.open.legs} поз.)` : '');
+  }
+  if(d.open && d.forward_start && d.open.week_start < d.forward_start)
+    return 'бумажная «низкая вола»: отсчёт форвард-теста — с 12.10 '
+      +'(прежние недели — старое правило отбора, не засчитываются)';
+  if(d.open) return `бумажная «низкая вола»: неделя идёт (${d.open.legs} поз.)`;
+  return 'бумажная «низкая вола»: первая неделя — ближайший понедельник';
 }
+// Первый вызов — с задержкой: обёртка fetch с токеном и разбор #token=
+// объявлены ниже по файлу, и мгновенный вызов ушёл бы без токена.
+setTimeout(refreshLowvol, 3000);
+setInterval(refreshLowvol, 5*60*1000);
 
 function renderEnvTypos(d){
   const el=$('env-info'); if(!el) return;

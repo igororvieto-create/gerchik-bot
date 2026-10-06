@@ -1643,7 +1643,8 @@ async def test_direction_by_market_slice_separates_selection_from_beta(
         async with aiosqlite.connect(d.DB_PATH) as db:
             async with db.execute("SELECT MAX(id) FROM signals") as c:
                 sid = (await c.fetchone())[0]
-        await d.set_signal_outcome(sid, outcome, 100.0, mkt_pct=mkt)
+        await d.set_signal_outcome(sid, outcome, 100.0)
+        await d.set_mkt_window(sid, mkt)
 
     # Падающий рынок: лонги гибнут, шорты выигрывают — это БЕТА.
     for i in range(4):
@@ -1812,3 +1813,49 @@ async def test_backfill_runs_even_when_nothing_is_pending(tmp_path, monkeypatch)
         async with db.execute("SELECT mkt_prior_pct FROM signals") as c:
             v = (await c.fetchone())[0]
     assert v is not None, "досчёт не выполнился при пустом pending"
+
+
+
+def _btc_hours(closes, start_ms=0):
+    H = 3600 * 1000
+    return [{"ts": start_ms + i * H, "close": c} for i, c in enumerate(closes)]
+
+
+def test_window_drift_does_not_depend_on_when_the_signal_resolved():
+    """Находка роли A: дрейф мерился до момента вердикта, а он зависит от
+    исхода (стоп в 1R ближе цели в 2R). Лосс на 3-м часу и вин на 20-м при
+    одном и том же рынке попадали в разные корзины. Окно теперь фиксировано:
+    48 ч после сигнала, и только по завершённым барам."""
+    from strategy.evaluator import _window_drift
+    H = 3600 * 1000
+    mkt = _btc_hours([100.0 * (1 - 0.001 * i) for i in range(120)])
+    sig = 10 * H
+    v = _window_drift(mkt, sig)
+    expect = (100.0 * (1 - 0.001 * 57) / (100.0 * (1 - 0.001 * 9)) - 1) * 100
+    assert v == pytest.approx(expect), "окно не равно 48 часам после сигнала"
+    assert _window_drift(mkt[:40], sig) is None, \
+        "дрейф посчитан до того, как окно целиком прошло"
+
+
+async def test_window_backfill_waits_for_the_window_and_covers_expired(tmp_path, monkeypatch):
+    """Досчёт берёт и EXPIRED — срез больше не считается по другой
+    популяции, чем срез по направлению. И не трогает сигнал, чьё окно ещё
+    не закончилось."""
+    import core.db as d
+    import aiosqlite
+    from core.state import Signal
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "win.db"))
+    await d.init_db()
+    for sym, ts in (("OLDUSDT", "2026-09-20T00:00:00"), ("NEWUSDT", "2026-09-27T00:00:00")):
+        await d.save_signal(Signal(
+            symbol=sym, signal_type="VSA_CLIMAX", direction="LONG", score=55,
+            price=100.0, oi_change=0.0, vol_ratio=0.0, funding=0.0,
+            ob_bias="NEUTRAL", atr_pct=2.0, details="", entry=100.0, sl=98.0,
+            tp1=101.0, tp2=104.0, tp3=106.0, rr=2.0, sl_pct=2.0))
+        async with aiosqlite.connect(d.DB_PATH) as db:
+            await db.execute("UPDATE signals SET ts=?, outcome='EXPIRED' "
+                             "WHERE symbol=?", (ts, sym))
+            await db.commit()
+    rows = await d.get_rows_missing_window("2026-09-01T00:00:00", "2026-09-25T00:00:00")
+    assert [r["ts"] for r in rows] == ["2026-09-20T00:00:00"], \
+        "досчёт взял сигнал с незавершённым окном или пропустил EXPIRED"

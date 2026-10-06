@@ -1719,3 +1719,100 @@ async def test_closed_pnl_is_taken_as_final_and_funding_is_not_subtracted_twice(
     assert pnl == -1.23, (
         f"учтено {pnl} вместо биржевого -1.23 — если из closedPnl что-то "
         f"вычитается дополнительно, издержки считаются дважды")
+
+
+async def test_losing_position_at_three_percent_is_not_flagged_as_over_risk(monkeypatch):
+    """Эквити уже уменьшено на убыток позиции, а числитель — её полный
+    исходный риск: одна потеря считалась дважды. Позиция, вошедшая с риском
+    2.98% от счёта, после хода против неё объявлялась «риск > 3%» с
+    призывом сократить — резать убыточную позицию (вред находки №38)."""
+    import strategy.trader as tr
+    from core.state import state, Position
+    state.over_risk.clear()
+    monkeypatch.setattr(state, "balance", 980.0)
+    monkeypatch.setattr(state, "equity", 980.0)        # кошелёк 1000, позиция −20
+    pos = Position(symbol="LOSSUSDT", side="Buy", entry=100.0, sl=90.0,
+                   tp1=0.0, tp2=0.0, tp3=0.0, qty=2.98, qty_opened=2.98,
+                   score=50, signal_type="X", order_id="o")
+    state.positions["LOSSUSDT"] = pos
+    tr._RISK_WARNED.discard("LOSSUSDT")
+    live = {"symbol": "LOSSUSDT", "side": "Buy", "size": "2.98",
+            "avgPrice": "100.0", "stopLoss": "90.0", "takeProfit": "0",
+            "unrealisedPnl": "-20"}
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_positions(self, symbol=None):
+            return [live]
+
+        async def get_balance(self):
+            return 980.0
+
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "LOSSUSDT", "lastPrice": "93.3"}]
+
+    try:
+        await tr.monitor_positions(C())
+        assert "LOSSUSDT" not in state.over_risk, (
+            f"убыток посчитан дважды: позиция с риском 2.98% помечена "
+            f"{state.over_risk.get('LOSSUSDT')}%")
+    finally:
+        state.positions.pop("LOSSUSDT", None)
+
+
+async def test_duplicate_order_with_no_fill_does_not_create_a_phantom(monkeypatch):
+    """Дубликат orderLinkId значит «первая попытка ПРИНЯТА», но не
+    «исполнена»: рыночный IOC бывает отменён с нулевым заливом. Прежняя
+    ветка, не спросив биржу, оформляла несуществующую позицию — слот и
+    направление были заняты фантомом до 72 часов."""
+    import strategy.trader as tr
+    from core.config import cfg
+    from core.state import state, Signal
+    monkeypatch.setattr(cfg, "AUTO_TRADE", True)
+    monkeypatch.setattr(cfg, "TRADE_MIN_SCORE", 0)
+    monkeypatch.setattr(cfg, "MIN_TRADE_HEADROOM_R", 0.0)
+    monkeypatch.setattr(cfg, "RISK_PER_TRADE", 1.0)
+    state.balance = 10000.0
+    state.positions.clear(); state.pending_entries.clear()
+    state.trading_halted = False; state.halt_reason = ""
+    asked = []
+
+    class C:
+        api_key = "k"
+        secret = "s"
+
+        async def get_balance(self):
+            return 10000.0
+
+        async def get_instrument_info(self, symbol):
+            return {"lotSizeFilter": {"qtyStep": "0.01", "minOrderQty": "0.01",
+                                      "minNotionalValue": "5"},
+                    "priceFilter": {"tickSize": "0.01"}}
+
+        async def get_positions(self, symbol=None):
+            return []
+
+        async def set_leverage(self, symbol, lev):
+            return True
+
+        async def place_order(self, **kw):
+            return {"retCode": 110072, "retMsg": "OrderLinkedID is duplicate"}
+
+        async def get_position(self, symbol):
+            asked.append(symbol)
+            return {}                     # залива не было — позиции нет
+
+        async def get_tickers(self, symbol=None):
+            return [{"symbol": "DUPUSDT", "lastPrice": "100"}]
+
+    sig = Signal(symbol="DUPUSDT", signal_type="X", direction="LONG", score=99,
+                 price=100.0, oi_change=0.0, vol_ratio=0.0, funding=0.0,
+                 ob_bias="NEUTRAL", atr_pct=1.0, details="",
+                 entry=100.0, sl=99.0, tp1=101.0, tp2=102.0, tp3=103.0,
+                 rr=2.0, headroom=3.0, sl_pct=1.0)
+    ok = await tr.enter_trade(C(), sig)
+    assert asked, "на дубликате биржу не спросили"
+    assert not ok and "DUPUSDT" not in state.positions, \
+        "фантомная позиция оформлена без залива"

@@ -285,10 +285,14 @@ def test_judging_window_has_exactly_one_source():
     import os
     import re
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # _EVAL_REACH_HOURS — досягаемость оценщика (3 окна). Она жила числом
+    # 144 и прошла мимо этого теста: ревью 2026-10-06 (роль C) её нашло.
     for path, name in ((os.path.join(root, "strategy", "evaluator.py"),
                         "_MAX_AGE_HOURS"),
                        (os.path.join(root, "core", "db.py"),
-                        "_JUDGE_WINDOW_HOURS")):
+                        "_JUDGE_WINDOW_HOURS"),
+                       (os.path.join(root, "core", "db.py"),
+                        "_EVAL_REACH_HOURS")):
         with open(path, encoding="utf-8") as f:
             src = f.read()
         assert not re.search(rf"^{name}\s*=\s*\d+", src, re.M), \
@@ -314,3 +318,19 @@ def test_evaluator_imports_standalone():
         capture_output=True, text=True, cwd=root, timeout=60)
     assert out.returncode == 0, f"циклический импорт вернулся: {out.stderr}"
     assert _j.loads(out.stdout.strip().splitlines()[-1]) == 48
+
+
+
+def test_closed_measurement_vii_is_labelled_closed():
+    """Замер VII закрыт 2026-09-28. Без признака дашборд звал «готов к
+    вердикту» — то есть к повторному взгляду, который запрещён."""
+    import os
+    import core.db as d
+    assert d.VII_CLOSED is True
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "static", "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    i = html.index("function renderViiProgress")
+    body = html[i:i + 900]
+    assert "p.closed" in body and body.index("p.closed") < body.index("готов к вердикту"), \
+        "закрытый замер проверяется после «готов к вердикту» или не проверяется"

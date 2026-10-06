@@ -3,6 +3,8 @@ import os
 from datetime import datetime, timedelta
 from typing import Any, List, Dict, Optional
 
+from core.config import JUDGE_WINDOW_HOURS
+
 import aiosqlite
 
 from core.state import Signal, Position
@@ -228,7 +230,14 @@ async def init_db() -> None:
                     # Не путать с mkt_pct: тот мерит окно ОЦЕНКИ, то есть
                     # будущее относительно входа, и строить на нём фильтр
                     # входа значило бы заглядывать вперёд.
-                    "mkt_prior_pct REAL"]:
+                    "mkt_prior_pct REAL",
+                    # Дрейф рынка за ФИКСИРОВАННЫЕ 48 ч после сигнала — для
+                    # среза «направление × рынок». mkt_pct мерил окно до
+                    # момента вердикта, а он зависит от исхода (стоп в 1R
+                    # ближе цели в 2R): лосс получал дрейф за 3 часа, вин —
+                    # за 20, и корзина оказывалась связана с результатом.
+                    # mkt_pct больше не пишется; колонка оставлена как была.
+                    "mkt_win_pct REAL"]:
             try:
                 await db.execute(f"ALTER TABLE signals ADD COLUMN {col}")
             except Exception as e:
@@ -326,8 +335,17 @@ async def init_db() -> None:
                 btc_exit    REAL,
                 ret         REAL,
                 n           INTEGER,
-                closed_at   TEXT
+                closed_at   TEXT,
+                void        INTEGER NOT NULL DEFAULT 0
             )""")
+        # void: неделя закрыта, но не засчитана (оценено < 6 позиций). Для
+        # баз, где таблица уже есть, колонка добавляется миграцией.
+        try:
+            await db.execute("ALTER TABLE lowvol_weeks ADD COLUMN "
+                             "void INTEGER NOT NULL DEFAULT 0")
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                log.error(f"init_db: не удалось добавить lowvol_weeks.void — {e}")
         await db.commit()
     # Строки, записанные ДО появления ярлыка, помечаются отдельным
     # значением, а НЕ текущим STRATEGY_ID.
@@ -639,7 +657,7 @@ async def get_recent_signals(hours: int = 24, limit: int = 200) -> List[Dict]:
         return []
 
 
-async def get_pending_signals(max_age_hours: int = 48) -> List[Dict]:
+async def get_pending_signals(max_age_hours: int = JUDGE_WINDOW_HOURS) -> List[Dict]:
     """Signals without a recorded outcome, young enough to still evaluate."""
     cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat()
     try:
@@ -1050,7 +1068,7 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
                           sl_pct, atr_pct, headroom, funding, rr,
                           entry, sl, outcome_price,
                           flow_delta, flow_absorb, flow_span_min,
-                          ob_bias, round_pos, mkt_pct
+                          ob_bias, round_pos, mkt_win_pct
                    FROM signals WHERE outcome IS NOT NULL AND ts >= ?
                      AND """ + _CUR_STRAT + """
                    ORDER BY ts DESC""",
@@ -1149,7 +1167,7 @@ async def get_outcome_breakdown(days: int = 7) -> Dict:
             rb = _round_bucket(r["round_pos"])
             if rb:
                 _acc(out["by_round"], rb, r["outcome"], _sl, _fd, _rr, _exr)
-            mb = _mkt_bucket(r["direction"], r["mkt_pct"])
+            mb = _mkt_bucket(r["direction"], r["mkt_win_pct"])
             if mb:
                 _acc(out["by_dir_market"], mb, r["outcome"], _sl, _fd, _rr, _exr)
 
@@ -1356,11 +1374,15 @@ async def get_trades(limit: int = 50) -> List[Dict]:
 
 # Докуда дотягивается оценщик: _MAX_AGE_HOURS(48) * 3. Нерешённый сигнал
 # старше этого срока вердикта уже не получит никогда, и держать его незачем.
-_EVAL_REACH_HOURS = 144
+# Досягаемость оценщика — ровно то, что он запрашивает:
+# get_pending_signals(max_age_hours=_MAX_AGE_HOURS * 3). Числом 144 это была
+# скрытая копия окна оценки: подними окно — чистка продолжила бы удалять
+# нерешённые строки раньше их последнего шанса на вердикт.
+_EVAL_REACH_HOURS = JUDGE_WINDOW_HOURS * 3
 # Окно, внутри которого оценщик ещё может вынести вердикт. Сигнал моложе
 # этого срока удалять нельзя ни по какому потолку: исход будет потерян, и
 # потерян НЕ СЛУЧАЙНО.
-from core.config import JUDGE_WINDOW_HOURS as _JUDGE_WINDOW_HOURS
+_JUDGE_WINDOW_HOURS = JUDGE_WINDOW_HOURS
 
 
 # Цель замера III (docs/PREREGISTRATION.md): 130 решённых исходов с
@@ -1386,6 +1408,7 @@ VII_START = "2026-09-16T06:22:00"
 VII_TARGET_N = 120
 VII_MIN_PER_GROUP = 40
 VII_DRIFT_MIN_PCT = 1.0
+VII_CLOSED = True        # вердикт вынесен 2026-09-28, docs/REGIME.md
 
 
 async def get_rows_missing_prior(since_iso: str, limit: int = 1000) -> List[Dict]:
@@ -1418,6 +1441,35 @@ async def set_mkt_prior(signal_id: int, value: float) -> bool:
         return False
 
 
+async def get_rows_missing_window(since_iso: str, until_iso: str,
+                                  limit: int = 2000) -> List[Dict]:
+    """Сигналы без дрейфа-за-окно, у которых окно 48 ч УЖЕ целиком прошло."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                    "SELECT id, ts FROM signals WHERE mkt_win_pct IS NULL "
+                    "AND ts >= ? AND ts <= ? ORDER BY ts LIMIT ?",
+                    (since_iso, until_iso, limit)) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+    except Exception as e:
+        log.error(f"get_rows_missing_window error: {e}")
+        return []
+
+
+async def set_mkt_window(signal_id: int, value: float) -> bool:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE signals SET mkt_win_pct=? "
+                "WHERE id=? AND mkt_win_pct IS NULL", (value, signal_id))
+            await db.commit()
+        return True
+    except Exception as e:
+        log.error(f"set_mkt_window error: {e}")
+        return False
+
+
 async def vii_progress() -> Dict:
     """Прогресс замера VII — ТОЛЬКО СЧЁТЧИКИ, без исходов.
 
@@ -1427,10 +1479,13 @@ async def vii_progress() -> Dict:
     считаются намеренно: взгляд на них до цели — это подглядывание, уже
     однажды записанное как нарушение в пре-регистрации.
     """
+    # closed: вердикт вынесен 2026-09-28 (docs/REGIME.md). Без признака
+    # дашборд навсегда звал «готов к вердикту» — то есть к повторному
+    # взгляду, который пре-регистрация запрещает.
     out: Dict[str, Any] = {"with_drift": 0, "against_drift": 0,
                            "total": 0, "target": VII_TARGET_N,
                            "min_per_group": VII_MIN_PER_GROUP,
-                           "missing_prior": 0}
+                           "missing_prior": 0, "closed": VII_CLOSED}
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
@@ -1454,7 +1509,10 @@ async def vii_progress() -> Dict:
             out["missing_prior"] = int(row[2] or 0)
             out["total"] = out["with_drift"] + out["against_drift"]
     except Exception as e:
+        # Нули при сбое читались бы как «0/120 набрано»; признак ошибки
+        # отличает «база не читается» от «пусто».
         log.error(f"vii_progress error: {e}")
+        out["error"] = True
     return out
 
 
@@ -1656,42 +1714,65 @@ async def lowvol_open_week(week_start: int, legs: List[Dict],
         return False
 
 
-async def lowvol_open_legs() -> Dict[str, Any]:
-    """Незакрытая неделя: {week_start, btc_entry, legs}. БРОСАЕТ при ошибке
-    БД — пустой ответ читался бы как «открытой недели нет», и её позиции
-    не закрылись бы никогда."""
+async def lowvol_open_weeks() -> List[Dict[str, Any]]:
+    """ВСЕ незакрытые недели с позициями, старые первыми. БРОСАЕТ при ошибке
+    БД — пустой ответ читался бы как «открытых недель нет», и их позиции не
+    закрылись бы никогда.
+
+    Именно все, а не последняя: если закрытие одной недели задержалось,
+    следующая всё равно открывается в свой понедельник, и закрывать нужно
+    обе. Прежняя версия отдавала только самую свежую — старая повисала."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
                 "SELECT * FROM lowvol_weeks WHERE closed_at IS NULL "
-                "ORDER BY week_start DESC LIMIT 1") as cur:
-            w = await cur.fetchone()
-        if w is None:
-            return {}
-        async with db.execute("SELECT * FROM lowvol_legs WHERE week_start=?",
-                              (w["week_start"],)) as cur:
-            legs = [dict(r) for r in await cur.fetchall()]
-    return {"week_start": w["week_start"], "btc_entry": w["btc_entry"],
-            "legs": legs}
+                "ORDER BY week_start") as cur:
+            weeks = [dict(r) for r in await cur.fetchall()]
+        for w in weeks:
+            async with db.execute("SELECT * FROM lowvol_legs WHERE week_start=?",
+                                  (w["week_start"],)) as cur:
+                w["legs"] = [dict(r) for r in await cur.fetchall()]
+    return weeks
+
+
+async def lowvol_open_legs() -> Dict[str, Any]:
+    """Самая свежая незакрытая неделя — для дашборда. БРОСАЕТ при ошибке."""
+    weeks = await lowvol_open_weeks()
+    return weeks[-1] if weeks else {}
+
+
+async def lowvol_week_exists(week_start: int) -> bool:
+    """Неделя с таким началом уже есть (открытая или закрытая). БРОСАЕТ."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT 1 FROM lowvol_weeks WHERE week_start=?",
+                              (week_start,)) as cur:
+            return await cur.fetchone() is not None
 
 
 async def lowvol_close_week(week_start: int, results: List[Dict],
-                            btc_exit: Optional[float]) -> bool:
-    """Закрыть неделю: записать выход каждой позиции и итог недели."""
+                            btc_exit: Optional[float], void: bool = False) -> bool:
+    """Закрыть неделю. True — закрыта ИМЕННО ЭТИМ вызовом.
+
+    Закрывается только незакрытая: повторный вызов по уже закрытой неделе
+    затирал бы записанный итог, а вызов по несуществующей возвращал бы
+    успех. void — неделя не засчитывается (оценено меньше 6 позиций)."""
     rets = [r["ret"] for r in results if r.get("ret") is not None]
+    week_ret = None if (void or not rets) else sum(rets) / len(rets)
     try:
         async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "UPDATE lowvol_weeks SET btc_exit=?, ret=?, n=?, closed_at=?, void=? "
+                "WHERE week_start=? AND closed_at IS NULL",
+                (btc_exit, week_ret, len(rets), datetime.utcnow().isoformat(),
+                 1 if void else 0, week_start))
+            if cur.rowcount != 1:
+                return False
             for r in results:
                 await db.execute(
                     "UPDATE lowvol_legs SET exit=?, funding=?, ret=? "
                     "WHERE week_start=? AND symbol=?",
                     (r.get("exit"), r.get("funding"), r.get("ret"),
                      week_start, r["symbol"]))
-            await db.execute(
-                "UPDATE lowvol_weeks SET btc_exit=?, ret=?, n=?, closed_at=? "
-                "WHERE week_start=?",
-                (btc_exit, (sum(rets) / len(rets)) if rets else None, len(rets),
-                 datetime.utcnow().isoformat(), week_start))
             await db.commit()
         return True
     except Exception as e:
@@ -1700,12 +1781,10 @@ async def lowvol_close_week(week_start: int, results: List[Dict],
 
 
 async def lowvol_weeks() -> List[Dict]:
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                    "SELECT * FROM lowvol_weeks ORDER BY week_start") as cur:
-                return [dict(r) for r in await cur.fetchall()]
-    except Exception as e:
-        log.error(f"lowvol_weeks error: {e}")
-        return []
+    """Все недели. БРОСАЕТ при ошибке: пустой список на дашборде читался бы
+    как «форвард-тест ещё не начался», а не как «база не читается»."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+                "SELECT * FROM lowvol_weeks ORDER BY week_start") as cur:
+            return [dict(r) for r in await cur.fetchall()]

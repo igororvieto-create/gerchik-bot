@@ -473,18 +473,37 @@ async def get_lowvol(request: Request):
     """Бумажная стратегия «низкая волатильность» — форвард-тест замера X."""
     if (deny := _require_token(request)) is not None:
         return deny
-    from strategy.lowvol_paper import summarize
-    weeks = await db.lowvol_weeks()
+    import time as _time
+    from strategy.lowvol_paper import (DAY_MS, FORWARD_START_MS, monday_of,
+                                       summarize)
     try:
-        open_week = await db.lowvol_open_legs()
+        weeks = await db.lowvol_weeks()
+        open_weeks = await db.lowvol_open_weeks()
     except Exception as e:
-        log.error(f"lowvol open legs: {e}")
-        open_week = {}
+        # Ошибка базы НЕ равна «недель нет»: пустой ответ читался бы как
+        # «форвард-тест ещё не начался».
+        log.error(f"/api/lowvol: база не читается — {e}")
+        return JSONResponse({"error": "база не читается"}, status_code=500)
+    now_ms = int(_time.time() * 1000)
+    ws = monday_of(now_ms)
+    # Неделя этого понедельника обязана открыться в первый ежечасный проход.
+    # Если её нет спустя 3 часа — форвард-тест стоит, и экран обязан это
+    # сказать, а не показывать прежнюю сводку как идущую.
+    stalled = (now_ms - ws > 3 * 3600 * 1000
+               and not any(int(w["week_start"]) == ws for w in weeks))
+    # Последняя ЗАСЧИТЫВАЕМАЯ неделя: недели до исправления правила отбора
+    # проверяли другую стратегию и на экране выдавали бы себя за результат.
+    last = next((w for w in reversed(weeks) if w.get("closed_at")
+                 and int(w["week_start"]) >= FORWARD_START_MS), None)
     return JSONResponse({
         "summary": summarize(weeks),
         "weeks": weeks,
-        "open": ({"week_start": open_week["week_start"],
-                  "legs": len(open_week["legs"])} if open_week else None),
+        "open": ({"week_start": open_weeks[-1]["week_start"],
+                  "legs": len(open_weeks[-1]["legs"])} if open_weeks else None),
+        "stalled": stalled,
+        "last": last,
+        "day_ms": DAY_MS,
+        "forward_start": FORWARD_START_MS,
     })
 
 

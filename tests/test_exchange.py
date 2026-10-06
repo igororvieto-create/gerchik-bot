@@ -331,3 +331,39 @@ async def test_ordinary_api_error_is_not_retried(monkeypatch):
     monkeypatch.setattr(c, "_raw_get", fake_raw_get)
     data = await c._get("/v5/market/kline", {"symbol": "X"})
     assert data.get("retCode") == 10001 and len(calls) == 1
+
+
+async def test_rate_limit_on_post_is_retried_with_the_same_body(monkeypatch):
+    """Лимит на досылке стопа без повтора превращался в аварийное закрытие
+    позиции по рынку через три тика. Повтор обязан нести ТО ЖЕ тело — с тем
+    же orderLinkId, иначе повтор ордера был бы новым ордером."""
+    import exchange.bybit as bb
+    c = bb.BybitClient("k", "s")
+    replies = [json.dumps({"retCode": 10018, "retMsg": "ip rate limit"}),
+               json.dumps({"retCode": 0, "result": {}})]
+    bodies = []
+
+    async def fake_raw_post(url, sign_fn, data):
+        bodies.append(data)
+        return 200, replies[len(bodies) - 1]
+
+    async def fake_sleep(s):
+        return None
+    monkeypatch.setattr(c, "_raw_post", fake_raw_post)
+    monkeypatch.setattr(bb.asyncio, "sleep", fake_sleep)
+    data = await c._post("/v5/position/trading-stop", {"symbol": "X", "stopLoss": "1"})
+    assert data.get("retCode") == 0 and len(bodies) == 2
+    assert bodies[0] == bodies[1], "повтор ушёл с другим телом"
+
+
+async def test_ordinary_post_error_is_not_retried(monkeypatch):
+    import exchange.bybit as bb
+    c = bb.BybitClient("k", "s")
+    calls = []
+
+    async def fake_raw_post(url, sign_fn, data):
+        calls.append(data)
+        return 200, json.dumps({"retCode": 110007, "retMsg": "insufficient balance"})
+    monkeypatch.setattr(c, "_raw_post", fake_raw_post)
+    data = await c._post("/v5/order/create", {"symbol": "X"})
+    assert data.get("retCode") == 110007 and len(calls) == 1

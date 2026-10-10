@@ -129,6 +129,10 @@ async def lifespan(app: FastAPI):
     _scheduler.add_job(_lowvol_job, "interval", hours=1, id="lowvol",
                        max_instances=1, misfire_grace_time=600,
                        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=90))
+    # Сторож здоровья для уведомлений на телефон: раз в 5 минут, тревога —
+    # один раз за инцидент. Без подписок и без ключа ничего не делает.
+    _scheduler.add_job(_watchdog_job, "interval", minutes=5, id="watchdog",
+                       max_instances=1, misfire_grace_time=120)
     _scheduler.start()
     log.info(f"Scheduler started — scan every {cfg.SCAN_INTERVAL_MIN} min")
 
@@ -240,6 +244,14 @@ async def _monitor_job():
 async def _outcome_job():
     if _client:
         await evaluate_signal_outcomes(_client)
+
+
+async def _watchdog_job():
+    try:
+        from notifications.notify import watchdog
+        await watchdog()
+    except Exception as e:
+        log.warning(f"watchdog: {e}")
 
 
 async def _lowvol_job():

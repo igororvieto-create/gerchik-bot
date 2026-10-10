@@ -895,3 +895,49 @@ def test_lowvol_dashboard_text_by_running_it_in_node():
     assert "неделя идёт (24" in got[4]
     assert "с 12.10" in got[5], "неделя старого правила подана как идущий форвард-тест"
     assert not any("40 нед" in g for g in got), "вернулась выдуманная оценка «~40 нед.»"
+
+
+async def test_push_subscription_validation(with_token, tmp_path, monkeypatch):
+    """Адрес подписки — только https: иначе подпиской можно было бы
+    заставить бот слать запросы на любой адрес, в том числе внутренний."""
+    d = R.db
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "s.db"))
+    await d.init_db()
+    from notifications import webpush as wp
+    good = {"endpoint": "https://fcm.googleapis.com/x",
+            "keys": {"p256dh": wp.b64u(b"\x04" + b"1" * 64), "auth": wp.b64u(b"a" * 16)}}
+    bad_scheme = {**good, "endpoint": "http://169.254.169.254/latest"}
+    bad_len = {**good, "keys": {"p256dh": "abc", "auth": wp.b64u(b"a" * 16)}}
+    for body, code in ((bad_scheme, 400), (bad_len, 400), (good, 200)):
+        resp = await R.push_subscribe(FakeRequest(with_token, body=body, method="POST"))
+        assert _code(resp) == code, (body, _body(resp))
+    assert len(await d.push_subs()) == 1
+
+
+async def test_push_subscribe_requires_token(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_TOKEN", "secret")
+    resp = await R.push_subscribe(FakeRequest("", body={}, method="POST"))
+    assert _code(resp) in (401, 403)
+
+
+def test_app_manifest_points_to_real_png_icons():
+    """iPhone не берёт иконки из манифеста — только apple-touch-icon PNG;
+    Android требует PNG 192 и 512. Без них на экране снимок страницы."""
+    import json as _j
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    m = _j.load(open(os.path.join(root, "static", "manifest.json"), encoding="utf-8"))
+    sizes = {i["sizes"] for i in m["icons"] if i["type"] == "image/png"}
+    assert {"192x192", "512x512"} <= sizes
+    for name in ("icon-192.png", "icon-512.png", "apple-touch-icon.png"):
+        with open(os.path.join(root, "static", name), "rb") as f:
+            assert f.read(8) == b"\x89PNG\r\n\x1a\n", f"{name} не PNG"
+    html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
+    assert 'rel="apple-touch-icon"' in html
+    assert "serviceWorker.register('/sw.js')" in html
+
+
+async def test_icon_route_serves_files_and_nothing_else():
+    resp = await R.app_icon("icon-192")
+    assert _code(resp) == 200 and resp.body[:4] == b"\x89PNG"
+    assert _code(await R.app_icon("../core/db")) == 404

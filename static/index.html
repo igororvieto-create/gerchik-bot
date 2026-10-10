@@ -5,13 +5,20 @@
 <!-- без maximum-scale: цены SL/TP набраны шрифтом 10-11px, и запрет зума
      не давал их разглядеть на телефоне -->
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<meta name="theme-color" content="#f0b90b"/>
-<!-- Манифест сервер отдавал, но страница его не подключала: «Добавить на
-     главный экран» давало обычную закладку без standalone-режима.
-     Service worker намеренно НЕ регистрируется: при частых деплоях он
-     подсовывал бы закешированный старый интерфейс. -->
+<meta name="theme-color" content="#0d1117"/>
+<!-- Приложение на телефоне. Service worker теперь регистрируется: раньше
+     этого избегали, потому что он подсовывал бы закешированный старый
+     интерфейс после деплоя. Нынешний берёт страницу из СЕТИ, а кэш — только
+     без связи, поэтому после деплоя всегда свежий интерфейс. Без service
+     worker уведомления в приложение невозможны. -->
 <link rel="manifest" href="/manifest.json"/>
-<title>Gerchik Bot · OI Scanner</title>
+<link rel="apple-touch-icon" href="/apple-touch-icon.png"/>
+<link rel="icon" type="image/png" href="/icon-192.png"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-title" content="Gerchik"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<title>Gerchik</title>
 <style>
 :root{
   --bg:#0a0e17;--surface:#111827;--card:#161d2e;--border:#1e2d45;
@@ -324,6 +331,7 @@ input[type=range]::-moz-range-thumb{
   <div class="tb-spacer"></div>
   <button class="tb-btn" onclick="openHistory()">📜</button>
   <button class="tb-btn" id="diag-btn" onclick="openDiag()">🔧</button>
+  <button class="tb-btn" id="push-btn" onclick="enablePush()" title="Уведомления на телефон">🔔</button>
   <button class="tb-btn" onclick="openSettings()">⚙️</button>
   <button class="tb-btn primary" id="scan-btn" onclick="doScan()">🔍 Скан</button>
 </div>
@@ -1154,6 +1162,61 @@ function lowvolText(d){
 // объявлены ниже по файлу, и мгновенный вызов ушёл бы без токена.
 setTimeout(refreshLowvol, 3000);
 setInterval(refreshLowvol, 5*60*1000);
+
+// ── Приложение на телефоне: service worker и уведомления ──────────────────
+function _isStandalone(){
+  return window.matchMedia('(display-mode: standalone)').matches || navigator.standalone===true;
+}
+function _isIOS(){ return /iphone|ipad|ipod/i.test(navigator.userAgent); }
+function _b64uToBytes(s){
+  const b=atob((s+'='.repeat((4-s.length%4)%4)).replace(/-/g,'+').replace(/_/g,'/'));
+  return Uint8Array.from(b, c=>c.charCodeAt(0));
+}
+let _swReg=null;
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').then(r=>{ _swReg=r; refreshPushBtn(); })
+    .catch(()=>{});
+}
+async function refreshPushBtn(){
+  const b=$('push-btn'); if(!b) return;
+  let on=false;
+  try{ on=!!(_swReg && await _swReg.pushManager.getSubscription()); }catch{}
+  b.textContent = on ? '🔔' : '🔕';
+  b.title = on ? 'Уведомления включены (нажать — проверить)' : 'Включить уведомления на телефон';
+}
+async function enablePush(){
+  // На iPhone уведомления есть только у приложения, добавленного на экран
+  // «Домой» (iOS 16.4+). В обычной вкладке Safari pushManager отсутствует,
+  // и молчаливый отказ выглядел бы как поломка кнопки.
+  if(_isIOS() && !_isStandalone()){
+    alert('На iPhone: Safari → «Поделиться» → «На экран „Домой“», '
+         +'затем откройте Gerchik с экрана и нажмите 🔔 снова.');
+    return;
+  }
+  if(!('serviceWorker' in navigator) || !('PushManager' in window)){
+    alert('Этот браузер не поддерживает уведомления.'); return;
+  }
+  try{
+    const reg=_swReg || await navigator.serviceWorker.ready;
+    let sub=await reg.pushManager.getSubscription();
+    if(sub){
+      const r=await fetch('/api/push/test',{method:'POST'}).then(r=>r.json());
+      alert(r.sent ? 'Уведомления включены — отправил проверочное.' : 'Подписка есть, но доставка не прошла.');
+      return;
+    }
+    const perm=await Notification.requestPermission();
+    if(perm!=='granted'){ alert('Разрешение на уведомления не дано.'); return; }
+    const k=await fetch('/api/push/key').then(r=>r.json());
+    if(!k.key){ alert(k.error || 'Уведомления не настроены на сервере.'); return; }
+    sub=await reg.pushManager.subscribe({userVisibleOnly:true,
+                                          applicationServerKey:_b64uToBytes(k.key)});
+    const r=await fetch('/api/push/subscribe',{method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify(sub)});
+    if(!r.ok){ alert('Сервер не сохранил подписку.'); return; }
+    await fetch('/api/push/test',{method:'POST'});
+    refreshPushBtn();
+  }catch(e){ alert('Не удалось включить уведомления: '+e.message); }
+}
 
 function renderEnvTypos(d){
   const el=$('env-info'); if(!el) return;

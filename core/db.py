@@ -338,6 +338,14 @@ async def init_db() -> None:
                 closed_at   TEXT,
                 void        INTEGER NOT NULL DEFAULT 0
             )""")
+        # Подписки на уведомления приложения (Web Push).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS push_subs (
+                endpoint    TEXT PRIMARY KEY,
+                p256dh      TEXT NOT NULL,
+                auth        TEXT NOT NULL,
+                created_at  TEXT NOT NULL
+            )""")
         # void: неделя закрыта, но не засчитана (оценено < 6 позиций). Для
         # баз, где таблица уже есть, колонка добавляется миграцией.
         try:
@@ -1788,3 +1796,41 @@ async def lowvol_weeks() -> List[Dict]:
         async with db.execute(
                 "SELECT * FROM lowvol_weeks ORDER BY week_start") as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+
+# ── Подписки на уведомления приложения ─────────────────────────────────────
+
+async def push_sub_add(endpoint: str, p256dh: str, auth: str) -> bool:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO push_subs(endpoint, p256dh, auth, created_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(endpoint) DO UPDATE SET "
+                "p256dh=excluded.p256dh, auth=excluded.auth",
+                (endpoint, p256dh, auth, datetime.utcnow().isoformat()))
+            await db.commit()
+        return True
+    except Exception as e:
+        log.error(f"push_sub_add error: {e}")
+        return False
+
+
+async def push_sub_remove(endpoint: str) -> None:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM push_subs WHERE endpoint=?", (endpoint,))
+            await db.commit()
+    except Exception as e:
+        log.error(f"push_sub_remove error: {e}")
+
+
+async def push_subs() -> List[Dict]:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT endpoint, p256dh, auth FROM push_subs") as cur:
+                return [dict(r) for r in await cur.fetchall()]
+    except Exception as e:
+        log.error(f"push_subs error: {e}")
+        return []

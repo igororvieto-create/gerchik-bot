@@ -68,6 +68,10 @@ class Config:
     BYBIT_API_KEY: str = os.getenv("BYBIT_API_KEY", "").strip()
     BYBIT_SECRET:  str = os.getenv("BYBIT_SECRET",  "").strip()
     NTFY_URL:      str = os.getenv("NTFY_URL",      "").strip()
+    # Уведомления в установленное приложение (Web Push). Закрытый ключ VAPID
+    # — base64url 32 байт; пустой — уведомления выключены.
+    VAPID_PRIVATE_KEY: str = os.getenv("VAPID_PRIVATE_KEY", "").strip()
+    VAPID_SUBJECT: str = os.getenv("VAPID_SUBJECT", "mailto:bot@gerchik.local").strip()
 
     # Scanning
     SCAN_INTERVAL_MIN: int   = _env_int("SCAN_INTERVAL_MIN", 4)

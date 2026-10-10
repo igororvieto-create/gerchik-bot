@@ -237,8 +237,18 @@ async def _close_week(client, week: Dict, now_ms: int) -> bool:
                                       void=void):
         return False
     if priced and not void:
+        week_ret = sum(r['ret'] for r in priced) / len(priced)
         log.info(f"lowvol: неделя {ws} закрыта, {len(priced)} позиций, итог "
-                 f"{sum(r['ret'] for r in priced) / len(priced) * 100:+.3f}%")
+                 f"{week_ret * 100:+.3f}%")
+        try:
+            from notifications.notify import broadcast
+            counted = ws >= FORWARD_START_MS
+            await broadcast("📊 Бумажная «низкая вола»: неделя закрыта",
+                            f"итог недели {week_ret * 100:+.2f}% ({len(priced)} поз.)"
+                            + ("" if counted else " — старое правило, не засчитывается"),
+                            tag="lowvol-week")
+        except Exception as e:
+            log.warning(f"lowvol: уведомление не отправлено — {e}")
     return True
 
 

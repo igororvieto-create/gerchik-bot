@@ -1293,6 +1293,20 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "",
                 )
             except Exception as pe:
                 log.warning(f"run_scan_and_broadcast: send_push({sig.symbol}) failed — {pe}")
+        if sig.score >= 60:
+            # Уведомление в приложение. Подпись «для наблюдения» обязательна:
+            # измеренное матожидание этих сигналов отрицательное, и сообщение
+            # на телефоне не должно читаться как совет входить.
+            try:
+                from notifications.notify import broadcast
+                arrow = "🟢 LONG" if sig.direction == "LONG" else "🔴 SHORT"
+                await broadcast(
+                    f"{arrow} {sig.symbol} · score {sig.score}",
+                    f"вход {sig.entry:g} · стоп {sig.sl:g} · цель {sig.tp2:g}\n"
+                    f"для наблюдения: матожидание стратегии отрицательное",
+                    tag=f"sig-{sig.symbol}")
+            except Exception as pe:
+                log.warning(f"run_scan_and_broadcast: web push({sig.symbol}) — {pe}")
 
     heartbeat = json.dumps({
         "type":         "heartbeat",

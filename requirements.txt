@@ -9,3 +9,6 @@ aiohttp==3.9.5
 numpy==1.26.4
 aiosqlite==0.20.0
 python-multipart==0.0.9
+# Уведомления в приложение (Web Push, notifications/webpush.py): готовые
+# сборки есть; pywebpush не годится — его http-ece только в исходниках.
+cryptography==43.0.3

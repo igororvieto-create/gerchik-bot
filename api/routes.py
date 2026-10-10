@@ -468,6 +468,74 @@ async def get_signals(request: Request, hours: int = 24, limit: int = 100):
     return JSONResponse({"signals": rows, "count": len(rows)})
 
 
+@router.get("/api/push/key")
+async def push_key(request: Request):
+    """Публичный ключ VAPID для подписки браузера на уведомления."""
+    if (deny := _require_token(request)) is not None:
+        return deny
+    from notifications import webpush
+    priv = webpush.load_private_key(cfg.VAPID_PRIVATE_KEY)
+    if priv is None:
+        return JSONResponse({"error": "уведомления не настроены на сервере"},
+                            status_code=503)
+    return JSONResponse({"key": webpush.public_key_b64(priv)})
+
+
+@router.post("/api/push/subscribe")
+async def push_subscribe(request: Request):
+    if (deny := _require_token(request)) is not None:
+        return deny
+    try:
+        body = await request.json()
+        endpoint = str(body["endpoint"])
+        keys = body["keys"]
+        p256dh, auth = str(keys["p256dh"]), str(keys["auth"])
+    except Exception:
+        return JSONResponse({"error": "неверная подписка"}, status_code=400)
+    # Адрес подписки выдаёт push-сервис браузера; принимаем только https.
+    # Иначе подпиской можно было бы заставить бот слать запросы куда угодно.
+    if not endpoint.startswith("https://"):
+        return JSONResponse({"error": "адрес подписки не https"}, status_code=400)
+    from notifications import webpush
+    try:
+        if len(webpush.b64u_dec(p256dh)) != 65 or len(webpush.b64u_dec(auth)) != 16:
+            raise ValueError
+    except Exception:
+        return JSONResponse({"error": "ключи подписки неверной длины"}, status_code=400)
+    if not await db.push_sub_add(endpoint, p256dh, auth):
+        return JSONResponse({"error": "подписка не сохранена"}, status_code=500)
+    return JSONResponse({"ok": True})
+
+
+@router.post("/api/push/test")
+async def push_test(request: Request):
+    if (deny := _require_token(request)) is not None:
+        return deny
+    from notifications.notify import broadcast
+    sent = await broadcast("🔔 Gerchik", "Уведомления работают", tag="test")
+    return JSONResponse({"sent": sent})
+
+
+_ICON_SIZES = {"icon-192.png": 192, "icon-512.png": 512, "apple-touch-icon.png": 180}
+
+
+@router.get("/{name}.png")
+async def app_icon(name: str):
+    fn = f"{name}.png"
+    if fn not in _ICON_SIZES:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    # Готовые файлы из static/ (рисуются tools/make_icons.py): рисование
+    # на лету заняло бы ~14 с и заблокировало бы цикл событий бота.
+    from fastapi.responses import Response
+    try:
+        with open(os.path.join(_static_dir, fn), "rb") as f:
+            data = f.read()
+    except OSError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return Response(data, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
 @router.get("/api/lowvol")
 async def get_lowvol(request: Request):
     """Бумажная стратегия «низкая волатильность» — форвард-тест замера X."""

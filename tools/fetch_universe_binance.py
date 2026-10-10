@@ -169,8 +169,11 @@ async def daily_series(session, sym: str, months: List[str]) -> List[Dict]:
                 # строится по МАКСИМУМАМ и МИНИМУМАМ дня. Канал по закрытиям —
                 # другое правило, и подставить его молча значило бы проверить
                 # не ту гипотезу, что записана.
+                # taker_quote — оборот агрессивных ПОКУПОК в USDT (колонка 10
+                # дампа): поток агрессора для замера XI.
                 seen[ts] = {"ts": ts, "high": float(r[2]), "low": float(r[3]),
-                            "close": float(r[4]), "quote": float(r[7])}
+                            "close": float(r[4]), "quote": float(r[7]),
+                            "taker_quote": float(r[10]) if len(r) > 10 else None}
             except (ValueError, IndexError):
                 continue
     return [seen[k] for k in sorted(seen)]
@@ -205,7 +208,8 @@ def _has_range(path: str) -> bool:
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
         daily = d.get("daily") or []
-        return bool(daily) and "high" in daily[0] and "low" in daily[0]
+        return (bool(daily) and "high" in daily[0] and "low" in daily[0]
+                and "taker_quote" in daily[0])
     except (OSError, ValueError):
         return False
 

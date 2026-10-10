@@ -192,18 +192,22 @@ def training_dates(all_dates: List[int], t: int) -> List[int]:
 
 
 def walk_forward(coins: Dict[str, Dict], all_dates: List[int],
-                 predict_dates: List[int]) -> Tuple[List[Dict], List[np.ndarray]]:
+                 predict_dates: List[int],
+                 cross_fn=None) -> Tuple[List[Dict], List[np.ndarray]]:
     """Прогноз на каждую дату из predict_dates, обучение — только на прошлом.
 
     all_dates — все даты набора по порядку (обучающая история); прогнозы
     делаются только на predict_dates. Метка даты t' известна лишь в
     t' + HOLD_DAYS: в обучение она попадает, когда это время прошло.
     """
+    # cross_fn — другой набор признаков на тех же вселенной, метках, модели
+    # и портфеле (замер XI). По умолчанию — признаки замера IX.
+    cross = cross_fn or cross_section
     cache: Dict[int, Tuple[List[str], np.ndarray, Optional[np.ndarray]]] = {}
 
     def get(t: int):
         if t not in cache:
-            names, X = cross_section(coins, t)
+            names, X = cross(coins, t)
             y = None
             if names:
                 fwd = [_net_forward(coins[s], t) for s in names]

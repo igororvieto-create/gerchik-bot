@@ -300,7 +300,7 @@ input[type=range]::-moz-range-thumb{
 #toast.show{transform:translateX(-50%) translateY(0);opacity:1}
 
 /* ── SCAN INFO BAR ── */
-.scan-bar{display:flex;align-items:center;gap:8px;padding:6px 16px;max-width:1100px;margin:0 auto;font-size:12px;color:var(--muted)}
+.scan-bar{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;padding:6px 16px;max-width:1100px;margin:0 auto;font-size:12px;color:var(--muted)}
 .scan-pulse{width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0}
 .scan-pulse.active{background:var(--accent);animation:pulse 1.2s infinite}
 
@@ -382,7 +382,10 @@ input[type=range]::-moz-range-thumb{
   <span id="lowvol-info" style="display:none;opacity:.75;margin-left:8px"></span>
   <span id="strat-info" style="display:none;opacity:.75;margin-left:8px"></span>
   <span id="risk-info" style="display:none;color:var(--red);margin-left:8px"></span>
-  <span id="env-info" style="display:none;color:var(--red);margin-left:8px"></span>
+  <!-- Предупреждения — отдельными строками во всю ширину: длинный текст в
+       строке статуса раздвигал её за край экрана телефона. -->
+  <div id="env-info" style="display:none;flex-basis:100%;color:var(--red);font-size:12px;overflow-wrap:anywhere;margin:4px 0"></div>
+  <div id="env-leftover" style="display:none;flex-basis:100%;color:var(--muted);font-size:11px;overflow-wrap:anywhere;margin:2px 0"></div>
 </div>
 
 <div class="pos-panel" id="pos-panel">
@@ -1255,11 +1258,18 @@ async function resetPushSubs(){
 }
 
 function renderEnvTypos(d){
-  const el=$('env-info'); if(!el) return;
+  const el=$('env-info'), lo=$('env-leftover');
   const t=(d && Array.isArray(d.env_typos)) ? d.env_typos : [];
-  if(!t.length){ el.textContent=''; el.style.display='none'; return; }
-  el.style.display='';
-  el.textContent='⚠ Переменные окружения НЕ применены: '+t.join('; ');
+  const l=(d && Array.isArray(d.env_leftovers)) ? d.env_leftovers : [];
+  if(el){
+    el.style.display = t.length ? '' : 'none';
+    el.textContent = t.length ? '⚠ Переменные окружения НЕ применены: '+t.join('; ') : '';
+  }
+  // Лишние копии безвредны (правильная переменная задана) — серым, мелко.
+  if(lo){
+    lo.style.display = l.length ? '' : 'none';
+    lo.textContent = l.length ? 'ℹ '+l.join('; ') : '';
+  }
 }
 
 function renderDbState(d){

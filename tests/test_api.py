@@ -405,6 +405,7 @@ def test_env_var_name_with_spaces_is_reported(monkeypatch):
     выключилась, и мутирующие эндпоинты боевого бота оказались открыты
     всем, у кого есть ссылка. Ни одной ошибки при этом не возникло."""
     from core.config import env_name_typos
+    monkeypatch.delenv("DASHBOARD_TOKEN", raising=False)
     monkeypatch.setenv(" DASHBOARD_TOKEN", "secret")
     found = env_name_typos()
     # Недостаточно просто упомянуть имя: сообщение обязано назвать ИМЯ, ПОД
@@ -982,3 +983,27 @@ async def test_icon_route_serves_files_and_nothing_else():
     resp = await R.app_icon("icon-192")
     assert _code(resp) == 200 and resp.body[:4] == b"\x89PNG"
     assert _code(await R.app_icon("../core/db")) == 404
+
+
+
+def test_leftover_copy_is_not_an_alarm_when_the_real_variable_is_set(monkeypatch):
+    """Рабочий DASHBOARD_TOKEN задан, а старая копия с пробелом осталась.
+    Код читает правильную — копия ничего не выключает. Красная тревога
+    «НЕ применены» занимала весь экран телефона и была неправдой."""
+    from core.config import env_name_typos, env_leftovers
+    monkeypatch.setenv("DASHBOARD_TOKEN", "real")
+    monkeypatch.setenv(" DASHBOARD_TOKEN", "old")
+    assert not any("DASHBOARD_TOKEN" in f for f in env_name_typos()), \
+        "безвредная копия подана как тревога"
+    left = env_leftovers()
+    assert any("' DASHBOARD_TOKEN'" in f and "можно удалить" in f for f in left), left
+
+
+def test_status_bar_wraps_on_narrow_screens():
+    """Строка статуса без переноса выталкивала длинное предупреждение за
+    край экрана телефона."""
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
+    rule = html[html.index(".scan-bar{"):].split("}", 1)[0]
+    assert "flex-wrap:wrap" in rule

@@ -442,10 +442,24 @@ _KNOWN_ENV_NAMES = frozenset(
 )
 
 
-def env_name_typos() -> List[str]:
-    """Переменные, чьё ИМЯ почти совпадает с известным параметром.
+def _canonical(raw: str) -> str:
+    """Имя, под которым код читал бы эту переменную, или '' — не наша."""
+    cleaned = raw.strip()
+    if cleaned == raw and raw in _KNOWN_ENV_NAMES:
+        return ""                             # сама правильная
+    up = cleaned.upper()
+    return up if up in _KNOWN_ENV_NAMES else ""
 
-    Возвращает готовые к показу строки. Пусто — значит совпадений нет.
+
+def env_name_typos() -> List[str]:
+    """Переменные, чьё ИМЯ почти совпадает с известным параметром, а
+    правильная при этом НЕ задана — значение реально не применено.
+
+    Если правильная переменная тоже задана, кривая — просто лишняя копия:
+    она ничего не выключает. Её отдаёт env_leftovers(), и показывать её
+    красной тревогой нельзя — так было с ' DASHBOARD_TOKEN' после того, как
+    рабочий токен задали правильным именем: экран телефона занимала
+    «авария», которой нет, а ложная тревога учит не смотреть на настоящие.
     """
     out: List[str] = []
     for raw in os.environ:
@@ -453,14 +467,28 @@ def env_name_typos() -> List[str]:
         if cleaned == raw and raw not in _KNOWN_ENV_NAMES:
             # имя без пробелов и не наше — чужая переменная, не наше дело
             upper = raw.upper()
-            if upper in _KNOWN_ENV_NAMES and upper != raw:
+            if upper in _KNOWN_ENV_NAMES and upper != raw and upper not in os.environ:
                 out.append(f"{raw!r} — код читает {upper}, регистр не совпадает")
             continue
         if cleaned != raw and cleaned.upper() in _KNOWN_ENV_NAMES:
+            if cleaned.upper() in os.environ:
+                continue                       # лишняя копия — см. env_leftovers
             out.append(f"{raw!r} — лишние пробелы в имени, "
                        f"код читает {cleaned.upper()} и НЕ ВИДИТ эту переменную")
         elif cleaned != raw:
             out.append(f"{raw!r} — лишние пробелы в имени переменной")
+    return sorted(out)
+
+
+def env_leftovers() -> List[str]:
+    """Кривые копии переменных, правильные версии которых ТОЖЕ заданы.
+    Безвредны: код читает правильную. Их можно удалить в Railway."""
+    out: List[str] = []
+    for raw in os.environ:
+        canon = _canonical(raw)
+        if canon and canon != raw and canon in os.environ:
+            out.append(f"{raw!r} — лишняя копия {canon}, рабочая задана; "
+                       f"можно удалить в Railway")
     return sorted(out)
 
 

@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse as _BaseJSONResponse
 
 from core.state import state
 from core import db
-from core.config import cfg, env_name_typos as cfg_env_typos
+from core.config import cfg, env_name_typos as cfg_env_typos, env_leftovers
 
 log = logging.getLogger("api")
 router = APIRouter()
@@ -630,6 +630,7 @@ async def get_stats(request: Request):
         # " DASHBOARD_TOKEN" с пробелом молча отключила защиту дашборда, и
         # заметить это было нельзя ничем, кроме чтения настроек глазами.
         "env_typos": cfg_env_typos(),
+        "env_leftovers": env_leftovers(),
         # Сколько минут монитор не проходил успешно. Он досылает и держит
         # стоп: если он падает, позиции без присмотра, а прежде наружу об
         # этом не выходило ничего. None — ни одного успешного прохода ещё

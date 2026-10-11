@@ -17,7 +17,9 @@
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-title" content="Gerchik"/>
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<!-- «black», а не «black-translucent»: прозрачная строка статуса
+     заводила верхнюю панель под часы и вырез, кнопки перекрывались. -->
+<meta name="apple-mobile-web-app-status-bar-style" content="black"/>
 <title>Gerchik</title>
 <style>
 :root{
@@ -331,7 +333,7 @@ input[type=range]::-moz-range-thumb{
   <div class="tb-spacer"></div>
   <button class="tb-btn" onclick="openHistory()">📜</button>
   <button class="tb-btn" id="diag-btn" onclick="openDiag()">🔧</button>
-  <button class="tb-btn" id="push-btn" onclick="enablePush()" title="Уведомления на телефон">🔔</button>
+  <button class="tb-btn" id="push-btn" onclick="enablePush()" title="Уведомления на телефон">🔕</button>
   <button class="tb-btn" onclick="openSettings()">⚙️</button>
   <button class="tb-btn primary" id="scan-btn" onclick="doScan()">🔍 Скан</button>
 </div>
@@ -584,6 +586,9 @@ input[type=range]::-moz-range-thumb{
 
     </div>
     <div class="save-msg" id="save-msg"></div>
+    <div style="text-align:center;margin-top:6px">
+      <a href="#" onclick="resetPushSubs();return false" style="font-size:12px;color:var(--muted)">сбросить подписки на уведомления</a>
+    </div>
     <div class="settings-footer">
       <button class="btn-cancel" onclick="closeModal('settings-modal')">Отмена</button>
       <button class="btn-save" onclick="saveSettings()">💾 Сохранить</button>
@@ -1167,15 +1172,24 @@ setInterval(refreshLowvol, 5*60*1000);
 function _isStandalone(){
   return window.matchMedia('(display-mode: standalone)').matches || navigator.standalone===true;
 }
-function _isIOS(){ return /iphone|ipad|ipod/i.test(navigator.userAgent); }
+function _isIOS(){
+  // iPadOS выдаёт себя за Mac: отличаем по сенсорному экрану.
+  return /iphone|ipad|ipod/i.test(navigator.userAgent)
+    || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+}
 function _b64uToBytes(s){
   const b=atob((s+'='.repeat((4-s.length%4)%4)).replace(/-/g,'+').replace(/_/g,'/'));
   return Uint8Array.from(b, c=>c.charCodeAt(0));
 }
-let _swReg=null;
+function _sameKey(buf, b64){
+  if(!buf) return false;
+  const a=new Uint8Array(buf), b=_b64uToBytes(b64);
+  return a.length===b.length && a.every((x,i)=>x===b[i]);
+}
+let _swReg=null, _swFailed=false;
 if('serviceWorker' in navigator){
   navigator.serviceWorker.register('/sw.js').then(r=>{ _swReg=r; refreshPushBtn(); })
-    .catch(()=>{});
+    .catch(()=>{ _swFailed=true; refreshPushBtn(); });
 }
 async function refreshPushBtn(){
   const b=$('push-btn'); if(!b) return;
@@ -1185,37 +1199,59 @@ async function refreshPushBtn(){
   b.title = on ? 'Уведомления включены (нажать — проверить)' : 'Включить уведомления на телефон';
 }
 async function enablePush(){
-  // На iPhone уведомления есть только у приложения, добавленного на экран
-  // «Домой» (iOS 16.4+). В обычной вкладке Safari pushManager отсутствует,
-  // и молчаливый отказ выглядел бы как поломка кнопки.
+  // На iPhone/iPad уведомления есть только у приложения на экране «Домой»
+  // (iOS 16.4+): в обычной вкладке pushManager отсутствует.
   if(_isIOS() && !_isStandalone()){
     alert('На iPhone: Safari → «Поделиться» → «На экран „Домой“», '
-         +'затем откройте Gerchik с экрана и нажмите 🔔 снова.');
+         +'затем откройте Gerchik с экрана и нажмите 🔕 снова.');
     return;
   }
-  if(!('serviceWorker' in navigator) || !('PushManager' in window)){
-    alert('Этот браузер не поддерживает уведомления.'); return;
+  if(_swFailed || !('serviceWorker' in navigator) || !('PushManager' in window) || !_swReg){
+    alert('В этом браузере уведомления недоступны (возможно, запрещено хранилище сайта).');
+    return;
   }
   try{
-    const reg=_swReg || await navigator.serviceWorker.ready;
-    let sub=await reg.pushManager.getSubscription();
-    if(sub){
-      const r=await fetch('/api/push/test',{method:'POST'}).then(r=>r.json());
-      alert(r.sent ? 'Уведомления включены — отправил проверочное.' : 'Подписка есть, но доставка не прошла.');
-      return;
-    }
-    const perm=await Notification.requestPermission();
-    if(perm!=='granted'){ alert('Разрешение на уведомления не дано.'); return; }
+    // Ключ — ДО запроса разрешения: если сервер не настроен, разрешение
+    // не запрашивается зря.
     const k=await fetch('/api/push/key').then(r=>r.json());
     if(!k.key){ alert(k.error || 'Уведомления не настроены на сервере.'); return; }
-    sub=await reg.pushManager.subscribe({userVisibleOnly:true,
-                                          applicationServerKey:_b64uToBytes(k.key)});
+    if(Notification.permission==='denied'){
+      alert('Уведомления запрещены. Разрешите их в настройках телефона для Gerchik и нажмите снова.');
+      return;
+    }
+    if(Notification.permission!=='granted'){
+      const perm=await Notification.requestPermission();
+      if(perm!=='granted'){ alert('Разрешение на уведомления не дано.'); return; }
+    }
+    let sub=await _swReg.pushManager.getSubscription();
+    // Подписка под СТАРЫМ ключом сервера (ключ сменили) недоставляема —
+    // пересоздаём, иначе кнопка навсегда показывала бы «включены».
+    if(sub && !_sameKey(sub.options && sub.options.applicationServerKey, k.key)){
+      try{ await sub.unsubscribe(); }catch{}
+      sub=null;
+    }
+    if(!sub) sub=await _swReg.pushManager.subscribe({userVisibleOnly:true,
+                                                    applicationServerKey:_b64uToBytes(k.key)});
+    // Подписка отправляется на сервер ПРИ КАЖДОМ нажатии: если база была
+    // пересоздана или прошлая отправка сорвалась, это и есть способ выйти из
+    // состояния «в браузере подписка есть, на сервере нет».
     const r=await fetch('/api/push/subscribe',{method:'POST',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify(sub)});
-    if(!r.ok){ alert('Сервер не сохранил подписку.'); return; }
-    await fetch('/api/push/test',{method:'POST'});
+    if(!r.ok){ const e=await r.json().catch(()=>({})); alert(e.error||'Сервер не сохранил подписку.'); return; }
+    const t=await fetch('/api/push/test',{method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({endpoint:sub.endpoint})})
+      .then(r=>r.json()).catch(()=>({}));
+    if(!t.sent) alert('Подписка сохранена, но проверочное не доставлено — попробуйте позже.');
     refreshPushBtn();
   }catch(e){ alert('Не удалось включить уведомления: '+e.message); }
+}
+async function resetPushSubs(){
+  if(!confirm('Удалить все подписки на уведомления (на всех устройствах)? '
+             +'Нужно после смены токена.')) return;
+  await fetch('/api/push/reset',{method:'POST'});
+  try{ const s=_swReg && await _swReg.pushManager.getSubscription(); if(s) await s.unsubscribe(); }catch{}
+  refreshPushBtn();
+  alert('Подписки удалены. Нажмите 🔕, чтобы подписать это устройство заново.');
 }
 
 function renderEnvTypos(d){

@@ -898,20 +898,61 @@ def test_lowvol_dashboard_text_by_running_it_in_node():
 
 
 async def test_push_subscription_validation(with_token, tmp_path, monkeypatch):
-    """Адрес подписки — только https: иначе подпиской можно было бы
-    заставить бот слать запросы на любой адрес, в том числе внутренний."""
+    """Только адреса push-сервисов браузеров и только настоящие ключи P-256.
+
+    «https://» мало: https://localhost, внутренние адреса Railway и
+    редиректы были бы достижимы. Ключ из 65 произвольных байт ломал
+    шифрование при каждой рассылке — для всех подписчиков сразу."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from notifications import webpush as wp
     d = R.db
     monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "s.db"))
     await d.init_db()
-    from notifications import webpush as wp
-    good = {"endpoint": "https://fcm.googleapis.com/x",
-            "keys": {"p256dh": wp.b64u(b"\x04" + b"1" * 64), "auth": wp.b64u(b"a" * 16)}}
-    bad_scheme = {**good, "endpoint": "http://169.254.169.254/latest"}
-    bad_len = {**good, "keys": {"p256dh": "abc", "auth": wp.b64u(b"a" * 16)}}
-    for body, code in ((bad_scheme, 400), (bad_len, 400), (good, 200)):
+    real = wp.b64u(ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(
+        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint))
+    auth = wp.b64u(b"a" * 16)
+    good = {"endpoint": "https://fcm.googleapis.com/fcm/send/x",
+            "keys": {"p256dh": real, "auth": auth}}
+    cases = [
+        ({**good, "endpoint": "http://fcm.googleapis.com/x"}, 400),
+        ({**good, "endpoint": "https://localhost/x"}, 400),
+        ({**good, "endpoint": "https://169.254.169.254/latest"}, 400),
+        ({**good, "endpoint": "https://worker.railway.internal/x"}, 400),
+        ({**good, "endpoint": "https://user:pw@fcm.googleapis.com/x"}, 400),
+        ({**good, "endpoint": "https://fcm.googleapis.com.evil.com/x"}, 400),
+        ({**good, "keys": {"p256dh": wp.b64u(b"\x04" + b"\x01" * 64), "auth": auth}}, 400),
+        (good, 200),
+        ({**good, "endpoint": "https://web.push.apple.com/abc"}, 200),
+    ]
+    for body, code in cases:
         resp = await R.push_subscribe(FakeRequest(with_token, body=body, method="POST"))
-        assert _code(resp) == code, (body, _body(resp))
-    assert len(await d.push_subs()) == 1
+        assert _code(resp) == code, (body["endpoint"], _body(resp))
+    assert len(await d.push_subs()) == 2
+
+
+async def test_push_subscriptions_are_capped(with_token, tmp_path, monkeypatch):
+    """Без предела украденный токен позволял набить таблицу подписками:
+    шифрование синхронное, миллион строк — минуты CPU на каждую рассылку."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from notifications import webpush as wp
+    d = R.db
+    monkeypatch.setattr(d, "DB_PATH", str(tmp_path / "c.db"))
+    await d.init_db()
+    real = wp.b64u(ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(
+        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint))
+    for i in range(R.PUSH_SUBS_MAX + 2):
+        body = {"endpoint": f"https://fcm.googleapis.com/fcm/send/{i}",
+                "keys": {"p256dh": real, "auth": wp.b64u(b"a" * 16)}}
+        resp = await R.push_subscribe(FakeRequest(with_token, body=body, method="POST"))
+        assert _code(resp) == (200 if i < R.PUSH_SUBS_MAX else 409)
+    # повторная отправка СУЩЕСТВУЮЩЕЙ подписки при заполненной таблице — не отказ
+    again = {"endpoint": "https://fcm.googleapis.com/fcm/send/0",
+             "keys": {"p256dh": real, "auth": wp.b64u(b"a" * 16)}}
+    assert _code(await R.push_subscribe(FakeRequest(with_token, body=again, method="POST"))) == 200
+    assert _code(await R.push_reset(FakeRequest(with_token, body={}, method="POST"))) == 200
+    assert await d.push_subs() == []
 
 
 async def test_push_subscribe_requires_token(monkeypatch):

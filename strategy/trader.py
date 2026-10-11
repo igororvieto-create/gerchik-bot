@@ -975,6 +975,11 @@ async def monitor_positions(client: BybitClient) -> None:
             # API failure — do NOT wipe positions; wait for next cycle
             log.warning("monitor_positions: get_positions API failed, skipping close check")
             return
+        # Отметка ИМЕННО успешного чтения позиций с биржи. last_monitor_ok
+        # ставится и при раннем выходе выше, то есть по ней не отличить
+        # «монитор проверил стопы» от «биржа не ответила, проверять нечего».
+        # Сторож уведомлений (notifications/notify.py) смотрит на эту.
+        state.last_positions_ok = datetime.utcnow()
 
         live_map = {p["symbol"]: p for p in live}
         now_utc = datetime.utcnow()

@@ -32,6 +32,32 @@ log = logging.getLogger("webpush")
 RECORD_SIZE = 4096
 
 
+# Хосты push-сервисов браузеров. Подписку на любой другой адрес бот не
+# принимает: иначе ею можно было бы заставить его слать запросы куда угодно.
+_PUSH_HOSTS = ("fcm.googleapis.com", "updates.push.services.mozilla.com")
+_PUSH_SUFFIXES = (".push.apple.com", ".notify.windows.com")
+
+
+def allowed_endpoint(endpoint: str) -> bool:
+    u = urlparse(endpoint)
+    host = (u.hostname or "").lower()
+    return (u.scheme == "https" and not u.username and not u.password
+            and (host in _PUSH_HOSTS or host.endswith(_PUSH_SUFFIXES)))
+
+
+def valid_keys(p256dh_b64: str, auth_b64: str) -> bool:
+    """Ключ — настоящая точка P-256, а не 65 произвольных байт: иначе
+    шифрование падало при каждой рассылке."""
+    try:
+        pub = b64u_dec(p256dh_b64)
+        if len(pub) != 65 or len(b64u_dec(auth_b64)) != 16:
+            return False
+        ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), pub)
+        return True
+    except Exception:
+        return False
+
+
 def b64u(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
@@ -127,7 +153,11 @@ async def send(session: aiohttp.ClientSession, sub: Dict, message: Dict,
                "Content-Type": "application/octet-stream",
                "TTL": str(ttl), "Urgency": urgency}
     try:
+        # Без переходов по редиректам: push-сервисы не редиректят, а переход
+        # уводил бы POST с проверенного https-адреса на любой другой,
+        # включая внутренние http-адреса (проверено ревью).
         async with session.post(sub["endpoint"], data=body, headers=headers,
+                                allow_redirects=False,
                                 timeout=aiohttp.ClientTimeout(total=15)) as r:
             text = "" if r.status < 300 else (await r.text())[:200]
             return r.status, text

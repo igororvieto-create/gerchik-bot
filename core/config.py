@@ -71,7 +71,13 @@ class Config:
     # Уведомления в установленное приложение (Web Push). Закрытый ключ VAPID
     # — base64url 32 байт; пустой — уведомления выключены.
     VAPID_PRIVATE_KEY: str = os.getenv("VAPID_PRIVATE_KEY", "").strip()
-    VAPID_SUBJECT: str = os.getenv("VAPID_SUBJECT", "mailto:bot@gerchik.local").strip()
+    # Контакт отправителя для push-сервисов (RFC 8292). Apple отвергает
+    # выдуманный адрес, поэтому по умолчанию — реальный адрес самого
+    # дашборда (Railway кладёт домен в RAILWAY_PUBLIC_DOMAIN).
+    VAPID_SUBJECT: str = (os.getenv("VAPID_SUBJECT", "").strip()
+                          or (f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN', '').strip()}"
+                              if os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
+                              else "mailto:bot@example.com"))
 
     # Scanning
     SCAN_INTERVAL_MIN: int   = _env_int("SCAN_INTERVAL_MIN", 4)

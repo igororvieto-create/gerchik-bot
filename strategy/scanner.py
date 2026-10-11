@@ -1298,9 +1298,11 @@ async def run_scan_and_broadcast(client: BybitClient, ntfy_url: str = "",
             # измеренное матожидание этих сигналов отрицательное, и сообщение
             # на телефоне не должно читаться как совет входить.
             try:
-                from notifications.notify import broadcast
+                from notifications.notify import broadcast_bg
                 arrow = "🟢 LONG" if sig.direction == "LONG" else "🔴 SHORT"
-                await broadcast(
+                # В фоне: зависший push-сервис не должен задерживать вход по
+                # следующему сигналу этого же скана.
+                broadcast_bg(
                     f"{arrow} {sig.symbol} · score {sig.score}",
                     f"вход {sig.entry:g} · стоп {sig.sl:g} · цель {sig.tp2:g}\n"
                     f"для наблюдения: матожидание стратегии отрицательное",

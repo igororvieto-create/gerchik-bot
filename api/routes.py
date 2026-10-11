@@ -468,6 +468,9 @@ async def get_signals(request: Request, hours: int = 24, limit: int = 100):
     return JSONResponse({"signals": rows, "count": len(rows)})
 
 
+PUSH_SUBS_MAX = 20
+
+
 @router.get("/api/push/key")
 async def push_key(request: Request):
     """Публичный ключ VAPID для подписки браузера на уведомления."""
@@ -492,16 +495,19 @@ async def push_subscribe(request: Request):
         p256dh, auth = str(keys["p256dh"]), str(keys["auth"])
     except Exception:
         return JSONResponse({"error": "неверная подписка"}, status_code=400)
-    # Адрес подписки выдаёт push-сервис браузера; принимаем только https.
-    # Иначе подпиской можно было бы заставить бот слать запросы куда угодно.
-    if not endpoint.startswith("https://"):
-        return JSONResponse({"error": "адрес подписки не https"}, status_code=400)
     from notifications import webpush
-    try:
-        if len(webpush.b64u_dec(p256dh)) != 65 or len(webpush.b64u_dec(auth)) != 16:
-            raise ValueError
-    except Exception:
-        return JSONResponse({"error": "ключи подписки неверной длины"}, status_code=400)
+    # Только адреса известных push-сервисов: проверки «https://» мало —
+    # https://localhost, внутренние адреса Railway и редиректы были бы
+    # достижимы, и подпиской можно было бы направлять запросы бота куда угодно.
+    if not webpush.allowed_endpoint(endpoint):
+        return JSONResponse({"error": "адрес подписки не push-сервис браузера"},
+                            status_code=400)
+    if not webpush.valid_keys(p256dh, auth):
+        return JSONResponse({"error": "ключи подписки неверны"}, status_code=400)
+    existing = {s["endpoint"] for s in await db.push_subs()}
+    if endpoint not in existing and len(existing) >= PUSH_SUBS_MAX:
+        return JSONResponse({"error": f"подписок уже {PUSH_SUBS_MAX} — лишние "
+                             f"удалите кнопкой «сбросить подписки»"}, status_code=409)
     if not await db.push_sub_add(endpoint, p256dh, auth):
         return JSONResponse({"error": "подписка не сохранена"}, status_code=500)
     return JSONResponse({"ok": True})
@@ -512,8 +518,26 @@ async def push_test(request: Request):
     if (deny := _require_token(request)) is not None:
         return deny
     from notifications.notify import broadcast
-    sent = await broadcast("🔔 Gerchik", "Уведомления работают", tag="test")
+    # Проверочное — на КОНКРЕТНУЮ подписку этого устройства: иначе доставка
+    # на другое устройство отвечала бы «работает» там, где подписки нет.
+    try:
+        endpoint = (await request.json()).get("endpoint")
+    except Exception:
+        endpoint = None
+    sent = await broadcast("🔔 Gerchik", "Уведомления работают", tag="test",
+                           only_endpoint=endpoint)
     return JSONResponse({"sent": sent})
+
+
+@router.post("/api/push/reset")
+async def push_reset(request: Request):
+    """Удалить ВСЕ подписки. Нужна после смены токена: подписки, сделанные
+    украденным токеном, иначе продолжали бы получать сигналы."""
+    if (deny := _require_token(request)) is not None:
+        return deny
+    for s in await db.push_subs():
+        await db.push_sub_remove(s["endpoint"])
+    return JSONResponse({"ok": True})
 
 
 _ICON_SIZES = {"icon-192.png": 192, "icon-512.png": 512, "apple-touch-icon.png": 180}

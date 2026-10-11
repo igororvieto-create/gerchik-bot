@@ -179,6 +179,8 @@ class AppState:
         # зелёным. Отмечаем время последнего УСПЕШНОГО прохода, чтобы
         # «работает» отличалось от «крутится вхолостую».
         self.last_monitor_ok: Optional[datetime] = None
+        # Последнее УСПЕШНОЕ чтение позиций с биржи монитором (приватный API).
+        self.last_positions_ok: Optional[datetime] = None
         self.last_monitor_error: str = ""
         self.signal_seen: Dict[str, datetime] = {}  # symbol → last broadcast time
         # Daily circuit breaker — defined here (not attached lazily) so a read
